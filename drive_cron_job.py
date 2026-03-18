@@ -146,9 +146,7 @@ def _record_drive_status(
 
     now = _now_iso()
     props: Dict[str, str] = {"mm_status": status}
-    if status == "processed":
-        props["processed_at"] = now
-    elif status == "failed":
+    if status == "failed":
         props["failed_at"] = now
         if error_message:
             props["mm_error"] = str(error_message)[:500]
@@ -243,15 +241,14 @@ def run_drive_polling_job_once(
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
                 run_pipeline_from_cli(str(local_path.resolve()), auto_selected_audio=False)
 
-                # TODO: re-enable after resolving appProperties 124-byte 403
-                # _record_drive_status(
-                #     drive_service=drive_service,
-                #     file_item=item,
-                #     status="processed",
-                #     status_backend=status_backend,
-                #     processed_folder_id=processed_folder_id,
-                #     failed_folder_id=failed_folder_id,
-                # )
+                _record_drive_status(
+                    drive_service=drive_service,
+                    file_item=item,
+                    status="processed",
+                    status_backend=status_backend,
+                    processed_folder_id=processed_folder_id,
+                    failed_folder_id=failed_folder_id,
+                )
                 processed_count += 1
                 logger.info("DRIVE_CRON_PROCESSED: file_id=%s file_name=%s", file_id, file_name)
             except Exception as exc:
