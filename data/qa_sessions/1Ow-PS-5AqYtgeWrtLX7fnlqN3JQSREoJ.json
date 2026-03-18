@@ -1,0 +1,18 @@
+{
+  "meeting_id": "1Ow-PS-5AqYtgeWrtLX7fnlqN3JQSREoJ",
+  "drive_folder_id": "1Ow-PS-5AqYtgeWrtLX7fnlqN3JQSREoJ",
+  "docs_url": "https://docs.google.com/document/d/1nHnTTmHu-3zUYiHlB1bOak9dP7y5-c7yqTa1NfFahKs/edit",
+  "status": "closed",
+  "close_reason": "次の会議開始による打ち切り",
+  "closed_at": "2026-03-17T10:16:55.492272+00:00",
+  "ambiguity_questions": [
+    "この会議で決まったことは何ですか？",
+    "この会議のNext Actionの担当者は何ですか？",
+    "この会議のNext Actionの期限は何ですか？"
+  ],
+  "current_question_index": 0,
+  "answers": [],
+  "last_user_reply_at": "",
+  "created_at": "2026-03-17T10:15:48.971210+00:00",
+  "updated_at": "2026-03-17T10:16:55.492284+00:00"
+}

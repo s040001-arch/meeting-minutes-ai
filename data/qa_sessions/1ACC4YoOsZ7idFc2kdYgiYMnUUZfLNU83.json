@@ -1,0 +1,40 @@
+{
+  "meeting_id": "1ACC4YoOsZ7idFc2kdYgiYMnUUZfLNU83",
+  "drive_folder_id": "1ACC4YoOsZ7idFc2kdYgiYMnUUZfLNU83",
+  "docs_url": "https://docs.google.com/document/d/1b_u1nrJQkFLe6RIa9X9nndZbUgsTprCXBX8y-hRDWrE/edit",
+  "status": "completed",
+  "close_reason": "",
+  "closed_at": "",
+  "ambiguity_questions": [
+    "この会議で決まったことは何ですか？",
+    "この会議のNext Actionの担当者は何ですか？",
+    "この会議のNext Actionの期限は何ですか？"
+  ],
+  "current_question_index": 3,
+  "answers": [
+    {
+      "question_index": 0,
+      "question": "この会議で決まったことは何ですか？",
+      "answer": "",
+      "is_skipped": true,
+      "answered_at": "2026-03-17T12:02:34.939699+00:00"
+    },
+    {
+      "question_index": 1,
+      "question": "この会議のNext Actionの担当者は何ですか？",
+      "answer": "",
+      "is_skipped": true,
+      "answered_at": "2026-03-17T12:03:59.168333+00:00"
+    },
+    {
+      "question_index": 2,
+      "question": "この会議のNext Actionの期限は何ですか？",
+      "answer": "",
+      "is_skipped": true,
+      "answered_at": "2026-03-17T12:04:08.683607+00:00"
+    }
+  ],
+  "last_user_reply_at": "2026-03-17T12:04:08.683634+00:00",
+  "created_at": "2026-03-17T12:02:25.634458+00:00",
+  "updated_at": "2026-03-17T12:04:34.275339+00:00"
+}

@@ -1,0 +1,7 @@
+openai>=1.30.0
+anthropic>=0.34.0
+python-dotenv>=1.0.1
+google-api-python-client>=2.149.0
+google-auth>=2.35.0
+pydub>=0.25.1
+flask>=3.0.0
