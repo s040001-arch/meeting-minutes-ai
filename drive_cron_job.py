@@ -185,11 +185,18 @@ def run_drive_polling_job_once(
 
     targets = []
     for _item in all_files:
+        _app_props = _item.get("appProperties") or {}
+        _status = str(_app_props.get("mm_status") or "").strip().lower() or "(empty)"
+        logger.info(
+            "DRIVE_CRON_FILTER: file_id=%s file_name=%s mm_status=%s app_props=%s",
+            _item.get("id", ""),
+            _item.get("name", ""),
+            _status,
+            _app_props,
+        )
         if _is_unprocessed(_item):
             targets.append(_item)
         else:
-            _app_props = _item.get("appProperties") or {}
-            _status = str(_app_props.get("mm_status") or "").strip().lower() or "(empty)"
             logger.info(
                 "DRIVE_CRON_SKIP: file_id=%s file_name=%s reason=mm_status=%s",
                 _item.get("id", ""),
