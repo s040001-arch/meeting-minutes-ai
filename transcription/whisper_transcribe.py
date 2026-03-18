@@ -9,7 +9,7 @@ from config.settings import settings
 from utils.logger import logger
 
 _WHISPER_MAX_BYTES: int = 24 * 1024 * 1024  # 24 MB (OpenAI limit is 25 MB)
-_WHISPER_MAX_CHUNK_SECONDS: float = 1390.0
+_WHISPER_MAX_CHUNK_SECONDS: float = 300.0
 _WHISPER_DURATION_LIMIT_SECONDS: float = 1400.0
 _WHISPER_SPLIT_SAMPLE_RATE: int = 16000
 _WHISPER_SPLIT_CHANNELS: int = 1
@@ -147,7 +147,17 @@ def _split_and_transcribe(file_path: str) -> str:
         1.0,
         (_WHISPER_MAX_BYTES * _WHISPER_SPLIT_SIZE_SAFETY_MARGIN) / bytes_per_second,
     )
-    chunk_sec = min(_WHISPER_MAX_CHUNK_SECONDS, max_chunk_sec_by_size, duration_sec)
+    max_chunk_seconds = float(
+        getattr(settings, "WHISPER_MAX_CHUNK_SECONDS", _WHISPER_MAX_CHUNK_SECONDS)
+    )
+    chunk_sec = min(max_chunk_seconds, max_chunk_sec_by_size, duration_sec)
+    logger.info(
+        "WHISPER_SPLIT_PLAN: duration_sec=%s total_bytes=%s chunk_sec=%s max_chunk_seconds=%s",
+        duration_sec,
+        total_bytes,
+        chunk_sec,
+        max_chunk_seconds,
+    )
 
     chunks_text: List[str] = []
     with tempfile.TemporaryDirectory() as tmp_dir:

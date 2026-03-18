@@ -315,7 +315,7 @@ def preprocess_transcript_with_gpt(
         settings, "OPENAI_GPT_PREPROCESS_MODEL", "gpt-4.1-mini"
     )
     temperature = float(getattr(settings, "GPT_PREPROCESS_TEMPERATURE", 0))
-    timeout = float(getattr(settings, "GPT_PREPROCESS_TIMEOUT", 60))
+    timeout = float(getattr(settings, "GPT_PREPROCESS_TIMEOUT", 120))
     chunk_size = int(getattr(settings, "GPT_PREPROCESS_CHUNK_SIZE", _GPT_PREPROCESS_CHUNK_SIZE))
 
     logger.info(
