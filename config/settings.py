@@ -68,7 +68,6 @@ class Settings:
         self.CLAUDE_MAX_TOKENS: int = int(os.getenv("CLAUDE_MAX_TOKENS", "4000"))
         self.CLAUDE_TEMPERATURE: float = float(os.getenv("CLAUDE_TEMPERATURE", "0"))
 
-        self.GOOGLE_SERVICE_ACCOUNT_FILE: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "")
         self.GOOGLE_DRIVE_BASE_FOLDER_ID: str = os.getenv("GOOGLE_DRIVE_BASE_FOLDER_ID", "")
         if not self.GOOGLE_DRIVE_BASE_FOLDER_ID:
             self.GOOGLE_DRIVE_BASE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
@@ -114,41 +113,31 @@ class Settings:
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
     def get_google_credentials(self) -> Credentials:
-        from google.auth.transport.requests import Request as GoogleAuthRequest
-        from google.oauth2.credentials import Credentials as UserCredentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
+        import json
 
         scopes = [
             "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/documents",
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
         ]
 
-        oauth_token_file = os.getenv("GOOGLE_OAUTH_TOKEN_FILE", str(BASE_DIR / "google_oauth_token.json"))
-        oauth_client_secret_file = os.getenv(
-            "GOOGLE_OAUTH_CLIENT_SECRET_FILE",
-            str(BASE_DIR / "google_oauth_client_secret.json"),
+        service_account_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not service_account_json_str:
+            raise ValueError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set. "
+                "Please provide Service Account JSON as a string."
+            )
+
+        try:
+            service_account_info = json.loads(service_account_json_str)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON as JSON: {exc}"
+            )
+
+        credentials = ServiceAccountCredentials.from_service_account_info(
+            service_account_info,
+            scopes=scopes,
         )
-
-        user_credentials = None
-
-        if oauth_token_file and os.path.exists(oauth_token_file):
-            user_credentials = UserCredentials.from_authorized_user_file(oauth_token_file, scopes=scopes)
-
-        if user_credentials and user_credentials.expired and user_credentials.refresh_token:
-            user_credentials.refresh(GoogleAuthRequest())
-            with open(oauth_token_file, "w", encoding="utf-8") as f:
-                f.write(user_credentials.to_json())
-
-        if not user_credentials or not user_credentials.valid:
-            if not oauth_client_secret_file or not os.path.exists(oauth_client_secret_file):
-                raise ValueError("GOOGLE_OAUTH_CLIENT_SECRET_FILE is not set or not found.")
-            flow = InstalledAppFlow.from_client_secrets_file(oauth_client_secret_file, scopes=scopes)
-            user_credentials = flow.run_local_server(port=0)
-            with open(oauth_token_file, "w", encoding="utf-8") as f:
-                f.write(user_credentials.to_json())
-
-        return user_credentials
+        return credentials
 
     def get_speaker_labeling_config(self) -> Dict[str, Any]:
         return {
