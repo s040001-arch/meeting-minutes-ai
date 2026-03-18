@@ -1,8 +1,9 @@
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Tuple
 
-from openai import OpenAI
+from openai import InternalServerError, OpenAI
 
 from config.settings import settings
 from utils.logger import logger
@@ -15,6 +16,29 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 _TRANSCRIPTION_SKIPPED_NO_QUOTA = "[TRANSCRIPTION_SKIPPED_NO_QUOTA]"
 _TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND = "[TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND]"
+
+
+def _create_whisper_transcription(audio_file, source_path: str):
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            return client.audio.transcriptions.create(
+                model=settings.WHISPER_MODEL,
+                file=audio_file,
+                language=settings.WHISPER_LANGUAGE,
+            )
+        except InternalServerError:
+            if attempt >= max_retries:
+                raise
+            backoff_sec = 2**attempt
+            logger.warning(
+                "Whisper InternalServerError(500). Retrying in %s sec (%s/%s): %s",
+                backoff_sec,
+                attempt + 1,
+                max_retries,
+                source_path,
+            )
+            time.sleep(backoff_sec)
 
 
 def _extract_chunk_index(file_path: str) -> int:
@@ -37,11 +61,7 @@ def _transcribe_single_chunk(file_path: str) -> Tuple[int, str]:
 
     with open(file_path, "rb") as audio_file:
         try:
-            response = client.audio.transcriptions.create(
-                model=settings.WHISPER_MODEL,
-                file=audio_file,
-                language=settings.WHISPER_LANGUAGE,
-            )
+            response = _create_whisper_transcription(audio_file=audio_file, source_path=file_path)
         except Exception as exc:
             error_text = str(exc)
             if "insufficient_quota" in error_text or "429" in error_text:
@@ -139,11 +159,7 @@ def _split_and_transcribe(file_path: str) -> str:
             )
             with open(chunk_path, "rb") as f:
                 try:
-                    response = client.audio.transcriptions.create(
-                        model=settings.WHISPER_MODEL,
-                        file=f,
-                        language=settings.WHISPER_LANGUAGE,
-                    )
+                    response = _create_whisper_transcription(audio_file=f, source_path=chunk_path)
                 except Exception as exc:
                     error_text = str(exc)
                     if "insufficient_quota" in error_text or "429" in error_text:
