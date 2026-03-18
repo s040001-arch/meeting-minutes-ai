@@ -177,6 +177,25 @@ def _split_and_transcribe(file_path: str) -> str:
                     file_path,
                 )
                 return _TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND
+            except subprocess.CalledProcessError as exc:
+                stderr_text = ""
+                if getattr(exc, "stderr", None):
+                    try:
+                        stderr_text = exc.stderr.decode("utf-8", errors="ignore")
+                    except Exception:
+                        stderr_text = str(exc.stderr)
+                logger.warning(
+                    "ffmpeg split failed. returncode=%s chunk_index=%s offset=%s chunk_sec=%s path=%s stderr=%s",
+                    exc.returncode,
+                    chunk_index,
+                    offset,
+                    chunk_sec,
+                    file_path,
+                    stderr_text[:1000],
+                )
+                offset += chunk_sec
+                chunk_index += 1
+                continue
             logger.info("Transcribing split chunk %d: %s", chunk_index, chunk_path)
             chunk_obj = Path(chunk_path)
             chunk_exists = chunk_obj.exists()
