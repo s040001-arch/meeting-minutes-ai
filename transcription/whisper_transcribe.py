@@ -11,6 +11,10 @@ from utils.logger import logger
 _WHISPER_MAX_BYTES: int = 24 * 1024 * 1024  # 24 MB (OpenAI limit is 25 MB)
 _WHISPER_MAX_CHUNK_SECONDS: float = 1390.0
 _WHISPER_DURATION_LIMIT_SECONDS: float = 1400.0
+_WHISPER_SPLIT_SAMPLE_RATE: int = 16000
+_WHISPER_SPLIT_CHANNELS: int = 1
+_WHISPER_SPLIT_BYTES_PER_SAMPLE: int = 2  # pcm_s16le
+_WHISPER_SPLIT_SIZE_SAFETY_MARGIN: float = 0.85
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
@@ -134,7 +138,16 @@ def _split_and_transcribe(file_path: str) -> str:
         logger.warning("ffprobe failed (%s). Estimating duration from file size.", exc)
         duration_sec = total_bytes / 16000  # rough fallback: ~16 KB/s for m4a
 
-    chunk_sec = min(_WHISPER_MAX_CHUNK_SECONDS, duration_sec)
+    bytes_per_second = (
+        _WHISPER_SPLIT_SAMPLE_RATE
+        * _WHISPER_SPLIT_CHANNELS
+        * _WHISPER_SPLIT_BYTES_PER_SAMPLE
+    )
+    max_chunk_sec_by_size = max(
+        1.0,
+        (_WHISPER_MAX_BYTES * _WHISPER_SPLIT_SIZE_SAFETY_MARGIN) / bytes_per_second,
+    )
+    chunk_sec = min(_WHISPER_MAX_CHUNK_SECONDS, max_chunk_sec_by_size, duration_sec)
 
     chunks_text: List[str] = []
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -149,6 +162,8 @@ def _split_and_transcribe(file_path: str) -> str:
                         "-ss", str(offset),
                         "-t", str(chunk_sec),
                         "-i", file_path,
+                        "-ac", str(_WHISPER_SPLIT_CHANNELS),
+                        "-ar", str(_WHISPER_SPLIT_SAMPLE_RATE),
                         "-acodec", "pcm_s16le",
                         "-vn",
                         chunk_path,
