@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 from config.settings import settings
-from main import run_pipeline_from_cli
+from pipeline.cli_runner import run_pipeline_from_cli
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
