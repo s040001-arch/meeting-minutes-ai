@@ -14,6 +14,8 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_PROCESSING_RETRY_GRACE_SECONDS = 1800
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -71,7 +73,30 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
         app_props = {}
 
     status = str(app_props.get("mm_status") or "").strip().lower()
-    return status not in {"processed", "failed"}
+    if status in {"processed", "failed"}:
+        return False
+
+    if status == "processing":
+        processing_started_at = str(app_props.get("processing_started_at") or "").strip()
+        if not processing_started_at:
+            return False
+
+        try:
+            started_at = datetime.fromisoformat(processing_started_at.replace("Z", "+00:00"))
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            elapsed_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+            return elapsed_seconds >= _PROCESSING_RETRY_GRACE_SECONDS
+        except Exception as exc:
+            logger.warning(
+                "DRIVE_CRON_PROCESSING_RETRY_GUARD_PARSE_FAILED: file_id=%s value=%s reason=%s",
+                file_item.get("id", ""),
+                processing_started_at,
+                exc,
+            )
+            return False
+
+    return True
 
 
 def _download_drive_file(drive_service: Any, file_id: str, destination_path: Path) -> None:
