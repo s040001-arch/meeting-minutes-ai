@@ -11,6 +11,8 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_GPT_PREPROCESS_CHUNK_SIZE = 80
+
 
 def _normalize_dictionary_items(raw: Any) -> List[Tuple[str, str]]:
     normalized: List[Tuple[str, str]] = []
@@ -273,6 +275,12 @@ def _postprocess_labeled_lines(
     return "\n".join(normalized_lines)
 
 
+def _chunk_lines(lines: List[str], chunk_size: int) -> List[List[str]]:
+    if chunk_size <= 0:
+        return [lines]
+    return [lines[i : i + chunk_size] for i in range(0, len(lines), chunk_size)]
+
+
 def preprocess_transcript_with_gpt(
     transcript: str,
     company_dictionary: Any = None,
@@ -303,19 +311,12 @@ def preprocess_transcript_with_gpt(
     if not speaker_rule_prompt_block:
         speaker_rule_prompt_block = settings.get_gpt_speaker_rule_prompt_block()
 
-    prompt = _build_prompt(
-        cleaned_lines=cleaned_lines,
-        company_dictionary=normalized_company_dictionary,
-        abbreviation_dictionary=normalized_abbreviation_dictionary,
-        enable_speaker_labeling=enable_speaker_labeling,
-        speaker_rule_prompt_block=speaker_rule_prompt_block,
-    )
-
     model = getattr(settings, "GPT_PREPROCESS_MODEL", None) or getattr(
         settings, "OPENAI_GPT_PREPROCESS_MODEL", "gpt-4.1-mini"
     )
     temperature = float(getattr(settings, "GPT_PREPROCESS_TEMPERATURE", 0))
     timeout = float(getattr(settings, "GPT_PREPROCESS_TIMEOUT", 60))
+    chunk_size = int(getattr(settings, "GPT_PREPROCESS_CHUNK_SIZE", _GPT_PREPROCESS_CHUNK_SIZE))
 
     logger.info(
         "Start GPT transcript preprocessing with provisional speaker labels. lines=%s company_dict=%s abbreviation_dict=%s model=%s speaker_labeling=%s config=%s",
@@ -330,22 +331,72 @@ def preprocess_transcript_with_gpt(
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     try:
-        response = client.responses.create(
-            model=model,
-            temperature=temperature,
-            input=prompt,
-            timeout=timeout,
-        )
-        raw_output = _extract_text_from_response(response)
-        processed_output = _postprocess_labeled_lines(
-            raw_output,
-            cleaned_lines,
-            enable_speaker_labeling=enable_speaker_labeling,
-        )
-        return processed_output or "\n".join(
-            _fallback_label_line(line, enable_speaker_labeling=enable_speaker_labeling)
-            for line in cleaned_lines
-        )
+        processed_chunks: List[str] = []
+
+        for chunk_index, chunk_lines in enumerate(_chunk_lines(cleaned_lines, chunk_size), start=1):
+            chunk_prompt = _build_prompt(
+                cleaned_lines=chunk_lines,
+                company_dictionary=normalized_company_dictionary,
+                abbreviation_dictionary=normalized_abbreviation_dictionary,
+                enable_speaker_labeling=enable_speaker_labeling,
+                speaker_rule_prompt_block=speaker_rule_prompt_block,
+            )
+            logger.info(
+                "GPT_PREPROCESS_CHUNK_START: chunk=%s chunk_lines=%s total_lines=%s chunk_size=%s",
+                chunk_index,
+                len(chunk_lines),
+                len(cleaned_lines),
+                chunk_size,
+            )
+
+            try:
+                response = client.responses.create(
+                    model=model,
+                    temperature=temperature,
+                    input=chunk_prompt,
+                    timeout=timeout,
+                )
+                raw_output = _extract_text_from_response(response)
+                processed_output = _postprocess_labeled_lines(
+                    raw_output,
+                    chunk_lines,
+                    enable_speaker_labeling=enable_speaker_labeling,
+                )
+                processed_chunks.append(
+                    processed_output or "\n".join(
+                        _fallback_label_line(line, enable_speaker_labeling=enable_speaker_labeling)
+                        for line in chunk_lines
+                    )
+                )
+            except Exception as e:
+                error_text = str(e)
+                logger.exception(
+                    "GPT_PREPROCESS_EXCEPTION: model=%s lines=%s timeout=%ss error_type=%s chunk=%s chunk_lines=%s",
+                    model,
+                    len(cleaned_lines),
+                    timeout,
+                    type(e).__name__,
+                    chunk_index,
+                    len(chunk_lines),
+                )
+                if "timeout" in error_text.lower():
+                    logger.warning(
+                        "GPT_PREPROCESS_TIMEOUT_FALLBACK: continuing with fallback speaker labeling chunk=%s",
+                        chunk_index,
+                    )
+                else:
+                    logger.warning(
+                        "GPT_PREPROCESS_API_ERROR_FALLBACK: continuing with fallback speaker labeling due to API error chunk=%s",
+                        chunk_index,
+                    )
+                processed_chunks.append(
+                    "\n".join(
+                        _fallback_label_line(line, enable_speaker_labeling=enable_speaker_labeling)
+                        for line in chunk_lines
+                    )
+                )
+
+        return "\n".join(processed_chunks)
     except Exception as e:
         error_text = str(e)
         logger.exception(
