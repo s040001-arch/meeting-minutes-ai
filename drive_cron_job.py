@@ -270,13 +270,18 @@ def run_drive_polling_job_once(
                 logger.info("DRIVE_CRON_DOWNLOAD_START: file_id=%s file_name=%s", file_id, file_name)
                 _download_drive_file(drive_service=drive_service, file_id=file_id, destination_path=local_path)
 
+                existing_props = item.get("appProperties") or {}
+                if not isinstance(existing_props, dict):
+                    existing_props = {}
+                existing_status = str(existing_props.get("mm_status") or "").strip().lower()
+                processing_props: Dict[str, str] = {"mm_status": "processing"}
+                if existing_status != "processing":
+                    processing_props["processing_started_at"] = _now_iso()
+
                 _set_drive_app_properties(
                     drive_service=drive_service,
                     file_id=file_id,
-                    properties={
-                        "mm_status": "processing",
-                        "processing_started_at": _now_iso(),
-                    },
+                    properties=processing_props,
                 )
 
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
