@@ -211,7 +211,8 @@ def run_drive_polling_job_once(
     drive_service = _build_drive_service()
     all_files = _list_drive_m4a_files_once(drive_service=drive_service, folder_id=drive_folder_id)
 
-    targets = []
+    retry_targets = []
+    normal_targets = []
     for _item in all_files:
         _app_props = _item.get("appProperties") or {}
         _status = str(_app_props.get("mm_status") or "").strip().lower() or "(empty)"
@@ -223,7 +224,10 @@ def run_drive_polling_job_once(
             _app_props,
         )
         if _is_unprocessed(_item):
-            targets.append(_item)
+            if _status == "processing":
+                retry_targets.append(_item)
+            else:
+                normal_targets.append(_item)
         else:
             logger.info(
                 "DRIVE_CRON_SKIP: file_id=%s file_name=%s reason=mm_status=%s",
@@ -231,6 +235,13 @@ def run_drive_polling_job_once(
                 _item.get("name", ""),
                 _status,
             )
+
+    targets = retry_targets + normal_targets
+    logger.info(
+        "DRIVE_CRON_RETRY_PRIORITY: retry_targets=%s normal_targets=%s",
+        len(retry_targets),
+        len(normal_targets),
+    )
 
     if max_files > 0:
         targets = targets[:max_files]
