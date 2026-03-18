@@ -433,7 +433,25 @@ def generate_minutes_with_claude(
     abbreviation_dictionary: Any = None,
 ) -> str:
     if not transcript or not transcript.strip():
-        raise ValueError("Transcript is empty.")
+        logger.warning("Minutes generation skipped because transcript is empty. Using fallback markdown.")
+        return "\n".join(
+            [
+                "## 会議概要",
+                "文字起こし結果が空のため議事録を生成できませんでした。",
+                "",
+                "## 決まったこと",
+                "- なし",
+                "",
+                "## 残論点",
+                "- なし",
+                "",
+                "## Next Action",
+                "- なし",
+                "",
+                "## 発言録（逐語）",
+                "- なし",
+            ]
+        )
 
     if company_dictionary is None:
         company_dictionary = load_company_dictionary()
