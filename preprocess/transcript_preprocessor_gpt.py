@@ -348,18 +348,24 @@ def preprocess_transcript_with_gpt(
         )
     except Exception as e:
         error_text = str(e)
-        if "timeout" in error_text.lower():
-            logger.warning(
-                "GPT transcript preprocessing timed out; fallback to original transcript. timeout=%ss error=%s",
-                timeout,
-                e,
-            )
-            return transcript
-        logger.warning(
-            "GPT transcript preprocessing skipped due to API error; fallback to original transcript. error=%s",
-            e,
+        logger.exception(
+            "GPT_PREPROCESS_EXCEPTION: model=%s lines=%s timeout=%ss error_type=%s",
+            model,
+            len(cleaned_lines),
+            timeout,
+            type(e).__name__,
         )
-        return transcript
+        if "timeout" in error_text.lower():
+            logger.warning("GPT_PREPROCESS_TIMEOUT_FALLBACK: continuing with fallback speaker labeling")
+            return "\n".join(
+                _fallback_label_line(line, enable_speaker_labeling=enable_speaker_labeling)
+                for line in cleaned_lines
+            )
+        logger.warning("GPT_PREPROCESS_API_ERROR_FALLBACK: continuing with fallback speaker labeling due to API error")
+        return "\n".join(
+            _fallback_label_line(line, enable_speaker_labeling=enable_speaker_labeling)
+            for line in cleaned_lines
+        )
 
 
 def preprocess_transcript(transcript: str) -> str:
