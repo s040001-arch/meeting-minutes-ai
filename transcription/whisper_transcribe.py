@@ -105,7 +105,7 @@ def _split_and_transcribe(file_path: str) -> str:
         chunk_index = 0
         offset = 0.0
         while offset < duration_sec:
-            chunk_path = str(Path(tmp_dir) / f"split_chunk_{chunk_index}.m4a")
+            chunk_path = str(Path(tmp_dir) / f"split_chunk_{chunk_index}.wav")
             try:
                 subprocess.run(
                     [
@@ -113,7 +113,7 @@ def _split_and_transcribe(file_path: str) -> str:
                         "-ss", str(offset),
                         "-t", str(chunk_sec),
                         "-i", file_path,
-                        "-acodec", "copy",
+                        "-acodec", "pcm_s16le",
                         "-vn",
                         chunk_path,
                     ],
