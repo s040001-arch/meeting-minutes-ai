@@ -111,6 +111,8 @@ def _find_or_create_meeting_folder(
         spaces="drive",
         fields="files(id, name)",
         pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
 
     files = response.get("files", [])
@@ -129,6 +131,7 @@ def _find_or_create_meeting_folder(
     folder = drive_service.files().create(
         body=metadata,
         fields="id",
+        supportsAllDrives=True,
     ).execute()
 
     folder_id = folder["id"]
@@ -156,6 +159,8 @@ def _find_or_create_minutes_doc(
         spaces="drive",
         fields="files(id, name)",
         pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
 
     files = response.get("files", [])
