@@ -127,6 +127,16 @@ def _split_and_transcribe(file_path: str) -> str:
                 )
                 return _TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND
             logger.info("Transcribing split chunk %d: %s", chunk_index, chunk_path)
+            chunk_obj = Path(chunk_path)
+            chunk_exists = chunk_obj.exists()
+            chunk_size = chunk_obj.stat().st_size if chunk_exists else -1
+            logger.info(
+                "WHISPER_PRE_SEND split_chunk path=%s exists=%s size_bytes=%s extension=%s",
+                chunk_path,
+                chunk_exists,
+                chunk_size,
+                chunk_obj.suffix,
+            )
             with open(chunk_path, "rb") as f:
                 try:
                     response = client.audio.transcriptions.create(
