@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from audio.audio_loader import load_audio_file
 from config.settings import settings
@@ -16,6 +17,24 @@ from utils.file_parser import parse_audio_filename
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _get_process_rss_mb() -> float | None:
+    try:
+        import resource
+
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(float(rss_kb) / 1024.0, 2)
+    except Exception:
+        return None
+
+
+def _log_memory_usage(stage: str) -> None:
+    rss_mb = _get_process_rss_mb()
+    if rss_mb is None:
+        logger.info("PIPELINE_MEMORY stage=%s rss_mb=unknown pid=%s", stage, os.getpid())
+        return
+    logger.info("PIPELINE_MEMORY stage=%s rss_mb=%s pid=%s", stage, rss_mb, os.getpid())
 
 
 def run_meeting_pipeline(audio_file_path: str) -> dict:
@@ -41,6 +60,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
 
     transcript = transcribe_with_whisper(audio_path)
     logger.info("Whisper transcription completed.")
+    _log_memory_usage("post_whisper")
     whisper_fallback_used = "[TRANSCRIPTION_SKIPPED_NO_QUOTA]" in str(transcript)
 
     company_dictionary = load_company_dictionary()
@@ -63,6 +83,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         speaker_labeling_config.get("precena_threshold"),
         speaker_labeling_config.get("ambiguous_threshold"),
     )
+    _log_memory_usage("pre_gpt_preprocess")
 
     labeled_transcript = preprocess_transcript_with_gpt(
         transcript=transcript,
@@ -73,6 +94,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         speaker_rule_prompt_block=gpt_speaker_rule_prompt_block,
     )
     logger.info("GPT transcript preprocessing completed.")
+    _log_memory_usage("post_gpt_preprocess")
 
     ambiguity_questions = detect_ambiguity_questions(
         cleaned_transcript=labeled_transcript,
