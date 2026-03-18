@@ -84,7 +84,12 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
         try:
             started_at = datetime.fromisoformat(processing_started_at.replace("Z", "+00:00"))
             if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=timezone.utc)
+                logger.warning(
+                    "DRIVE_CRON_PROCESSING_RETRY_GUARD_NAIVE_DATETIME: file_id=%s value=%s",
+                    file_item.get("id", ""),
+                    processing_started_at,
+                )
+                return True
             elapsed_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
             return elapsed_seconds >= _PROCESSING_RETRY_GRACE_SECONDS
         except Exception as exc:
