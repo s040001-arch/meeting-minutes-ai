@@ -117,6 +117,7 @@ class Settings:
 
         scopes = [
             "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
         ]
 
         service_account_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
