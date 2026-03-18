@@ -297,7 +297,10 @@ def run_pipeline_from_cli(
     if local_minutes_path:
         logger.info("LOCAL_PIPELINE_MINUTES_FILE %s", local_minutes_path)
         if os.path.exists(local_minutes_path):
-            os.startfile(local_minutes_path)
+            if os.name == "nt" and hasattr(os, "startfile"):
+                os.startfile(local_minutes_path)
+            else:
+                logger.info("LOCAL_PIPELINE_MINUTES_OPEN_SKIP: non-windows environment path=%s", local_minutes_path)
     if auto_selected_audio:
         logger.info("LOCAL_PIPELINE_AUTO_SELECTED_AUDIO_PATH %s", audio_file_path)
     return result
