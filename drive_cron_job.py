@@ -72,6 +72,10 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
     if not isinstance(app_props, dict):
         app_props = {}
 
+    # mm_docs_retry=true なら再実行対象（status に関わらず）
+    if str(app_props.get("mm_docs_retry") or "").strip().lower() == "true":
+        return True
+
     status = str(app_props.get("mm_status") or "").strip().lower()
     if status in {"processed", "failed"}:
         return False
@@ -287,6 +291,11 @@ def run_drive_polling_job_once(
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
                 run_pipeline_from_cli(str(local_path.resolve()), auto_selected_audio=False)
 
+                _set_drive_app_properties(
+                    drive_service=drive_service,
+                    file_id=file_id,
+                    properties={"mm_docs_retry": ""},
+                )
                 _record_drive_status(
                     drive_service=drive_service,
                     file_item=item,
