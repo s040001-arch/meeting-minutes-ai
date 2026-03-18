@@ -223,35 +223,37 @@ def run_drive_polling_job_once(
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
                 run_pipeline_from_cli(str(local_path.resolve()), auto_selected_audio=False)
 
-                _record_drive_status(
-                    drive_service=drive_service,
-                    file_item=item,
-                    status="processed",
-                    status_backend=status_backend,
-                    processed_folder_id=processed_folder_id,
-                    failed_folder_id=failed_folder_id,
-                )
+                # TODO: re-enable after resolving appProperties 124-byte 403
+                # _record_drive_status(
+                #     drive_service=drive_service,
+                #     file_item=item,
+                #     status="processed",
+                #     status_backend=status_backend,
+                #     processed_folder_id=processed_folder_id,
+                #     failed_folder_id=failed_folder_id,
+                # )
                 processed_count += 1
                 logger.info("DRIVE_CRON_PROCESSED: file_id=%s file_name=%s", file_id, file_name)
             except Exception as exc:
                 failed_count += 1
                 logger.exception("DRIVE_CRON_FAILED: file_id=%s file_name=%s reason=%s", file_id, file_name, exc)
-                try:
-                    _record_drive_status(
-                        drive_service=drive_service,
-                        file_item=item,
-                        status="failed",
-                        status_backend=status_backend,
-                        processed_folder_id=processed_folder_id,
-                        failed_folder_id=failed_folder_id,
-                        error_message=str(exc),
-                    )
-                except Exception as status_exc:
-                    logger.exception(
-                        "DRIVE_CRON_STATUS_RECORD_FAILED: file_id=%s reason=%s",
-                        file_id,
-                        status_exc,
-                    )
+                # TODO: re-enable after resolving appProperties 124-byte 403
+                # try:
+                #     _record_drive_status(
+                #         drive_service=drive_service,
+                #         file_item=item,
+                #         status="failed",
+                #         status_backend=status_backend,
+                #         processed_folder_id=processed_folder_id,
+                #         failed_folder_id=failed_folder_id,
+                #         error_message=str(exc),
+                #     )
+                # except Exception as status_exc:
+                #     logger.exception(
+                #         "DRIVE_CRON_STATUS_RECORD_FAILED: file_id=%s reason=%s",
+                #         file_id,
+                #         status_exc,
+                #     )
 
     logger.info(
         "DRIVE_CRON_DONE: processed=%s failed=%s scanned=%s",
