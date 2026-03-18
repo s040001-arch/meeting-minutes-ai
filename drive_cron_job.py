@@ -182,7 +182,20 @@ def run_drive_polling_job_once(
 
     drive_service = _build_drive_service()
     all_files = _list_drive_m4a_files_once(drive_service=drive_service, folder_id=drive_folder_id)
-    targets = [item for item in all_files if _is_unprocessed(item)]
+
+    targets = []
+    for _item in all_files:
+        if _is_unprocessed(_item):
+            targets.append(_item)
+        else:
+            _app_props = _item.get("appProperties") or {}
+            _status = str(_app_props.get("mm_status") or "").strip().lower() or "(empty)"
+            logger.info(
+                "DRIVE_CRON_SKIP: file_id=%s file_name=%s reason=mm_status=%s",
+                _item.get("id", ""),
+                _item.get("name", ""),
+                _status,
+            )
 
     if max_files > 0:
         targets = targets[:max_files]
