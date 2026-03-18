@@ -71,7 +71,7 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
         app_props = {}
 
     status = str(app_props.get("mm_status") or "").strip().lower()
-    return status not in {"processed", "failed", "processing"}
+    return status not in {"processed", "failed"}
 
 
 def _download_drive_file(drive_service: Any, file_id: str, destination_path: Path) -> None:
