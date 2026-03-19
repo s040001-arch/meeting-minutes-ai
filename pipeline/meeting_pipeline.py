@@ -121,6 +121,11 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
 
     logger.info("Minutes formatting completed.")
 
+    logger.info(
+        "PIPELINE_GOOGLE_DOCS_SAVE_CALL: enabled=%s meeting=%s",
+        getattr(settings, "ENABLE_GOOGLE_DOCS_WRITE", True),
+        f"{meeting_info.get('date', '')}_{meeting_info.get('customer_name', '')}_{meeting_info.get('meeting_title', '')}",
+    )
     google_doc_result = write_minutes_to_google_docs(
         meeting_info=meeting_info,
         minutes_text=formatted_minutes,
@@ -130,6 +135,12 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
     google_docs_fallback_used = (
         str(google_doc_result.get("document_id", "")).strip()
         == "DUMMY_DOC_PERMISSION_DENIED"
+    )
+    logger.info(
+        "PIPELINE_GOOGLE_DOCS_SAVE_RESULT: google_docs_save=%s fallback=%s document_id=%s",
+        not google_docs_fallback_used,
+        google_docs_fallback_used,
+        str(google_doc_result.get("document_id", "")),
     )
 
     local_minutes_path: str = ""
