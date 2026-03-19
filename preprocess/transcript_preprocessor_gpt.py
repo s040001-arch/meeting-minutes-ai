@@ -677,3 +677,134 @@ def detect_ambiguity_questions(cleaned_transcript: str, file_client_name: str = 
                 return questions
 
     return questions
+
+
+_GENERIC_QUESTION_PATTERNS = [
+    "他に何かありますか",
+    "詳細を教えてください",
+    "補足お願いします",
+    "他にありますか",
+    "教えてください",
+]
+
+
+def _normalize_single_line_question(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.split(r"(?<=[。！？?!])\s+", text)[0].strip()
+    text = text.rstrip("。 ")
+    if not text:
+        return ""
+
+    if "?" in text and "？" not in text:
+        text = text.replace("?", "？")
+    if "？" not in text:
+        text = f"{text}？"
+
+    if any(pattern in text for pattern in _GENERIC_QUESTION_PATTERNS):
+        return ""
+
+    return text
+
+
+def detect_bottleneck_question(
+    cleaned_transcript: str,
+    minutes_markdown: str,
+    previous_answers: Optional[List[Dict[str, Any]]] = None,
+    max_question_count: int = 3,
+) -> str:
+    transcript_text = str(cleaned_transcript or "").strip()
+    minutes_text = str(minutes_markdown or "").strip()
+    if not transcript_text:
+        return ""
+
+    answers = previous_answers or []
+    answered_count = len([item for item in answers if isinstance(item, dict)])
+    if answered_count >= max(0, int(max_question_count)):
+        return ""
+
+    answers_text_lines: List[str] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if not question:
+            continue
+        answers_text_lines.append(f"- Q: {question} / A: {answer or '(スキップ)'}")
+    answers_text = "\n".join(answers_text_lines) if answers_text_lines else "- なし"
+
+    model = getattr(settings, "GPT_PREPROCESS_MODEL", None) or getattr(
+        settings,
+        "OPENAI_GPT_PREPROCESS_MODEL",
+        "gpt-4.1-mini",
+    )
+    timeout = float(getattr(settings, "GPT_PREPROCESS_TIMEOUT", 60))
+
+    prompt = f"""あなたは会議議事録の確認質問を作るアシスタントです。
+以下のルールを厳守して、確認質問を1件だけ出力してください。
+
+【目的】
+- 会議理解の最大ボトルネックを1つだけ特定し、その解消に直結する質問を1件作る
+
+【必須手順（内部で実施）】
+1. 逐語録と議事録全文を読み、会議全体を理解する
+2. 全体要約を内部で作る
+3. 理解できていない箇所を洗い出す
+4. 最大ボトルネックを1つ選ぶ
+
+【ボトルネック優先順位】
+1) 会議全体の目的
+2) 話の流れ・時系列
+3) 誰が何を言っているか
+4) 局所的な意味不明
+
+【質問生成ルール】
+- 質問は必ず1文のみ
+- 論点は必ず1つのみ
+- 改行禁止
+- 補足説明禁止
+- テンプレ質問禁止
+- 文脈を必ず反映
+- 出力は質問文のみ（JSON不要、説明不要）
+- 質問不要なら「なし」とだけ出力
+
+【テンプレ禁止例】
+- 他に何かありますか？
+- 詳細を教えてください
+- 補足お願いします
+
+【既存Q&A（再質問時の重複回避に使う）】
+{answers_text}
+
+【逐語録】
+{transcript_text}
+
+【現在の議事録Markdown】
+{minutes_text}
+"""
+
+    try:
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = client.responses.create(
+            model=model,
+            temperature=0,
+            input=prompt,
+            timeout=timeout,
+        )
+        raw = _extract_text_from_response(response)
+    except Exception as exc:
+        logger.warning("detect_bottleneck_question failed: %s", exc)
+        return ""
+
+    if not raw:
+        return ""
+
+    candidate = _normalize_single_line_question(raw)
+    if candidate in {"", "なし", "なし？"}:
+        return ""
+    return candidate

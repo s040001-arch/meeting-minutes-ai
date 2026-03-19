@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from docs.google_docs_writer import save_latest_minutes_state
 from line.qa_session_state import close_all_active_sessions, create_or_reset_session, get_current_question
+from preprocess.transcript_preprocessor_gpt import detect_bottleneck_question
 from pipeline.meeting_pipeline import run_meeting_pipeline
 from utils.logger import get_logger
 
@@ -126,6 +127,7 @@ def _save_latest_minutes_markdown_after_success(result: Dict[str, Any]) -> None:
             "meeting_title": str(meeting_info.get("meeting_title") or ""),
             "meeting_date": str(meeting_info.get("meeting_date") or ""),
             "local_minutes_file": str(result.get("local_minutes_path") or ""),
+            "labeled_transcript": str(result.get("labeled_transcript") or ""),
         }
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -181,14 +183,21 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
         customer_name = str(meeting_info.get("customer_name") or "")
         meeting_title = str(meeting_info.get("meeting_title") or "")
         local_minutes_file = str(result.get("local_minutes_path") or "")
-        ambiguity_questions_count = len(result.get("ambiguity_questions") or [])
+        initial_question = str(result.get("bottleneck_question") or "").strip()
+        if not initial_question:
+            initial_question = detect_bottleneck_question(
+                cleaned_transcript=str(result.get("labeled_transcript") or ""),
+                minutes_markdown=str(result.get("formatted_minutes") or ""),
+                previous_answers=[],
+                max_question_count=3,
+            )
 
         message_text = (
             "議事録生成が完了しました\n"
             f"顧客名: {customer_name}\n"
             f"会議名: {meeting_title}\n"
             f"local_minutes_file: {local_minutes_file}\n"
-            f"確認が必要な項目数: {ambiguity_questions_count}件\n"
+            f"確認が必要な項目数: {1 if initial_question else 0}件\n"
             f"docs_url: {docs_url}"
         )
 
@@ -215,41 +224,35 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
                 logger.warning("LINE_NOTIFY_SKIP: HTTP status=%s", resp.status)
                 return
 
-        ambiguity_questions = [
-            str(q).strip() for q in (result.get("ambiguity_questions") or []) if str(q).strip()
-        ][:3]
         google_doc_result = result.get("google_doc_result") or {}
         drive_folder_id = str(google_doc_result.get("folder_id") or "").strip()
         logger.info(
-            "LINE_QA_PREPARE: questions=%s drive_folder_id_present=%s",
-            len(ambiguity_questions),
+            "LINE_QA_FLOW_START: initial_question_present=%s drive_folder_id_present=%s",
+            bool(initial_question),
             bool(drive_folder_id),
         )
 
-        if ambiguity_questions and drive_folder_id:
+        if initial_question and drive_folder_id:
             session = create_or_reset_session(
                 drive_folder_id=drive_folder_id,
                 docs_url=docs_url,
-                questions=ambiguity_questions,
+                question=initial_question,
+                labeled_transcript=str(result.get("labeled_transcript") or ""),
+                max_questions=3,
             )
             logger.info(
                 "LINE_QA_SESSION_CREATED: meeting_id=%s question_count=%s",
                 str(session.get("meeting_id") or drive_folder_id),
-                len(session.get("ambiguity_questions") or []),
+                int(session.get("question_count") or 0),
             )
             first_question = get_current_question(session)
             if first_question:
-                first_prompt = (
-                    f"【確認 1/{len(ambiguity_questions)}】\n"
-                    f"{first_question}\n"
-                    "分からなければ『スキップ』と入力してください"
-                )
                 question_payload = {
                     "to": notify_user_id,
                     "messages": [
                         {
                             "type": "text",
-                            "text": first_prompt[:4900],
+                            "text": first_question[:4900],
                         }
                     ],
                 }
@@ -266,7 +269,12 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
                     if question_resp.status >= 400:
                         logger.warning("LINE_QA_FIRST_QUESTION_SKIP: HTTP status=%s", question_resp.status)
                     else:
-                        logger.info("LINE_QA_FIRST_QUESTION_SENT: question=%s", first_question)
+                        logger.info(
+                            "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
+                            str(session.get("meeting_id") or drive_folder_id),
+                            int(session.get("question_count") or 0),
+                            first_question,
+                        )
 
         logger.info("LINE_NOTIFY_SUCCESS: customer_name=%s meeting_title=%s", customer_name, meeting_title)
     except Exception as exc:

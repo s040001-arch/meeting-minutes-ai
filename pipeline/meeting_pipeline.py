@@ -9,7 +9,7 @@ from docs.google_docs_writer import write_minutes_to_google_docs
 from minutes.minutes_formatter import format_minutes
 from minutes.minutes_generator_claude import generate_minutes_with_claude
 from preprocess.transcript_preprocessor_gpt import (
-    detect_ambiguity_questions,
+    detect_bottleneck_question,
     preprocess_transcript_with_gpt,
 )
 from transcription.whisper_transcribe import transcribe_with_whisper
@@ -96,12 +96,6 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
     logger.info("GPT transcript preprocessing completed.")
     _log_memory_usage("post_gpt_preprocess")
 
-    ambiguity_questions = detect_ambiguity_questions(
-        cleaned_transcript=labeled_transcript,
-        file_client_name=str(meeting_info.get("customer_name") or ""),
-    )[:3]
-    logger.info("Ambiguity questions detected: %s", len(ambiguity_questions))
-
     minutes_result = generate_minutes_with_claude(
         transcript=labeled_transcript,
         meeting_info=meeting_info,
@@ -118,6 +112,14 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
             == "[MINUTES_GENERATION_SKIPPED_CLAUDE_AUTH_ERROR]"
         )
         formatted_minutes = format_minutes(minutes_result)
+
+    bottleneck_question = detect_bottleneck_question(
+        cleaned_transcript=labeled_transcript,
+        minutes_markdown=formatted_minutes,
+        previous_answers=[],
+        max_question_count=3,
+    )
+    logger.info("LINE_QA_FLOW_START: initial_question_present=%s", bool(bottleneck_question))
 
     logger.info("Minutes formatting completed.")
 
@@ -164,7 +166,8 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         "transcript": transcript,
         "labeled_transcript": labeled_transcript,
         "speaker_labeling_config": speaker_labeling_config,
-        "ambiguity_questions": ambiguity_questions,
+        "ambiguity_questions": [bottleneck_question] if bottleneck_question else [],
+        "bottleneck_question": bottleneck_question,
         "minutes_json": minutes_result,
         "formatted_minutes": formatted_minutes,
         "google_docs_url": google_doc_result["document_url"],

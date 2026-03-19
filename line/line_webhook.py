@@ -16,7 +16,9 @@ from line.qa_session_state import (
     find_latest_active_session,
     get_current_question,
     save_session,
+    set_next_question,
 )
+from preprocess.transcript_preprocessor_gpt import detect_bottleneck_question
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -72,6 +74,7 @@ def _save_latest_minutes_markdown(minutes_markdown: str, metadata: Dict[str, str
         "meeting_title": str(metadata.get("meeting_title") or "").strip(),
         "meeting_date": str(metadata.get("meeting_date") or "").strip(),
         "local_minutes_file": str(metadata.get("local_minutes_file") or "").strip(),
+        "labeled_transcript": str(metadata.get("labeled_transcript") or "").strip(),
     }
     _LATEST_MINUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(_LATEST_MINUTES_FILE, "w", encoding="utf-8") as f:
@@ -84,6 +87,7 @@ def _load_latest_minutes_metadata() -> Dict[str, str]:
         "meeting_title": "",
         "meeting_date": "",
         "local_minutes_file": "",
+        "labeled_transcript": "",
     }
 
     if not _LATEST_MINUTES_FILE.exists():
@@ -99,6 +103,7 @@ def _load_latest_minutes_metadata() -> Dict[str, str]:
         metadata["meeting_title"] = str(data.get("meeting_title") or "").strip()
         metadata["meeting_date"] = str(data.get("meeting_date") or "").strip()
         metadata["local_minutes_file"] = str(data.get("local_minutes_file") or "").strip()
+        metadata["labeled_transcript"] = str(data.get("labeled_transcript") or "").strip()
         return metadata
     except Exception as exc:
         logger.warning("Failed to read latest minutes metadata: %s", exc)
@@ -180,10 +185,12 @@ def _build_regeneration_prompt(
 
 要件:
 - 元文字起こしは使わない
-- 元議事録の構成を維持する
+- 元議事録の構成と文脈を維持する
 - 回答内容のみを反映して不足情報を補完する
 - 推測で新事実を追加しない
 - 出力はMarkdown本文のみ
+- 回答は要約せず、意味を保持して自然な文として反映する
+- 回答に含まれる情報を削除しない
 
 [会議メタ情報]
 - customer_name: {metadata.get("customer_name", "")}
@@ -262,14 +269,27 @@ def _apply_answers_and_update_docs(session: Dict[str, Any]) -> str:
     _save_latest_minutes_markdown(updated_markdown, metadata)
 
     session["docs_url"] = docs_url
-    session["status"] = "completed"
     save_session(session)
     logger.info(
-        "LINE_QA_DOCS_UPDATED: meeting_id=%s docs_url=%s",
+        "DOCS_UPDATE_SUCCESS: meeting_id=%s docs_url=%s",
         str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
         docs_url,
     )
     return docs_url
+
+
+def _generate_next_bottleneck_question(session: Dict[str, Any], updated_minutes: str) -> str:
+    transcript_text = str(session.get("labeled_transcript") or "").strip()
+    if not transcript_text:
+        metadata = _load_latest_minutes_metadata()
+        transcript_text = str(metadata.get("labeled_transcript") or "").strip()
+
+    return detect_bottleneck_question(
+        cleaned_transcript=transcript_text,
+        minutes_markdown=updated_minutes,
+        previous_answers=session.get("answers") or [],
+        max_question_count=int(session.get("max_questions") or 3),
+    )
 
 
 def _find_target_active_session() -> Optional[Dict[str, Any]]:
@@ -286,37 +306,54 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
     if not session:
         return ""
 
+    if bool(session.get("answered", False)):
+        logger.warning(
+            "LINE_QA_FLOW_ERROR_UNANSWERED_NEXT_QUESTION: meeting_id=%s",
+            str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
+        )
+        return "現在の質問への回答処理中です。少し待ってから再送してください。"
+
     logger.info(
-        "LINE_QA_ANSWER_RECEIVED: meeting_id=%s current_index=%s answer=%s",
+        "LINE_QA_FLOW_ANSWER_RECEIVED: meeting_id=%s current_count=%s answer=%s",
         str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
-        int(session.get("current_question_index") or 0),
+        int(session.get("question_count") or 0),
         question_answer,
     )
     updated = append_answer_and_advance(session, question_answer)
-    next_question = get_current_question(updated)
-    total = len(updated.get("ambiguity_questions") or [])
-    current_index = int(updated.get("current_question_index") or 0)
-
-    if next_question:
-        logger.info(
-            "LINE_QA_NEXT_QUESTION: next_index=%s total=%s question=%s",
-            current_index,
-            total,
-            next_question,
-        )
-        return (
-            f"【確認 {current_index + 1}/{total}】\n"
-            f"{next_question}\n"
-            "分からなければ『スキップ』と入力してください"
-        )
-
     docs_url = _apply_answers_and_update_docs(updated)
-    logger.info("LINE_QA_FLOW_COMPLETED: docs_url=%s", docs_url)
-    return (
-        "確認回答ありがとうございます。\n"
-        "回答を反映して議事録を更新しました。\n"
-        f"docs_url: {docs_url}"
+
+    max_questions = int(updated.get("max_questions") or 3)
+    question_count = int(updated.get("question_count") or 0)
+    updated_minutes = _load_latest_minutes_markdown()
+
+    if question_count >= max_questions:
+        updated["status"] = "completed"
+        save_session(updated)
+        logger.info("LINE_QA_FLOW_COMPLETED: reason=max_questions docs_url=%s", docs_url)
+        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+
+    next_question = _generate_next_bottleneck_question(updated, updated_minutes)
+    if not next_question:
+        updated["status"] = "completed"
+        updated["current_question"] = ""
+        updated["answered"] = True
+        save_session(updated)
+        logger.info("LINE_QA_FLOW_COMPLETED: reason=no_more_bottleneck docs_url=%s", docs_url)
+        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+
+    if "\n" in next_question or "\r" in next_question:
+        logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", next_question)
+        next_question = next_question.replace("\r", " ").replace("\n", " ").strip()
+
+    refreshed = set_next_question(updated, next_question)
+    sent_question = get_current_question(refreshed)
+    logger.info(
+        "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
+        str(refreshed.get("meeting_id") or refreshed.get("drive_folder_id") or ""),
+        int(refreshed.get("question_count") or 0),
+        sent_question,
     )
+    return sent_question
 
 
 def _reply_to_line(reply_token: str, message_text: str) -> None:
