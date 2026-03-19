@@ -277,6 +277,12 @@ def run_pipeline_from_cli(
     audio_file_path: str,
     auto_selected_audio: bool = False,
 ) -> Dict[str, Any]:
+    logger.info(
+        "CLI_PIPELINE_AUDIO_INPUT: path=%s extension=%s",
+        audio_file_path,
+        Path(audio_file_path).suffix.lower(),
+    )
+
     close_reason = "次の会議開始による打ち切り"
     closed_count = close_all_active_sessions(close_reason)
     if closed_count > 0:
