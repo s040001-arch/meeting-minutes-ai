@@ -10,6 +10,7 @@ logger = get_logger(__name__)
 
 _DOCS_API_RETRY_MAX_ATTEMPTS = 4
 _DOCS_API_RETRY_BASE_SECONDS = 0.7
+_DOCS_GET_RETRY_MAX_ATTEMPTS = 6
 
 
 def _is_permission_403(exc: Exception) -> bool:
@@ -17,18 +18,23 @@ def _is_permission_403(exc: Exception) -> bool:
     return "403" in text and "permission" in text
 
 
-def _run_docs_call_with_retry(label: str, fn):
+def _run_docs_call_with_retry(
+    label: str,
+    fn,
+    max_attempts: int = _DOCS_API_RETRY_MAX_ATTEMPTS,
+):
     last_exc: Optional[Exception] = None
-    for attempt in range(1, _DOCS_API_RETRY_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
+        logger.info("GOOGLE_DOCS_API_CALL_ATTEMPT: call=%s attempt=%s", label, attempt)
         try:
             return fn()
         except Exception as exc:
             last_exc = exc
-            if not _is_permission_403(exc) or attempt >= _DOCS_API_RETRY_MAX_ATTEMPTS:
+            if not _is_permission_403(exc) or attempt >= max_attempts:
                 logger.warning("GOOGLE_DOCS_API_CALL_FAILED: call=%s attempt=%s reason=%s", label, attempt, exc)
                 raise
 
-            sleep_seconds = _DOCS_API_RETRY_BASE_SECONDS * attempt
+            sleep_seconds = _DOCS_API_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
             logger.warning(
                 "GOOGLE_DOCS_API_CALL_RETRY: call=%s attempt=%s wait_seconds=%s reason=%s",
                 label,
@@ -228,6 +234,7 @@ def _clear_document_content(docs_service: Any, document_id: str) -> None:
     document = _run_docs_call_with_retry(
         "documents.get",
         lambda: docs_service.documents().get(documentId=document_id).execute(),
+        max_attempts=_DOCS_GET_RETRY_MAX_ATTEMPTS,
     )
     logger.info("GOOGLE_DOCS_API_CALL_OK: call=documents.get document_id=%s", document_id)
     body = document.get("body", {})
