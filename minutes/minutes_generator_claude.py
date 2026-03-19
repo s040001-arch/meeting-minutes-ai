@@ -11,6 +11,8 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_MINUTES_PROMPT_MAX_TRANSCRIPT_LINES = 400
+
 
 def _normalize_dictionary_items(raw: Any) -> List[Tuple[str, str]]:
     normalized: List[Tuple[str, str]] = []
@@ -150,6 +152,31 @@ def _build_labeled_transcript_text(transcript_entries: List[Dict[str, str]]) -> 
     return "\n".join(lines)
 
 
+def _trim_transcript_entries_for_minutes_prompt(
+    transcript_entries: List[Dict[str, str]],
+    max_lines: int,
+) -> List[Dict[str, str]]:
+    if max_lines <= 0 or len(transcript_entries) <= max_lines:
+        return transcript_entries
+
+    head_count = max_lines // 2
+    tail_count = max_lines - head_count
+
+    head_entries = transcript_entries[:head_count]
+    tail_entries = transcript_entries[-tail_count:]
+
+    trimmed: List[Dict[str, str]] = []
+    trimmed.extend(head_entries)
+    trimmed.append(
+        {
+            "speaker": "プレセナ",
+            "text": f"（中略: {len(transcript_entries) - max_lines}発言）",
+        }
+    )
+    trimmed.extend(tail_entries)
+    return trimmed
+
+
 def _build_minutes_prompt(
     transcript: str,
     meeting_info: Dict[str, Any],
@@ -166,7 +193,18 @@ def _build_minutes_prompt(
     meeting_date = meeting_info.get("date", "")
 
     parsed_transcript_entries = _parse_labeled_transcript_lines(transcript)
-    labeled_transcript_text = _build_labeled_transcript_text(parsed_transcript_entries)
+    prompt_max_lines = int(
+        getattr(
+            settings,
+            "MINUTES_PROMPT_MAX_TRANSCRIPT_LINES",
+            _MINUTES_PROMPT_MAX_TRANSCRIPT_LINES,
+        )
+    )
+    prompt_transcript_entries = _trim_transcript_entries_for_minutes_prompt(
+        transcript_entries=parsed_transcript_entries,
+        max_lines=prompt_max_lines,
+    )
+    prompt_labeled_transcript_text = _build_labeled_transcript_text(prompt_transcript_entries)
 
     return f"""あなたは商談・会議の議事録作成担当です。
 以下の仮話者ラベル付き文字起こしから、完成済みのMarkdown議事録を作成してください。
@@ -236,7 +274,7 @@ Markdown形式の例:
 
 仮話者ラベル付き文字起こし:
 <<<TRANSCRIPT
-{labeled_transcript_text}
+{prompt_labeled_transcript_text}
 TRANSCRIPT>>>
 """
 
@@ -466,6 +504,20 @@ def generate_minutes_with_claude(
         meeting_info=meeting_info,
         company_dictionary=normalized_company_dictionary,
         abbreviation_dictionary=normalized_abbreviation_dictionary,
+    )
+
+    transcript_line_count = len([line for line in str(transcript or "").splitlines() if line.strip()])
+    prompt_max_lines = int(
+        getattr(
+            settings,
+            "MINUTES_PROMPT_MAX_TRANSCRIPT_LINES",
+            _MINUTES_PROMPT_MAX_TRANSCRIPT_LINES,
+        )
+    )
+    logger.info(
+        "MINUTES_PROMPT_INPUT: transcript_lines=%s prompt_max_lines=%s",
+        transcript_line_count,
+        prompt_max_lines,
     )
 
     model = getattr(settings, "OPENAI_GPT_PREPROCESS_MODEL", "gpt-4.1-mini")
