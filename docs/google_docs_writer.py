@@ -316,6 +316,11 @@ def write_minutes_to_google_docs(
         }
 
     parent_folder_id = getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", None)
+    logger.info(
+        "GOOGLE_DOCS_SAVE_CONTEXT: parent_folder_id=%s enable_google_docs_write=%s",
+        str(parent_folder_id or ""),
+        bool(getattr(settings, "ENABLE_GOOGLE_DOCS_WRITE", True)),
+    )
 
     try:
         drive_service = _build_drive_service()

@@ -5,12 +5,15 @@ from typing import Any, Dict
 from dotenv import load_dotenv
 from google.auth.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from utils.logger import get_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(ENV_PATH)
+
+logger = get_logger(__name__)
 
 
 class Settings:
@@ -134,9 +137,23 @@ class Settings:
                 f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON as JSON: {exc}"
             )
 
+        resolved_client_email = str(service_account_info.get("client_email") or "").strip()
+        resolved_project_id = str(service_account_info.get("project_id") or "").strip()
+        logger.info(
+            "GOOGLE_AUTH_RESOLVED: method=service_account_json env=GOOGLE_SERVICE_ACCOUNT_JSON client_email=%s project_id=%s scopes=%s",
+            resolved_client_email or "(missing)",
+            resolved_project_id or "(missing)",
+            ",".join(scopes),
+        )
+
         credentials = ServiceAccountCredentials.from_service_account_info(
             service_account_info,
             scopes=scopes,
+        )
+        logger.info(
+            "GOOGLE_AUTH_CREDENTIALS_READY: credential_type=%s service_account_email=%s",
+            type(credentials).__name__,
+            str(getattr(credentials, "service_account_email", "") or "(missing)"),
         )
         return credentials
 
