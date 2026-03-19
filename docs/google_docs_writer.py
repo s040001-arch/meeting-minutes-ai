@@ -130,6 +130,7 @@ def _build_drive_service():
 
 def _build_docs_service():
     credentials = settings.get_google_oauth_credentials()
+    logger.info("DOCS_AUTH_PATH: oauth")
     return build("docs", "v1", credentials=credentials)
 
 
@@ -222,25 +223,31 @@ def _find_or_create_minutes_doc(
         logger.info("Reuse existing Google Doc: %s (%s)", doc_name, document_id)
         return document_id, False
 
-    logger.info("GOOGLE_DOC_CREATE_START")
+    logger.info("DOCS_CREATE_START: doc_name=%s folder_id=%s", doc_name, folder_id)
     try:
         document = docs_service.documents().create(
             body={"title": doc_name},
         ).execute()
         document_id = document["documentId"]
+        logger.info("DOCS_CREATE_SUCCESS: document_id=%s", document_id)
+    except Exception as exc:
+        logger.warning("DOCS_CREATE_FAILED: reason=%s", exc)
+        raise
 
+    logger.info("DRIVE_PERMISSION_GRANT_START: document_id=%s folder_id=%s", document_id, folder_id)
+    try:
         drive_service.files().update(
             fileId=document_id,
             addParents=folder_id,
             supportsAllDrives=True,
         ).execute()
-
-        logger.info("GOOGLE_DOC_CREATE_SUCCESS")
-        logger.info("Created new Google Doc via Docs API (OAuth): %s (%s)", doc_name, document_id)
-        return document_id, True
+        logger.info("DRIVE_PERMISSION_GRANT_SUCCESS: document_id=%s", document_id)
     except Exception as exc:
-        logger.warning("GOOGLE_DOC_CREATE_FAIL: %s", exc)
+        logger.warning("DRIVE_PERMISSION_GRANT_FAILED: document_id=%s reason=%s", document_id, exc)
         raise
+
+    logger.info("Created new Google Doc via Docs API (OAuth): %s (%s)", doc_name, document_id)
+    return document_id, True
 
 
 def _clear_document_content(docs_service: Any, document_id: str) -> None:
