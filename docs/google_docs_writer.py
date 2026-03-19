@@ -224,18 +224,19 @@ def _find_or_create_minutes_doc(
 
     logger.info("GOOGLE_DOC_CREATE_START")
     try:
-        document = drive_service.files().create(
-            body={
-                "name": doc_name,
-                "mimeType": "application/vnd.google-apps.document",
-                "parents": [folder_id],
-            },
-            fields="id",
+        document = docs_service.documents().create(
+            body={"title": doc_name},
+        ).execute()
+        document_id = document["documentId"]
+
+        drive_service.files().update(
+            fileId=document_id,
+            addParents=folder_id,
             supportsAllDrives=True,
         ).execute()
-        document_id = document["id"]
+
         logger.info("GOOGLE_DOC_CREATE_SUCCESS")
-        logger.info("Created new Google Doc via Drive API: %s (%s)", doc_name, document_id)
+        logger.info("Created new Google Doc via Docs API (OAuth): %s (%s)", doc_name, document_id)
         return document_id, True
     except Exception as exc:
         logger.warning("GOOGLE_DOC_CREATE_FAIL: %s", exc)
