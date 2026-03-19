@@ -133,6 +133,19 @@ def _build_docs_service():
     return build("docs", "v1", credentials=credentials)
 
 
+def run_oauth_docs_create_test_once() -> None:
+    logger.info("OAUTH_TEST_START: Testing Docs API with OAuth credentials")
+    try:
+        docs_service = _build_docs_service()
+        test_result = docs_service.documents().create(
+            body={"title": "OAuth Test Doc"}
+        ).execute()
+        test_doc_id = test_result.get("documentId", "")
+        logger.info("OAUTH_TEST_SUCCESS: document_id=%s", test_doc_id)
+    except Exception as oauth_test_exc:
+        logger.warning("OAUTH_TEST_FAILED: error=%s", oauth_test_exc)
+
+
 def _find_or_create_meeting_folder(
     drive_service: Any,
     folder_name: str,
@@ -386,17 +399,6 @@ def write_minutes_to_google_docs(
     try:
         drive_service = _build_drive_service()
         docs_service = _build_docs_service()
-
-        # OAuth test for Docs API (one-time test, non-blocking)
-        logger.info("OAUTH_TEST_START: Testing Docs API with OAuth credentials")
-        try:
-            test_result = docs_service.documents().create(
-                body={"title": "OAuth Test Doc"}
-            ).execute()
-            test_doc_id = test_result.get("documentId", "")
-            logger.info("OAUTH_TEST_SUCCESS: document_id=%s", test_doc_id)
-        except Exception as oauth_test_exc:
-            logger.warning("OAUTH_TEST_FAILED: error=%s", oauth_test_exc)
 
         folder_id = _find_or_create_meeting_folder(
             drive_service=drive_service,

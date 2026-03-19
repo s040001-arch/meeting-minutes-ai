@@ -9,6 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 from config.settings import settings
+from docs.google_docs_writer import run_oauth_docs_create_test_once
 from pipeline.cli_runner import run_pipeline_from_cli
 from utils.logger import get_logger
 
@@ -345,6 +346,7 @@ def run_drive_polling_job_once(
 def main() -> None:
     print("CRON START")
     logger.info("CRON START")
+    run_oauth_docs_create_test_once()
 
     parser = argparse.ArgumentParser(description="Run one-shot Google Drive polling job for Railway Cron")
     parser.add_argument(
