@@ -5,6 +5,7 @@ from typing import Any, Dict
 from dotenv import load_dotenv
 from google.auth.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google.oauth2.credentials import Credentials as OAuth2Credentials
 from utils.logger import get_logger
 
 
@@ -154,6 +155,48 @@ class Settings:
             "GOOGLE_AUTH_CREDENTIALS_READY: credential_type=%s service_account_email=%s",
             type(credentials).__name__,
             str(getattr(credentials, "service_account_email", "") or "(missing)"),
+        )
+        return credentials
+
+    def get_google_oauth_credentials(self) -> Credentials:
+        import json
+
+        oauth_token_json_str = os.getenv("GOOGLE_OAUTH_TOKEN_JSON", "")
+        if not oauth_token_json_str:
+            raise ValueError(
+                "GOOGLE_OAUTH_TOKEN_JSON environment variable is not set. "
+                "Please provide OAuth token JSON (authorized_user format) as a string."
+            )
+
+        try:
+            oauth_token_info = json.loads(oauth_token_json_str)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Failed to parse GOOGLE_OAUTH_TOKEN_JSON as JSON: {exc}"
+            )
+
+        refresh_token = oauth_token_info.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError(
+                "GOOGLE_OAUTH_TOKEN_JSON must contain 'refresh_token' (offline access). "
+                "Please generate OAuth token with offline access enabled."
+            )
+
+        access_token = oauth_token_info.get("token") or oauth_token_info.get("access_token")
+
+        credentials = OAuth2Credentials(
+            token=access_token,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth_token_info.get("client_id", ""),
+            client_secret=oauth_token_info.get("client_secret", ""),
+            scopes=["https://www.googleapis.com/auth/documents"],
+        )
+
+        resolved_email = oauth_token_info.get("email", "(unknown)")
+        logger.info(
+            "GOOGLE_AUTH_OAUTH_RESOLVED: method=oauth_user_credentials env=GOOGLE_OAUTH_TOKEN_JSON email=%s",
+            resolved_email,
         )
         return credentials
 

@@ -129,7 +129,7 @@ def _build_drive_service():
 
 
 def _build_docs_service():
-    credentials = settings.get_google_credentials()
+    credentials = settings.get_google_oauth_credentials()
     return build("docs", "v1", credentials=credentials)
 
 
