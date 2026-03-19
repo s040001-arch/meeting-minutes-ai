@@ -16,6 +16,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _PROCESSING_RETRY_GRACE_SECONDS = 1800
+_CRON_TARGET_AUDIO_EXTENSIONS = (".m4a", ".wav")
 
 
 def _now_iso() -> str:
@@ -34,6 +35,10 @@ def _build_drive_service() -> Any:
 
 
 def _list_drive_m4a_files_once(drive_service: Any, folder_id: str) -> List[Dict[str, Any]]:
+    logger.info(
+        "DRIVE_CRON_TARGET_EXTENSIONS: extensions=%s",
+        ",".join(_CRON_TARGET_AUDIO_EXTENSIONS),
+    )
     query = (
         f"'{folder_id}' in parents and trashed=false "
         "and mimeType!='application/vnd.google-apps.folder'"
@@ -65,7 +70,11 @@ def _list_drive_m4a_files_once(drive_service: Any, folder_id: str) -> List[Dict[
         if not next_page_token:
             break
 
-    return [f for f in files if str(f.get("name", "")).lower().endswith(".m4a")]
+    return [
+        f
+        for f in files
+        if str(f.get("name", "")).lower().endswith(_CRON_TARGET_AUDIO_EXTENSIONS)
+    ]
 
 
 def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
