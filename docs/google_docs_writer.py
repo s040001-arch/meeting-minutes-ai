@@ -128,6 +128,11 @@ def _build_drive_service():
     return build("drive", "v3", credentials=credentials)
 
 
+def _build_oauth_drive_service():
+    credentials = settings.get_google_oauth_credentials()
+    return build("drive", "v3", credentials=credentials)
+
+
 def _build_docs_service():
     credentials = settings.get_google_oauth_credentials()
     logger.info("DOCS_AUTH_PATH: oauth")
@@ -236,7 +241,8 @@ def _find_or_create_minutes_doc(
 
     logger.info("DRIVE_PERMISSION_GRANT_START: document_id=%s folder_id=%s", document_id, folder_id)
     try:
-        drive_service.files().update(
+        oauth_drive_service = _build_oauth_drive_service()
+        oauth_drive_service.files().update(
             fileId=document_id,
             addParents=folder_id,
             supportsAllDrives=True,

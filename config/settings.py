@@ -190,7 +190,10 @@ class Settings:
             token_uri="https://oauth2.googleapis.com/token",
             client_id=oauth_token_info.get("client_id", ""),
             client_secret=oauth_token_info.get("client_secret", ""),
-            scopes=["https://www.googleapis.com/auth/documents"],
+            scopes=[
+                "https://www.googleapis.com/auth/documents",
+                "https://www.googleapis.com/auth/drive",
+            ],
         )
 
         resolved_email = oauth_token_info.get("email", "(unknown)")
