@@ -166,6 +166,51 @@ def _move_drive_file_to_folder(
     ).execute()
 
 
+def _move_audio_file_to_docs_folder(
+    drive_service: Any,
+    file_item: Dict[str, Any],
+    docs_folder_id: str,
+) -> None:
+    file_id = str(file_item.get("id") or "").strip()
+    if not file_id:
+        reason = "file_id_empty"
+        logger.warning(
+            "AUDIO_MOVE_FAILED: file_id=%s folder_id=%s reason=%s",
+            file_id,
+            docs_folder_id,
+            reason,
+        )
+        raise ValueError(reason)
+
+    target_folder_id = str(docs_folder_id or "").strip()
+    if not target_folder_id:
+        reason = "docs_folder_id_empty"
+        logger.warning(
+            "AUDIO_MOVE_FAILED: file_id=%s folder_id=%s reason=%s",
+            file_id,
+            target_folder_id,
+            reason,
+        )
+        raise ValueError(reason)
+
+    logger.info("AUDIO_MOVE_START: file_id=%s folder_id=%s", file_id, target_folder_id)
+    try:
+        _move_drive_file_to_folder(
+            drive_service=drive_service,
+            file_item=file_item,
+            target_folder_id=target_folder_id,
+        )
+        logger.info("AUDIO_MOVE_SUCCESS: file_id=%s folder_id=%s", file_id, target_folder_id)
+    except Exception as exc:
+        logger.warning(
+            "AUDIO_MOVE_FAILED: file_id=%s folder_id=%s reason=%s",
+            file_id,
+            target_folder_id,
+            exc,
+        )
+        raise
+
+
 def _record_drive_status(
     drive_service: Any,
     file_item: Dict[str, Any],
@@ -290,7 +335,19 @@ def run_drive_polling_job_once(
                 )
 
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
-                run_pipeline_from_cli(str(local_path.resolve()), auto_selected_audio=False)
+                pipeline_result = run_pipeline_from_cli(
+                    str(local_path.resolve()),
+                    auto_selected_audio=False,
+                )
+
+                docs_folder_id = str(
+                    ((pipeline_result or {}).get("google_doc_result") or {}).get("folder_id") or ""
+                ).strip()
+                _move_audio_file_to_docs_folder(
+                    drive_service=drive_service,
+                    file_item=item,
+                    docs_folder_id=docs_folder_id,
+                )
 
                 _set_drive_app_properties(
                     drive_service=drive_service,
