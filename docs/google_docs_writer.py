@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from googleapiclient.discovery import build
@@ -6,6 +7,39 @@ from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_DOCS_API_RETRY_MAX_ATTEMPTS = 4
+_DOCS_API_RETRY_BASE_SECONDS = 0.7
+
+
+def _is_permission_403(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "403" in text and "permission" in text
+
+
+def _run_docs_call_with_retry(label: str, fn):
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _DOCS_API_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_permission_403(exc) or attempt >= _DOCS_API_RETRY_MAX_ATTEMPTS:
+                logger.warning("GOOGLE_DOCS_API_CALL_FAILED: call=%s attempt=%s reason=%s", label, attempt, exc)
+                raise
+
+            sleep_seconds = _DOCS_API_RETRY_BASE_SECONDS * attempt
+            logger.warning(
+                "GOOGLE_DOCS_API_CALL_RETRY: call=%s attempt=%s wait_seconds=%s reason=%s",
+                label,
+                attempt,
+                round(sleep_seconds, 2),
+                exc,
+            )
+            time.sleep(sleep_seconds)
+
+    if last_exc:
+        raise last_exc
 
 
 def _parse_minutes_sections(text: str) -> Dict[str, list[str]]:
@@ -190,7 +224,12 @@ def _find_or_create_minutes_doc(
 
 
 def _clear_document_content(docs_service: Any, document_id: str) -> None:
-    document = docs_service.documents().get(documentId=document_id).execute()
+    logger.info("GOOGLE_DOCS_API_CALL_START: call=documents.get document_id=%s", document_id)
+    document = _run_docs_call_with_retry(
+        "documents.get",
+        lambda: docs_service.documents().get(documentId=document_id).execute(),
+    )
+    logger.info("GOOGLE_DOCS_API_CALL_OK: call=documents.get document_id=%s", document_id)
     body = document.get("body", {})
     content = body.get("content", [])
 
@@ -201,21 +240,26 @@ def _clear_document_content(docs_service: Any, document_id: str) -> None:
     if end_index <= 2:
         return
 
-    docs_service.documents().batchUpdate(
-        documentId=document_id,
-        body={
-            "requests": [
-                {
-                    "deleteContentRange": {
-                        "range": {
-                            "startIndex": 1,
-                            "endIndex": end_index - 1,
+    logger.info("GOOGLE_DOCS_API_CALL_START: call=documents.batchUpdate.clear document_id=%s", document_id)
+    _run_docs_call_with_retry(
+        "documents.batchUpdate.clear",
+        lambda: docs_service.documents().batchUpdate(
+            documentId=document_id,
+            body={
+                "requests": [
+                    {
+                        "deleteContentRange": {
+                            "range": {
+                                "startIndex": 1,
+                                "endIndex": end_index - 1,
+                            }
                         }
                     }
-                }
-            ]
-        },
-    ).execute()
+                ]
+            },
+        ).execute(),
+    )
+    logger.info("GOOGLE_DOCS_API_CALL_OK: call=documents.batchUpdate.clear document_id=%s", document_id)
 
     logger.info("Cleared existing Google Doc content: %s", document_id)
 
@@ -228,19 +272,24 @@ def _write_document_text(
 ) -> None:
     payload = _build_styled_doc_payload(meeting_info=meeting_info, minutes_text=text)
 
-    docs_service.documents().batchUpdate(
-        documentId=document_id,
-        body={
-            "requests": [
-                {
-                    "insertText": {
-                        "location": {"index": 1},
-                        "text": payload["text"],
+    logger.info("GOOGLE_DOCS_API_CALL_START: call=documents.batchUpdate.insert document_id=%s", document_id)
+    _run_docs_call_with_retry(
+        "documents.batchUpdate.insert",
+        lambda: docs_service.documents().batchUpdate(
+            documentId=document_id,
+            body={
+                "requests": [
+                    {
+                        "insertText": {
+                            "location": {"index": 1},
+                            "text": payload["text"],
+                        }
                     }
-                }
-            ]
-        },
-    ).execute()
+                ]
+            },
+        ).execute(),
+    )
+    logger.info("GOOGLE_DOCS_API_CALL_OK: call=documents.batchUpdate.insert document_id=%s", document_id)
 
     style_requests = []
     for start, end in payload["title_ranges"]:
@@ -276,10 +325,15 @@ def _write_document_text(
         )
 
     if style_requests:
-        docs_service.documents().batchUpdate(
-            documentId=document_id,
-            body={"requests": style_requests},
-        ).execute()
+        logger.info("GOOGLE_DOCS_API_CALL_START: call=documents.batchUpdate.style document_id=%s", document_id)
+        _run_docs_call_with_retry(
+            "documents.batchUpdate.style",
+            lambda: docs_service.documents().batchUpdate(
+                documentId=document_id,
+                body={"requests": style_requests},
+            ).execute(),
+        )
+        logger.info("GOOGLE_DOCS_API_CALL_OK: call=documents.batchUpdate.style document_id=%s", document_id)
 
     logger.info("Inserted latest formatted minutes into Google Doc: %s", document_id)
 
