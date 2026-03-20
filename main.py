@@ -1,7 +1,12 @@
 import argparse
 import os
+import threading
+import time
 from pathlib import Path
 
+from config.settings import settings
+from docs.google_docs_writer import run_oauth_docs_create_test_once
+from drive_cron_job import run_drive_polling_job_once
 from pipeline.cli_runner import run_pipeline_from_cli
 from utils.logger import get_logger
 
@@ -19,6 +24,69 @@ try:
 except ImportError as exc:
     logger.warning("LINE webhook handler import failed: %s", exc)
     handle_line_webhook = None
+
+
+_cron_started = False
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("Invalid int env %s=%s, fallback=%s", name, raw, default)
+        return default
+
+
+def _cron_loop() -> None:
+    interval_seconds = max(10, _get_int_env("DRIVE_CRON_INTERVAL_SECONDS", 300))
+    max_files = max(0, _get_int_env("DRIVE_CRON_MAX_FILES", 1))
+    status_backend = str(os.getenv("DRIVE_CRON_STATUS_BACKEND", "app_properties") or "app_properties").strip()
+    if status_backend not in {"app_properties", "folder_move"}:
+        logger.warning(
+            "Invalid DRIVE_CRON_STATUS_BACKEND=%s, fallback=app_properties",
+            status_backend,
+        )
+        status_backend = "app_properties"
+
+    processed_folder_id = str(os.getenv("DRIVE_CRON_PROCESSED_FOLDER_ID", "") or "").strip()
+    failed_folder_id = str(os.getenv("DRIVE_CRON_FAILED_FOLDER_ID", "") or "").strip()
+
+    try:
+        run_oauth_docs_create_test_once()
+    except Exception as exc:
+        logger.warning("DRIVE_CRON_OAUTH_TEST_FAILED: %s", exc)
+
+    while True:
+        drive_folder_id = str(getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", "") or "").strip()
+        if not drive_folder_id:
+            logger.warning("DRIVE_CRON_SKIP: reason=missing_drive_folder_id")
+        else:
+            try:
+                summary = run_drive_polling_job_once(
+                    drive_folder_id=drive_folder_id,
+                    max_files=max_files,
+                    status_backend=status_backend,
+                    processed_folder_id=processed_folder_id,
+                    failed_folder_id=failed_folder_id,
+                )
+                logger.info("DRIVE_CRON_LOOP_DONE: summary=%s", summary)
+            except Exception as exc:
+                logger.exception("DRIVE_CRON_LOOP_FAILED: %s", exc)
+
+        time.sleep(interval_seconds)
+
+
+def _start_cron_scheduler_once() -> None:
+    global _cron_started
+    if _cron_started:
+        return
+    _cron_started = True
+    thread = threading.Thread(target=_cron_loop, daemon=True, name="drive-cron-loop")
+    thread.start()
+    logger.info("DRIVE_CRON_SCHEDULER_STARTED: interval_seconds=%s", max(10, _get_int_env("DRIVE_CRON_INTERVAL_SECONDS", 300)))
 
 
 def _create_app():
@@ -88,6 +156,7 @@ def main() -> None:
         return
 
     if args.serve_line:
+        _start_cron_scheduler_once()
         app = _create_app()
         logger.info("WEBHOOK_SERVER_START: host=%s port=%s routes=/callback,/line/webhook", args.host, args.port)
         app.run(host=args.host, port=args.port)
