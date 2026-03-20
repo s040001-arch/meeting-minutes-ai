@@ -376,11 +376,6 @@ def write_minutes_to_google_docs(
     meeting_info: Dict[str, Any],
     minutes_text: str,
     audio_file_path: Optional[str] = None,
-) -> Dict[str, str]:
-def write_minutes_to_google_docs(
-    meeting_info: Dict[str, Any],
-    minutes_text: str,
-    audio_file_path: Optional[str] = None,
     existing_document_id: Optional[str] = None,
 ) -> Dict[str, str]:
     if not meeting_info:
