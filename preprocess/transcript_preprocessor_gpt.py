@@ -685,7 +685,63 @@ _GENERIC_QUESTION_PATTERNS = [
     "補足お願いします",
     "他にありますか",
     "教えてください",
+    "特定できますか",
+    "説明はありますか",
+    "整理できますか",
 ]
+
+_DISALLOWED_MULTI_TARGET_TOKENS = ["/", "・", "、", ",", "および", "及び"]
+_GENERIC_TARGET_WORDS = {
+    "それ",
+    "あれ",
+    "これ",
+    "この件",
+    "その件",
+    "あの件",
+    "内容",
+    "件",
+}
+
+
+def _is_valid_single_target(target: str) -> bool:
+    cleaned = str(target or "").strip()
+    if not cleaned:
+        return False
+    if any(token in cleaned for token in _DISALLOWED_MULTI_TARGET_TOKENS):
+        return False
+    if cleaned in _GENERIC_TARGET_WORDS:
+        return False
+
+    has_ascii_term = bool(re.search(r"[A-Za-z0-9]{2,}", cleaned))
+    has_japanese_term = bool(re.search(r"[一-龯ァ-ヶぁ-ん]{2,}", cleaned))
+    return has_ascii_term or has_japanese_term
+
+
+def _enforce_context_question_format(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+
+    normalized = text.replace("\r", " ").replace("\n", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.split(r"(?<=[。！？?!])\s+", normalized)[0].strip()
+    normalized = normalized.rstrip("。 ")
+
+    if any(pattern in normalized for pattern in _GENERIC_QUESTION_PATTERNS):
+        return ""
+
+    m1 = re.fullmatch(r"(.+?)はこの会話内で定義されていますか[？?]?", normalized)
+    m2 = re.fullmatch(r"(.+?)とはこの文脈で何を指していますか[？?]?", normalized)
+    if not m1 and not m2:
+        return ""
+
+    target = (m1.group(1) if m1 else m2.group(1)).strip()
+    if not _is_valid_single_target(target):
+        return ""
+
+    if m1:
+        return f"{target}はこの会話内で定義されていますか？"
+    return f"{target}とはこの文脈で何を指していますか？"
 
 
 def _normalize_single_line_question(raw_text: str) -> str:
@@ -708,7 +764,7 @@ def _normalize_single_line_question(raw_text: str) -> str:
     if any(pattern in text for pattern in _GENERIC_QUESTION_PATTERNS):
         return ""
 
-    return text
+    return _enforce_context_question_format(text)
 
 
 def detect_bottleneck_question(
@@ -774,6 +830,11 @@ def detect_bottleneck_question(
 {answers_text}
 
 【出力形式】
+- 質問文は必ず1対象のみ（複数用語の同時確認は禁止）
+- 質問文は必ず以下のどちらかのテンプレートに完全一致させる
+    - 「◯◯はこの会話内で定義されていますか？」
+    - 「◯◯とはこの文脈で何を指していますか？」
+- ◯◯には必ず具体名詞（例: TPM / 湯間さん / THR）を1つ入れる
 - 質問文を1文のみ出力（改行・説明・JSON不要）
 - 質問の根拠は必ず逐語録内に存在する記述であること
 - 該当箇所がなければ「なし」とのみ出力

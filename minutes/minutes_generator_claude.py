@@ -281,6 +281,58 @@ TRANSCRIPT>>>
 
 _REVIEW_FOLLOWUP_START = "<<<FOLLOWUP_QUESTION>>>"
 _REVIEW_FOLLOWUP_END = "<<<END_FOLLOWUP_QUESTION>>>"
+_REVIEW_DISALLOWED_MULTI_TARGET_TOKENS = ["/", "・", "、", ",", "および", "及び"]
+_REVIEW_GENERIC_TARGET_WORDS = {
+    "それ",
+    "あれ",
+    "これ",
+    "この件",
+    "その件",
+    "あの件",
+    "内容",
+    "件",
+}
+
+
+def _is_valid_review_single_target(target: str) -> bool:
+    cleaned = str(target or "").strip()
+    if not cleaned:
+        return False
+    if any(token in cleaned for token in _REVIEW_DISALLOWED_MULTI_TARGET_TOKENS):
+        return False
+    if cleaned in _REVIEW_GENERIC_TARGET_WORDS:
+        return False
+
+    has_ascii_term = bool(re.search(r"[A-Za-z0-9]{2,}", cleaned))
+    has_japanese_term = bool(re.search(r"[一-龯ァ-ヶぁ-ん]{2,}", cleaned))
+    return has_ascii_term or has_japanese_term
+
+
+def _normalize_review_followup_question(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text or text == "（質問文 or 空欄）":
+        return ""
+
+    normalized = text.replace("\r", " ").replace("\n", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.split(r"(?<=[。！？?!])\s+", normalized)[0].strip()
+    normalized = normalized.rstrip("。 ")
+
+    if any(pattern in normalized for pattern in ["特定できますか", "説明はありますか", "整理できますか"]):
+        return ""
+
+    m1 = re.fullmatch(r"(.+?)はこの会話内で定義されていますか[？?]?", normalized)
+    m2 = re.fullmatch(r"(.+?)とはこの文脈で何を指していますか[？?]?", normalized)
+    if not m1 and not m2:
+        return ""
+
+    target = (m1.group(1) if m1 else m2.group(1)).strip()
+    if not _is_valid_review_single_target(target):
+        return ""
+
+    if m1:
+        return f"{target}はこの会話内で定義されていますか？"
+    return f"{target}とはこの文脈で何を指していますか？"
 
 
 def _build_review_prompt(minutes_text: str) -> str:
@@ -338,11 +390,20 @@ def _build_review_prompt(minutes_text: str) -> str:
 - 決定事項の補完
 - 議事録の構造整備のための質問
 - 発言録に出ていない情報の補完
+- 「特定できますか？」「説明はありますか？」「整理できますか？」などのメタ質問
 
 【出力フォーマット】
 まず修正済みのMarkdown議事録本文のみを出力してください。
 その後、以下の区切り行でフォローアップ質問を出力してください。
 上記条件に該当する箇所があれば最大1問。なければ区切り行の中を空欄にしてください。
+
+質問文の形式は必ず次のどちらかだけを使うこと。
+- 「◯◯はこの会話内で定義されていますか？」
+- 「◯◯とはこの文脈で何を指していますか？」
+
+制約:
+- 1質問 = 1対象（複数概念を同時に扱わない）
+- ◯◯には具体名詞（例: TPM / 湯間さん / THR）を1つ入れる
 
 <<<FOLLOWUP_QUESTION>>>
 （質問文 or 空欄）
@@ -680,7 +741,7 @@ def review_minutes(minutes_text: str) -> Tuple[str, str]:
             parts = raw_text.split(_REVIEW_FOLLOWUP_START, 1)
             reviewed_text = parts[0].strip()
             followup_raw = parts[1].split(_REVIEW_FOLLOWUP_END, 1)[0].strip()
-            followup_question = followup_raw if followup_raw and followup_raw != "（質問文 or 空欄）" else ""
+            followup_question = _normalize_review_followup_question(followup_raw)
         else:
             reviewed_text = raw_text
             followup_question = ""
