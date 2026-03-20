@@ -307,7 +307,7 @@ def _find_target_active_session() -> Optional[Dict[str, Any]]:
 def _handle_ambiguity_answer(question_answer: str) -> str:
     session = _find_target_active_session()
     if not session:
-        return ""
+        return "アクティブな確認セッションが見つかりませんでした。"
 
     status = str(session.get("status") or "").strip()
     if status != "waiting_for_answer":
@@ -342,7 +342,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         updated["status"] = "completed"
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=max_questions docs_url=%s", docs_url)
-        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
 
     next_question = _generate_next_bottleneck_question(updated, updated_minutes)
     if not next_question:
@@ -351,7 +351,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         updated["answered"] = True
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=no_more_bottleneck docs_url=%s", docs_url)
-        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
 
     if "\n" in next_question or "\r" in next_question:
         logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", next_question)
@@ -369,7 +369,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         refreshed["current_question"] = ""
         refreshed["answered"] = True
         save_session(refreshed)
-        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
 
     refreshed = mark_question_sent(refreshed, sent_question)
     logger.info(
@@ -378,7 +378,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         int(refreshed.get("question_count") or 0),
         sent_question,
     )
-    return sent_question
+    return "回答を議事録に反映しました。\n" + f"docs_url: {docs_url}\n\n次の確認質問です。\n{sent_question}"
 
 
 def _reply_to_line(reply_token: str, message_text: str) -> None:
@@ -443,7 +443,7 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
                 answer = _generate_answer(question, minutes_markdown)
         except Exception as exc:
             logger.warning("OpenAI answer generation failed: %s", exc)
-            answer = "回答生成に失敗しました。時間をおいて再度お試しください。"
+            answer = "エラーが発生したため回答反映に失敗しました。時間をおいて再度お試しください。"
 
         _reply_to_line(reply_token, answer)
 
