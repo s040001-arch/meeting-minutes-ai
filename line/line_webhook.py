@@ -259,9 +259,21 @@ def _apply_answers_and_update_docs(session: Dict[str, Any]) -> str:
         "customer_name": str(metadata.get("customer_name") or "").strip(),
         "meeting_title": str(metadata.get("meeting_title") or "").strip(),
     }
+    meeting_id_for_log = str(session.get("meeting_id") or session.get("drive_folder_id") or "")
+    existing_docs_url = str(session.get("docs_url") or "").strip()
+    existing_doc_id = ""
+    if "/document/d/" in existing_docs_url:
+        _parts = existing_docs_url.split("/document/d/", 1)
+        if len(_parts) > 1:
+            existing_doc_id = _parts[1].split("/")[0].strip()
+    logger.info(
+        "DOCS_UPDATE_TARGET_RESOLVE: meeting_id=%s existing_docs_url=%s existing_doc_id=%s",
+        meeting_id_for_log, existing_docs_url, existing_doc_id,
+    )
     docs_result = write_minutes_to_google_docs(
         meeting_info=meeting_info,
         minutes_text=updated_markdown,
+        existing_document_id=existing_doc_id or None,
     )
     docs_url = str(
         docs_result.get("document_url")
@@ -282,16 +294,30 @@ def _apply_answers_and_update_docs(session: Dict[str, Any]) -> str:
     return docs_url
 
 
-def _generate_next_bottleneck_question(session: Dict[str, Any], updated_minutes: str) -> str:
+def _generate_next_bottleneck_question(
+    session: Dict[str, Any],
+    updated_minutes: str,
+    extra_sent_questions: Optional[list] = None,
+) -> str:
     transcript_text = str(session.get("labeled_transcript") or "").strip()
     if not transcript_text:
         metadata = _load_latest_minutes_metadata()
         transcript_text = str(metadata.get("labeled_transcript") or "").strip()
 
+    answers = list(session.get("answers") or [])
+    # Inject already-tried duplicate candidates as pseudo-answers so LLM avoids them
+    for q in (extra_sent_questions or []):
+        answers.append({
+            "question_index": len(answers),
+            "question": str(q),
+            "answer": "（確認済み・再送不可）",
+            "is_skipped": False,
+        })
+
     return detect_bottleneck_question(
         cleaned_transcript=transcript_text,
         minutes_markdown=updated_minutes,
-        previous_answers=session.get("answers") or [],
+        previous_answers=answers,
         max_question_count=int(session.get("max_questions") or 3),
     )
 
@@ -356,44 +382,57 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         logger.info("LINE_QA_FLOW_COMPLETED: reason=max_questions docs_url=%s", docs_url)
         return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です（{question_count}問）。"
 
-    # --- Generate next question using original minutes + previous answers ---
-    next_question = _generate_next_bottleneck_question(updated, original_minutes)
+    # --- Find next unsent question, skipping duplicate candidates via retry ---
+    tried_duplicates: list = []
+    max_retry = max(1, max_questions - question_count)
+    next_question = ""
+    for retry_idx in range(max_retry + 1):
+        candidate = _generate_next_bottleneck_question(
+            updated,
+            original_minutes,
+            extra_sent_questions=tried_duplicates if tried_duplicates else None,
+        )
+        if not candidate:
+            logger.info(
+                "LINE_QA_NO_MORE_BOTTLENECK: meeting_id=%s retry_idx=%s",
+                meeting_id, retry_idx,
+            )
+            break
+        if "\n" in candidate or "\r" in candidate:
+            logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", candidate)
+            candidate = candidate.replace("\r", " ").replace("\n", " ").strip()
+        if has_sent_question(updated, candidate):
+            logger.info(
+                "LINE_QA_DUPLICATE_CANDIDATE_DETECTED: meeting_id=%s attempt=%s question=%s",
+                meeting_id, retry_idx + 1, candidate,
+            )
+            tried_duplicates.append(candidate)
+            continue
+        logger.info(
+            "LINE_QA_NEXT_UNSENT_CANDIDATE_SELECTED: meeting_id=%s attempt=%s question=%s",
+            meeting_id, retry_idx + 1, candidate,
+        )
+        next_question = candidate
+        break
 
-    # --- Termination check 2: no more bottleneck ---
+    # --- Termination: no unsent candidate found ---
     if not next_question:
+        reason = "duplicate_exhausted" if tried_duplicates else "no_more_bottleneck"
+        if tried_duplicates:
+            logger.info(
+                "LINE_QA_FLOW_DUPLICATE_QUESTION_SKIPPED: meeting_id=%s all_tried=%s",
+                meeting_id, tried_duplicates,
+            )
         logger.info(
-            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=no_more_bottleneck question_number=%s",
-            meeting_id, question_count,
+            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=%s question_number=%s",
+            meeting_id, reason, question_count,
         )
         docs_url = _apply_answers_and_update_docs(updated)
         updated["status"] = "completed"
         updated["current_question"] = ""
         updated["answered"] = True
         save_session(updated)
-        logger.info("LINE_QA_FLOW_COMPLETED: reason=no_more_bottleneck docs_url=%s", docs_url)
-        return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です。"
-
-    if "\n" in next_question or "\r" in next_question:
-        logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", next_question)
-        next_question = next_question.replace("\r", " ").replace("\n", " ").strip()
-
-    # --- Termination check 3: duplicate question (check BEFORE set_next_question) ---
-    if has_sent_question(updated, next_question):
-        logger.info(
-            "LINE_QA_FLOW_DUPLICATE_QUESTION_SKIPPED: meeting_id=%s question=%s",
-            meeting_id,
-            next_question,
-        )
-        logger.info(
-            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=duplicate_question question_number=%s",
-            meeting_id, question_count,
-        )
-        docs_url = _apply_answers_and_update_docs(updated)
-        updated["status"] = "completed"
-        updated["current_question"] = ""
-        updated["answered"] = True
-        save_session(updated)
-        logger.info("LINE_QA_FLOW_COMPLETED: reason=duplicate_question docs_url=%s", docs_url)
+        logger.info("LINE_QA_FLOW_COMPLETED: reason=%s docs_url=%s", reason, docs_url)
         return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です。"
 
     # --- Continue: set next question, NO docs update ---

@@ -377,6 +377,12 @@ def write_minutes_to_google_docs(
     minutes_text: str,
     audio_file_path: Optional[str] = None,
 ) -> Dict[str, str]:
+def write_minutes_to_google_docs(
+    meeting_info: Dict[str, Any],
+    minutes_text: str,
+    audio_file_path: Optional[str] = None,
+    existing_document_id: Optional[str] = None,
+) -> Dict[str, str]:
     if not meeting_info:
         raise ValueError("meeting_info is required.")
     if not minutes_text or not minutes_text.strip():
@@ -402,6 +408,39 @@ def write_minutes_to_google_docs(
             "document_name": doc_name,
             "created": "false",
         }
+
+    # --- Fast path: update existing doc directly, no folder/name lookup, no new folder/doc ---
+    if existing_document_id:
+        logger.info(
+            "DOCS_UPDATE_TARGET: existing_document_id=%s folder_name=%s (no new folder or doc created)",
+            existing_document_id, folder_name,
+        )
+        try:
+            docs_service = _build_docs_service()
+            _clear_document_content(docs_service=docs_service, document_id=existing_document_id)
+            _write_document_text(
+                docs_service=docs_service,
+                document_id=existing_document_id,
+                text=minutes_text.strip(),
+                meeting_info=meeting_info,
+            )
+            document_url = f"https://docs.google.com/document/d/{existing_document_id}/edit"
+            logger.info("DOCS_UPDATE_EXISTING_SUCCESS: document_id=%s", existing_document_id)
+            return {
+                "folder_id": "",
+                "document_id": existing_document_id,
+                "document_url": document_url,
+                "google_docs_url": document_url,
+                "folder_name": folder_name,
+                "document_name": doc_name,
+                "created": "false",
+            }
+        except Exception as exc:
+            logger.warning(
+                "DOCS_UPDATE_EXISTING_FAILED: document_id=%s reason=%s (falling back to name-based lookup)",
+                existing_document_id, exc,
+            )
+            # Fall through to name-based lookup as failsafe
 
     parent_folder_id = getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", None)
     logger.info(
