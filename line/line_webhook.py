@@ -326,60 +326,93 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         )
         return "現在の質問への回答処理中です。少し待ってから再送してください。"
 
+    meeting_id = str(session.get("meeting_id") or session.get("drive_folder_id") or "")
+    answered_count = int(session.get("question_count") or 0)
+    max_questions = int(session.get("max_questions") or 3)
     logger.info(
-        "LINE_QA_FLOW_ANSWER_RECEIVED: meeting_id=%s current_count=%s answer=%s",
-        str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
-        int(session.get("question_count") or 0),
+        "LINE_QA_FLOW_ANSWER_RECEIVED: meeting_id=%s question_number=%s max=%s answer=%s",
+        meeting_id,
+        answered_count,
+        max_questions,
         question_answer,
     )
+
+    # Record answer (status → "answered")
     updated = append_answer_and_advance(session, question_answer)
-    docs_url = _apply_answers_and_update_docs(updated)
-
-    max_questions = int(updated.get("max_questions") or 3)
     question_count = int(updated.get("question_count") or 0)
-    updated_minutes = _load_latest_minutes_markdown()
 
+    # Load original minutes BEFORE any docs update
+    original_minutes = _load_latest_minutes_markdown()
+
+    # --- Termination check 1: max questions reached ---
     if question_count >= max_questions:
+        logger.info(
+            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=max_questions question_number=%s",
+            meeting_id, question_count,
+        )
+        docs_url = _apply_answers_and_update_docs(updated)
         updated["status"] = "completed"
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=max_questions docs_url=%s", docs_url)
-        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
+        return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です（{question_count}問）。"
 
-    next_question = _generate_next_bottleneck_question(updated, updated_minutes)
+    # --- Generate next question using original minutes + previous answers ---
+    next_question = _generate_next_bottleneck_question(updated, original_minutes)
+
+    # --- Termination check 2: no more bottleneck ---
     if not next_question:
+        logger.info(
+            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=no_more_bottleneck question_number=%s",
+            meeting_id, question_count,
+        )
+        docs_url = _apply_answers_and_update_docs(updated)
         updated["status"] = "completed"
         updated["current_question"] = ""
         updated["answered"] = True
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=no_more_bottleneck docs_url=%s", docs_url)
-        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
+        return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です。"
 
     if "\n" in next_question or "\r" in next_question:
         logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", next_question)
         next_question = next_question.replace("\r", " ").replace("\n", " ").strip()
 
-    refreshed = set_next_question(updated, next_question)
-    sent_question = get_current_question(refreshed)
-    if has_sent_question(refreshed, sent_question):
+    # --- Termination check 3: duplicate question (check BEFORE set_next_question) ---
+    if has_sent_question(updated, next_question):
         logger.info(
             "LINE_QA_FLOW_DUPLICATE_QUESTION_SKIPPED: meeting_id=%s question=%s",
-            str(refreshed.get("meeting_id") or refreshed.get("drive_folder_id") or ""),
-            sent_question,
+            meeting_id,
+            next_question,
         )
-        refreshed["status"] = "completed"
-        refreshed["current_question"] = ""
-        refreshed["answered"] = True
-        save_session(refreshed)
-        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
+        logger.info(
+            "LINE_QA_DOCS_UPDATE_TRIGGERED: meeting_id=%s reason=duplicate_question question_number=%s",
+            meeting_id, question_count,
+        )
+        docs_url = _apply_answers_and_update_docs(updated)
+        updated["status"] = "completed"
+        updated["current_question"] = ""
+        updated["answered"] = True
+        save_session(updated)
+        logger.info("LINE_QA_FLOW_COMPLETED: reason=duplicate_question docs_url=%s", docs_url)
+        return f"✅ 議事録を更新しました\ndocs_url: {docs_url}\n\n全質問完了です。"
 
-    refreshed = mark_question_sent(refreshed, sent_question)
+    # --- Continue: set next question, NO docs update ---
     logger.info(
-        "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
-        str(refreshed.get("meeting_id") or refreshed.get("drive_folder_id") or ""),
-        int(refreshed.get("question_count") or 0),
+        "LINE_QA_DOCS_UPDATE_SKIPPED: meeting_id=%s reason=continuing question_number=%s",
+        meeting_id, question_count,
+    )
+    refreshed = set_next_question(updated, next_question)
+    sent_question = get_current_question(refreshed)
+    refreshed = mark_question_sent(refreshed, sent_question)
+    next_count = int(refreshed.get("question_count") or 0)
+    logger.info(
+        "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_number=%s/%s question=%s",
+        meeting_id,
+        next_count,
+        max_questions,
         sent_question,
     )
-    return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n\n" + f"次の確認質問です。\n{sent_question}"
+    return f"次の確認質問です（{next_count}/{max_questions}問目）。\n\n{sent_question}"
 
 
 def _reply_to_line(reply_token: str, message_text: str) -> None:
@@ -480,7 +513,7 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
             if active_session is not None:
                 is_qa_answer_flow = True
                 if user_id:
-                    _reply_to_line(reply_token, "⏳ 処理中です（10〜30秒程度かかります）")
+                    _reply_to_line(reply_token, "⏳ 処理中です（数分かかる場合があります）")
                     immediate_sent = True
                 answer = _handle_ambiguity_answer(question)
             else:
