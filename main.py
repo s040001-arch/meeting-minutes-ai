@@ -1,11 +1,9 @@
 import argparse
 import os
-import threading
 from pathlib import Path
 
 from pipeline.cli_runner import run_pipeline_from_cli
 from utils.logger import get_logger
-import drive_cron_job
 
 logger = get_logger(__name__)
 
@@ -16,8 +14,11 @@ except ImportError:
     jsonify = None
     request = None
 
-handle_line_webhook = None
-_cron_started = False
+try:
+    from line.line_webhook import handle_line_webhook
+except ImportError as exc:
+    logger.warning("LINE webhook handler import failed: %s", exc)
+    handle_line_webhook = None
 
 
 def _create_app():
@@ -30,6 +31,7 @@ def _create_app():
     def health_check():
         return {"status": "ok"}
 
+    @app.post("/callback")
     @app.post("/line/webhook")
     def line_webhook():
         if handle_line_webhook is None:
@@ -52,21 +54,6 @@ def _create_app():
             return {"error": "internal_server_error"}, 500
 
     return app
-
-
-def _start_cron_once() -> None:
-    global _cron_started
-    if _cron_started:
-        return
-    _cron_started = True
-
-    def _runner():
-        try:
-            drive_cron_job.main()
-        except Exception as exc:
-            logger.exception("CRON_THREAD_FAILED: %s", exc)
-
-    threading.Thread(target=_runner, daemon=True).start()
 
 
 def main() -> None:
@@ -101,8 +88,8 @@ def main() -> None:
         return
 
     if args.serve_line:
-        _start_cron_once()
         app = _create_app()
+        logger.info("WEBHOOK_SERVER_START: host=%s port=%s routes=/callback,/line/webhook", args.host, args.port)
         app.run(host=args.host, port=args.port)
         return
 
@@ -120,10 +107,6 @@ def main() -> None:
         return
 
     parser.print_help()
-
-
-_start_cron_once()
-
 
 if __name__ == "__main__":
     main()

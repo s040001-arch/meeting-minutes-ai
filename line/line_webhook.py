@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -387,45 +388,72 @@ def _reply_to_line(reply_token: str, message_text: str) -> None:
             raise HTTPException(status_code=500, detail="Failed to reply to LINE")
 
 
+def _process_callback_events(body: Dict[str, Any]) -> None:
+    events = body.get("events", []) if isinstance(body, dict) else []
+    minutes_markdown = _load_latest_minutes_markdown()
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        source = event.get("source") or {}
+        user_id = str(source.get("userId") or "").strip()
+        if user_id:
+            logger.info("LINE_USER_ID: %s", user_id)
+        if event.get("type") != "message":
+            continue
+
+        message = event.get("message") or {}
+        if message.get("type") != "text":
+            continue
+
+        reply_token = str(event.get("replyToken") or "").strip()
+        question = str(message.get("text") or "").strip()
+        if not reply_token or not question:
+            continue
+
+        try:
+            active_session = _find_target_active_session()
+            if active_session is not None:
+                answer = _handle_ambiguity_answer(question)
+            else:
+                answer = _generate_answer(question, minutes_markdown)
+        except Exception as exc:
+            logger.warning("OpenAI answer generation failed: %s", exc)
+            answer = "回答生成に失敗しました。時間をおいて再度お試しください。"
+
+        _reply_to_line(reply_token, answer)
+
+
+def _safe_process_callback_events(body: Dict[str, Any]) -> None:
+    try:
+        _process_callback_events(body)
+    except Exception as exc:
+        logger.warning("CALLBACK_PROCESSING_FAILED: %s", exc)
+
+
+def handle_line_webhook(body: str, signature: str = "") -> Dict[str, Any]:
+    try:
+        payload = json.loads(body or "{}")
+    except Exception as exc:
+        logger.warning("CALLBACK_INVALID_JSON: %s", exc)
+        return {"status": "ok"}
+
+    events = payload.get("events", []) if isinstance(payload, dict) else []
+    logger.info(
+        "CALLBACK_RECEIVED: event_count=%s signature_present=%s",
+        len(events),
+        bool(str(signature or "").strip()),
+    )
+    threading.Thread(target=_safe_process_callback_events, args=(payload,), daemon=True).start()
+    return {"status": "ok"}
+
+
 @app.post("/callback")
 async def callback(request: Request) -> Dict[str, Any]:
     try:
-        print(await request.json())
-        body = await request.json()
-        events = body.get("events", []) if isinstance(body, dict) else []
-
-        minutes_markdown = _load_latest_minutes_markdown()
-
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            source = event.get("source") or {}
-            user_id = str(source.get("userId") or "").strip()
-            if user_id:
-                logger.info("LINE_USER_ID: %s", user_id)
-            if event.get("type") != "message":
-                continue
-
-            message = event.get("message") or {}
-            if message.get("type") != "text":
-                continue
-
-            reply_token = str(event.get("replyToken") or "").strip()
-            question = str(message.get("text") or "").strip()
-            if not reply_token or not question:
-                continue
-
-            try:
-                active_session = _find_target_active_session()
-                if active_session is not None:
-                    answer = _handle_ambiguity_answer(question)
-                else:
-                    answer = _generate_answer(question, minutes_markdown)
-            except Exception as exc:
-                logger.warning("OpenAI answer generation failed: %s", exc)
-                answer = "回答生成に失敗しました。時間をおいて再度お試しください。"
-
-            _reply_to_line(reply_token, answer)
+        body_text = await request.body()
+        signature = request.headers.get("X-Line-Signature", "")
+        return handle_line_webhook(body_text.decode("utf-8"), signature=signature)
     except Exception as exc:
         logger.warning("/callback failed but returns 200: %s", exc)
     return {"status": "ok"}
