@@ -270,6 +270,13 @@ def _apply_answers_and_update_docs(session: Dict[str, Any]) -> str:
         "DOCS_UPDATE_TARGET_RESOLVE: meeting_id=%s existing_docs_url=%s existing_doc_id=%s",
         meeting_id_for_log, existing_docs_url, existing_doc_id,
     )
+    if not existing_doc_id:
+        logger.error(
+            "DOCS_UPDATE_TARGET_NOT_FOUND: meeting_id=%s existing_docs_url=%s",
+            meeting_id_for_log,
+            existing_docs_url,
+        )
+        raise ValueError("existing document id is required for QA docs update")
     docs_result = write_minutes_to_google_docs(
         meeting_info=meeting_info,
         minutes_text=updated_markdown,

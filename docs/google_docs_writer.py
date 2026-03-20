@@ -437,10 +437,10 @@ def write_minutes_to_google_docs(
             }
         except Exception as exc:
             logger.warning(
-                "DOCS_UPDATE_EXISTING_FAILED: document_id=%s reason=%s (falling back to name-based lookup)",
+                "DOCS_UPDATE_EXISTING_FAILED: document_id=%s reason=%s (no fallback create)",
                 existing_document_id, exc,
             )
-            # Fall through to name-based lookup as failsafe
+            raise
 
     parent_folder_id = getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", None)
     logger.info(
