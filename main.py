@@ -146,6 +146,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if (
+        not args.audio_file_path
+        and not args.serve_line
+        and str(os.getenv("PORT", "") or "").strip()
+    ):
+        args.serve_line = True
+        logger.info(
+            "AUTO_SERVE_LINE_ENABLED: reason=port_env_detected host=%s port=%s",
+            args.host,
+            args.port,
+        )
+
     if args.audio_file_path:
         audio_file_path = args.audio_file_path
         if not os.path.isabs(audio_file_path):
