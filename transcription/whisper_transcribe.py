@@ -15,6 +15,7 @@ _WHISPER_SPLIT_SAMPLE_RATE: int = 16000
 _WHISPER_SPLIT_CHANNELS: int = 1
 _WHISPER_SPLIT_BYTES_PER_SAMPLE: int = 2  # pcm_s16le
 _WHISPER_SPLIT_SIZE_SAFETY_MARGIN: float = 0.85
+_WHISPER_TRANSCRIBE_MAX_RETRIES: int = 6
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
@@ -23,7 +24,7 @@ _TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND = "[TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOU
 
 
 def _create_whisper_transcription(audio_file, source_path: str, chunk_index: int):
-    max_retries = 3
+    max_retries = int(getattr(settings, "WHISPER_TRANSCRIBE_MAX_RETRIES", _WHISPER_TRANSCRIBE_MAX_RETRIES))
     for attempt in range(max_retries + 1):
         try:
             return client.audio.transcriptions.create(
@@ -31,21 +32,39 @@ def _create_whisper_transcription(audio_file, source_path: str, chunk_index: int
                 file=audio_file,
                 language=settings.WHISPER_LANGUAGE,
             )
-        except InternalServerError:
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "insufficient_quota" in error_text:
+                raise
+
+            retryable = (
+                isinstance(exc, InternalServerError)
+                or "timeout" in error_text
+                or "timed out" in error_text
+                or "connection" in error_text
+                or "temporarily unavailable" in error_text
+                or "rate limit" in error_text
+                or "429" in error_text
+            )
+
+            if not retryable:
+                raise
+
             if attempt >= max_retries:
                 logger.exception(
-                    "Whisper InternalServerError(500) exhausted retries. chunk_index=%s source=%s",
+                    "Whisper retryable error exhausted retries. chunk_index=%s source=%s",
                     chunk_index,
                     source_path,
                 )
                 return None
             backoff_sec = 2**attempt
             logger.warning(
-                "Whisper InternalServerError(500). retry_count=%s chunk_index=%s wait_seconds=%s source=%s",
+                "Whisper retryable error. retry_count=%s chunk_index=%s wait_seconds=%s source=%s reason=%s",
                 attempt + 1,
                 chunk_index,
                 backoff_sec,
                 source_path,
+                exc,
             )
             time.sleep(backoff_sec)
 
@@ -160,10 +179,24 @@ def _split_and_transcribe(file_path: str) -> str:
     )
 
     chunks_text: List[str] = []
+    success_chunks = 0
+    failed_chunks = 0
+    processed_until_sec = 0.0
+    failed_ranges: List[Tuple[float, float]] = []
     with tempfile.TemporaryDirectory() as tmp_dir:
         chunk_index = 0
         offset = 0.0
         while offset < duration_sec:
+            chunk_start = float(offset)
+            chunk_end = float(min(offset + chunk_sec, duration_sec))
+            logger.info(
+                "WHISPER_SPLIT_CHUNK_START: chunk_index=%s start_sec=%.2f end_sec=%.2f start_min=%.2f end_min=%.2f",
+                chunk_index,
+                chunk_start,
+                chunk_end,
+                chunk_start / 60.0,
+                chunk_end / 60.0,
+            )
             chunk_path = str(Path(tmp_dir) / f"split_chunk_{chunk_index}.wav")
             try:
                 subprocess.run(
@@ -203,6 +236,8 @@ def _split_and_transcribe(file_path: str) -> str:
                     file_path,
                     stderr_text[:1000],
                 )
+                failed_chunks += 1
+                failed_ranges.append((chunk_start, chunk_end))
                 offset += chunk_sec
                 chunk_index += 1
                 continue
@@ -239,15 +274,43 @@ def _split_and_transcribe(file_path: str) -> str:
                     chunk_index,
                     chunk_path,
                 )
+                failed_chunks += 1
+                failed_ranges.append((chunk_start, chunk_end))
                 offset += chunk_sec
                 chunk_index += 1
                 continue
             chunks_text.append(response.text.strip())
+            success_chunks += 1
+            processed_until_sec = max(processed_until_sec, chunk_end)
+            logger.info(
+                "WHISPER_SPLIT_CHUNK_DONE: chunk_index=%s processed_until_sec=%.2f processed_until_min=%.2f",
+                chunk_index,
+                processed_until_sec,
+                processed_until_sec / 60.0,
+            )
             offset += chunk_sec
             chunk_index += 1
 
     merged = "\n".join(t for t in chunks_text if t)
-    logger.info("Split transcription completed. chunks=%d", chunk_index)
+    coverage_percent = (processed_until_sec / duration_sec * 100.0) if duration_sec > 0 else 0.0
+    logger.info(
+        "WHISPER_SPLIT_SUMMARY: total_duration_sec=%.2f total_duration_min=%.2f total_chunks=%s success_chunks=%s failed_chunks=%s processed_until_sec=%.2f processed_until_min=%.2f coverage_percent=%.2f",
+        duration_sec,
+        duration_sec / 60.0,
+        chunk_index,
+        success_chunks,
+        failed_chunks,
+        processed_until_sec,
+        processed_until_sec / 60.0,
+        coverage_percent,
+    )
+    if failed_ranges:
+        condensed = [f"{s/60.0:.2f}-{e/60.0:.2f}min" for s, e in failed_ranges[:10]]
+        logger.warning(
+            "WHISPER_SPLIT_FAILED_RANGES: count=%s sample=%s",
+            len(failed_ranges),
+            ",".join(condensed),
+        )
     return merged
 
 
