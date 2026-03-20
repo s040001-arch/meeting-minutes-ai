@@ -166,17 +166,24 @@ def _log_local_execution_summary_once(result: Dict[str, Any]) -> None:
 
 
 def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
-    logger.info("LINE_NOTIFY_START")
     try:
         docs_url = result.get("google_docs_url")
+        logger.info(
+            "LINE_NOTIFY_PRECHECK: docs_url_present=%s",
+            bool(str(docs_url or "").strip()),
+        )
         if docs_url is None or str(docs_url).strip() == "":
+            logger.warning("LINE_NOTIFY_PRECHECK: docs_url_empty=True")
             raise ValueError("google_docs_url is empty")
         docs_url = str(docs_url).strip()
 
         channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
         notify_user_id = os.getenv("LINE_NOTIFY_USER_ID", "").strip()
-        if not channel_access_token or not notify_user_id:
-            logger.warning("LINE_NOTIFY_SKIP: missing LINE_CHANNEL_ACCESS_TOKEN or LINE_NOTIFY_USER_ID")
+        if not channel_access_token:
+            logger.warning("LINE_NOTIFY_SKIP_MISSING_ACCESS_TOKEN: token_present=False")
+            return
+        if not notify_user_id:
+            logger.warning("LINE_NOTIFY_SKIP_MISSING_USER_ID: user_id_present=False")
             return
 
         meeting_info = result.get("meeting_info") or {}
@@ -219,15 +226,17 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
             },
             method="POST",
         )
+        logger.info("LINE_NOTIFY_REQUEST_START: to=%s", notify_user_id)
         with urlrequest.urlopen(req) as resp:
             if resp.status >= 400:
-                logger.warning("LINE_NOTIFY_SKIP: HTTP status=%s", resp.status)
+                logger.warning("LINE_NOTIFY_REQUEST_FAILED: status=%s phase=notify_message", resp.status)
                 return
+        logger.info("LINE_NOTIFY_REQUEST_SUCCESS: phase=notify_message")
 
         google_doc_result = result.get("google_doc_result") or {}
         drive_folder_id = str(google_doc_result.get("folder_id") or "").strip()
         logger.info(
-            "LINE_QA_FLOW_START: initial_question_present=%s drive_folder_id_present=%s",
+            "LINE_QA_FLOW_ENTER: initial_question_present=%s drive_folder_id_present=%s",
             bool(initial_question),
             bool(drive_folder_id),
         )
@@ -267,7 +276,7 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
                 )
                 with urlrequest.urlopen(question_req) as question_resp:
                     if question_resp.status >= 400:
-                        logger.warning("LINE_QA_FIRST_QUESTION_SKIP: HTTP status=%s", question_resp.status)
+                        logger.warning("LINE_NOTIFY_REQUEST_FAILED: status=%s phase=first_question", question_resp.status)
                     else:
                         logger.info(
                             "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
@@ -275,6 +284,12 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
                             int(session.get("question_count") or 0),
                             first_question,
                         )
+        else:
+            logger.warning(
+                "LINE_QA_FLOW_SKIP_REASON: initial_question_present=%s drive_folder_id_present=%s",
+                bool(initial_question),
+                bool(drive_folder_id),
+            )
 
         logger.info("LINE_NOTIFY_SUCCESS: customer_name=%s meeting_title=%s", customer_name, meeting_title)
     except Exception as exc:
@@ -301,6 +316,11 @@ def run_pipeline_from_cli(
         )
 
     result = run_meeting_pipeline(audio_file_path)
+    logger.info(
+        "DOCS_FLOW_AFTER_GENERATION: docs_url_present=%s drive_folder_id_present=%s",
+        bool(str(result.get("google_docs_url") or "").strip()),
+        bool(str((result.get("google_doc_result") or {}).get("folder_id") or "").strip()),
+    )
     _save_latest_minutes_markdown_after_success(result)
     validations = result.get("utterance_validations", []) or []
     _log_validation_summary_once(validations)
