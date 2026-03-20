@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from docs.google_docs_writer import save_latest_minutes_state
-from line.qa_session_state import close_all_active_sessions, create_or_reset_session, get_current_question
+from line.qa_session_state import (
+    close_active_sessions_except,
+    create_or_reset_session,
+    find_active_session,
+    get_current_question,
+    has_sent_question,
+    mark_question_sent,
+)
 from preprocess.transcript_preprocessor_gpt import detect_bottleneck_question
 from pipeline.meeting_pipeline import run_meeting_pipeline
 from utils.logger import get_logger
@@ -242,6 +249,14 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
         )
 
         if initial_question and drive_folder_id:
+            existing = find_active_session(drive_folder_id)
+            if existing is not None and str(existing.get("status") or "").strip() == "waiting_for_answer":
+                logger.info(
+                    "LINE_QA_FLOW_WAITING_NO_ACTION: meeting_id=%s reason=already_waiting_for_answer",
+                    str(existing.get("meeting_id") or drive_folder_id),
+                )
+                return
+
             session = create_or_reset_session(
                 drive_folder_id=drive_folder_id,
                 docs_url=docs_url,
@@ -256,6 +271,13 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
             )
             first_question = get_current_question(session)
             if first_question:
+                if has_sent_question(session, first_question):
+                    logger.info(
+                        "LINE_QA_FLOW_DUPLICATE_QUESTION_SKIPPED: meeting_id=%s question=%s",
+                        str(session.get("meeting_id") or drive_folder_id),
+                        first_question,
+                    )
+                    return
                 question_payload = {
                     "to": notify_user_id,
                     "messages": [
@@ -278,6 +300,7 @@ def _send_line_notification_after_success(result: Dict[str, Any]) -> None:
                     if question_resp.status >= 400:
                         logger.warning("LINE_NOTIFY_REQUEST_FAILED: status=%s phase=first_question", question_resp.status)
                     else:
+                        session = mark_question_sent(session, first_question)
                         logger.info(
                             "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
                             str(session.get("meeting_id") or drive_folder_id),
@@ -306,16 +329,20 @@ def run_pipeline_from_cli(
         Path(audio_file_path).suffix.lower(),
     )
 
-    close_reason = "次の会議開始による打ち切り"
-    closed_count = close_all_active_sessions(close_reason)
-    if closed_count > 0:
-        logger.info(
-            "LINE_QA_SESSIONS_CLOSED_ON_NEW_MEETING_START: count=%s reason=%s",
-            closed_count,
-            close_reason,
-        )
-
     result = run_meeting_pipeline(audio_file_path)
+
+    close_reason = "次の音声ファイル到着による強制終了"
+    current_meeting_id = str((result.get("google_doc_result") or {}).get("folder_id") or "").strip()
+    if current_meeting_id:
+        closed_count = close_active_sessions_except(current_meeting_id, close_reason)
+        if closed_count > 0:
+            logger.info(
+                "LINE_QA_FLOW_SESSION_CLOSED_BY_NEW_AUDIO: count=%s reason=%s current_meeting_id=%s",
+                closed_count,
+                close_reason,
+                current_meeting_id,
+            )
+
     logger.info(
         "DOCS_FLOW_AFTER_GENERATION: docs_url_present=%s drive_folder_id_present=%s",
         bool(str(result.get("google_docs_url") or "").strip()),

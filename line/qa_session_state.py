@@ -29,6 +29,16 @@ def _normalize_questions(raw: Any) -> List[str]:
     return [str(q).strip() for q in raw if str(q).strip()]
 
 
+def _append_unique_question(questions: List[str], question: str) -> List[str]:
+    normalized = str(question or "").strip()
+    if not normalized:
+        return questions
+    if normalized in questions:
+        return questions
+    questions.append(normalized)
+    return questions
+
+
 def _normalize_answers(raw: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -71,6 +81,7 @@ def _normalize_session_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
             question_count = min(len(ambiguity_questions), max_questions)
 
     answers = _normalize_answers(raw.get("answers"))
+    sent_questions = _normalize_questions(raw.get("sent_questions"))
 
     status = str(raw.get("status") or "").strip()
     if not status:
@@ -95,6 +106,7 @@ def _normalize_session_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         "max_questions": max_questions,
         "current_question_index": current_question_index,
         "answers": answers,
+        "sent_questions": sent_questions,
         "labeled_transcript": str(raw.get("labeled_transcript") or "").strip(),
         "last_user_reply_at": str(
             raw.get("last_user_reply_at")
@@ -138,6 +150,7 @@ def create_or_reset_session(
         "max_questions": max(1, int(max_questions or 3)),
         "current_question_index": 0,
         "answers": [],
+        "sent_questions": [],
         "labeled_transcript": str(labeled_transcript or "").strip(),
         "last_user_reply_at": "",
         "created_at": _now_iso(),
@@ -235,8 +248,60 @@ def close_all_active_sessions(close_reason: str) -> int:
     return closed_count
 
 
+def close_active_sessions_except(meeting_id: str, close_reason: str) -> int:
+    keep_id = str(meeting_id or "").strip()
+    if not keep_id:
+        return 0
+
+    QA_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    closed_count = 0
+
+    for path in QA_SESSIONS_DIR.glob("*.json"):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        if not isinstance(loaded, dict):
+            continue
+
+        normalized = _normalize_session_payload(loaded)
+        session_meeting_id = str(
+            normalized.get("meeting_id")
+            or normalized.get("drive_folder_id")
+            or ""
+        ).strip()
+        if session_meeting_id == keep_id:
+            continue
+        if not _is_session_active(normalized):
+            continue
+
+        normalized["status"] = "completed"
+        normalized["close_reason"] = str(close_reason or "").strip()
+        normalized["closed_at"] = _now_iso()
+        save_session(normalized)
+        closed_count += 1
+
+    return closed_count
+
+
 def get_current_question(session: Dict[str, Any]) -> str:
     return str(session.get("current_question") or "").strip()
+
+
+def has_sent_question(session: Dict[str, Any], question: str) -> bool:
+    normalized = str(question or "").strip()
+    if not normalized:
+        return False
+    sent_questions = _normalize_questions(session.get("sent_questions"))
+    return normalized in sent_questions
+
+
+def mark_question_sent(session: Dict[str, Any], question: str) -> Dict[str, Any]:
+    sent_questions = _normalize_questions(session.get("sent_questions"))
+    session["sent_questions"] = _append_unique_question(sent_questions, question)
+    save_session(session)
+    return load_session(str(session.get("meeting_id") or session.get("drive_folder_id") or "")) or _normalize_session_payload(session)
 
 
 def append_answer_and_advance(session: Dict[str, Any], answer_text: str) -> Dict[str, Any]:
@@ -267,7 +332,7 @@ def append_answer_and_advance(session: Dict[str, Any], answer_text: str) -> Dict
 
     session["answered"] = True
     session["last_user_reply_at"] = _now_iso()
-    session["status"] = "ready_for_docs_update"
+    session["status"] = "answered"
     save_session(session)
     reloaded = load_session(str(session.get("meeting_id") or session.get("drive_folder_id") or ""))
     return reloaded or _normalize_session_payload(session)
@@ -300,6 +365,8 @@ def set_next_question(session: Dict[str, Any], question: str) -> Dict[str, Any]:
     history = _normalize_questions(session.get("ambiguity_questions"))
     history.append(next_question)
     session["ambiguity_questions"] = history
+    sent_questions = _normalize_questions(session.get("sent_questions"))
+    session["sent_questions"] = sent_questions
 
     save_session(session)
     return load_session(str(session.get("meeting_id") or session.get("drive_folder_id") or "")) or _normalize_session_payload(session)

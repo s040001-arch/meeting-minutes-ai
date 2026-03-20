@@ -16,6 +16,8 @@ from line.qa_session_state import (
     find_active_session,
     find_latest_active_session,
     get_current_question,
+    has_sent_question,
+    mark_question_sent,
     save_session,
     set_next_question,
 )
@@ -307,9 +309,18 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
     if not session:
         return ""
 
+    status = str(session.get("status") or "").strip()
+    if status != "waiting_for_answer":
+        logger.warning(
+            "LINE_QA_FLOW_WAITING_NO_ACTION: meeting_id=%s status=%s",
+            str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
+            status,
+        )
+        return "現在このセッションは回答待機中ではありません。次の音声処理をお待ちください。"
+
     if bool(session.get("answered", False)):
         logger.warning(
-            "LINE_QA_FLOW_ERROR_UNANSWERED_NEXT_QUESTION: meeting_id=%s",
+            "LINE_QA_FLOW_WAITING_NO_ACTION: meeting_id=%s status=answered_flag_true",
             str(session.get("meeting_id") or session.get("drive_folder_id") or ""),
         )
         return "現在の質問への回答処理中です。少し待ってから再送してください。"
@@ -348,6 +359,19 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
 
     refreshed = set_next_question(updated, next_question)
     sent_question = get_current_question(refreshed)
+    if has_sent_question(refreshed, sent_question):
+        logger.info(
+            "LINE_QA_FLOW_DUPLICATE_QUESTION_SKIPPED: meeting_id=%s question=%s",
+            str(refreshed.get("meeting_id") or refreshed.get("drive_folder_id") or ""),
+            sent_question,
+        )
+        refreshed["status"] = "completed"
+        refreshed["current_question"] = ""
+        refreshed["answered"] = True
+        save_session(refreshed)
+        return f"議事録を更新しました。\ndocs_url: {docs_url}"
+
+    refreshed = mark_question_sent(refreshed, sent_question)
     logger.info(
         "LINE_QA_FLOW_QUESTION_SENT: meeting_id=%s question_count=%s question=%s",
         str(refreshed.get("meeting_id") or refreshed.get("drive_folder_id") or ""),
