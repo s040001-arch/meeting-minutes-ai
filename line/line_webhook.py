@@ -407,9 +407,11 @@ def _reply_to_line(reply_token: str, message_text: str) -> None:
         method="POST",
     )
 
+    logger.info("LINE_QA_REPLY_MESSAGE_SEND_START: reply_token_present=%s", bool(reply_token))
     with urlrequest.urlopen(req) as resp:
         if resp.status >= 400:
             raise HTTPException(status_code=500, detail="Failed to reply to LINE")
+    logger.info("LINE_QA_REPLY_MESSAGE_SEND_SUCCESS: status=ok")
 
 
 def _process_callback_events(body: Dict[str, Any]) -> None:
@@ -435,6 +437,8 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
         if not reply_token or not question:
             continue
 
+        answer = ""
+        active_session = None
         try:
             active_session = _find_target_active_session()
             if active_session is not None:
@@ -444,8 +448,26 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
         except Exception as exc:
             logger.warning("OpenAI answer generation failed: %s", exc)
             answer = "エラーが発生したため回答反映に失敗しました。時間をおいて再度お試しください。"
+        finally:
+            if not str(answer or "").strip():
+                answer = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
 
-        _reply_to_line(reply_token, answer)
+            logger.info(
+                "LINE_QA_REPLY_MESSAGE_PREPARED: answer_length=%s active_session=%s",
+                len(str(answer or "")),
+                bool(active_session is not None),
+            )
+            try:
+                _reply_to_line(reply_token, str(answer)[:4900])
+            except Exception as reply_exc:
+                logger.warning("LINE_QA_REPLY_MESSAGE_SEND_FAILED: %s", reply_exc)
+                fallback_message = "エラーが発生しました。時間をおいて再度お試しください。"
+                if str(answer).strip() == fallback_message:
+                    continue
+                try:
+                    _reply_to_line(reply_token, fallback_message)
+                except Exception as fallback_exc:
+                    logger.warning("LINE_QA_REPLY_MESSAGE_FALLBACK_SEND_FAILED: %s", fallback_exc)
 
 
 def _safe_process_callback_events(body: Dict[str, Any]) -> None:
