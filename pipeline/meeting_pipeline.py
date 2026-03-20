@@ -113,10 +113,8 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         )
         formatted_minutes = format_minutes(minutes_result)
 
-    if not claude_fallback_used:
-        formatted_minutes = review_minutes(formatted_minutes)
-    else:
-        logger.info("REVIEW_SKIPPED: reason=claude_fallback_active")
+    reviewed_minutes, review_followup = review_minutes(formatted_minutes)
+    formatted_minutes = reviewed_minutes
 
     bottleneck_question = detect_bottleneck_question(
         cleaned_transcript=labeled_transcript,
@@ -177,6 +175,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         "formatted_minutes": formatted_minutes,
         "google_docs_url": google_doc_result["document_url"],
         "local_minutes_path": local_minutes_path,
+        "review_followup_question": review_followup,
         "utterance_validations": [],
         "google_doc_result": google_doc_result,
         "execution_summary": {

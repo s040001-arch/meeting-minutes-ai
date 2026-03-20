@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from config.settings import settings
 from docs.google_docs_writer import write_minutes_to_google_docs
+from minutes.minutes_generator_claude import review_minutes
 from line.qa_session_state import (
     append_answer_and_advance,
     find_active_session,
@@ -253,6 +254,11 @@ def _apply_answers_and_update_docs(session: Dict[str, Any]) -> str:
         metadata=metadata,
         answers=effective_answers,
     )
+
+    reviewed_markdown, qa_review_followup = review_minutes(updated_markdown)
+    updated_markdown = reviewed_markdown
+    if qa_review_followup:
+        logger.info("QA_REVIEW_FOLLOWUP: %s", qa_review_followup)
 
     meeting_info = {
         "date": str(metadata.get("meeting_date") or "").strip(),

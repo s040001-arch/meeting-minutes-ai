@@ -279,6 +279,10 @@ TRANSCRIPT>>>
 """
 
 
+_REVIEW_FOLLOWUP_START = "<<<FOLLOWUP_QUESTION>>>"
+_REVIEW_FOLLOWUP_END = "<<<END_FOLLOWUP_QUESTION>>>"
+
+
 def _build_review_prompt(minutes_text: str) -> str:
     return f"""あなたは議事録品質レビュー担当です。
 以下のMarkdown議事録を、品質基準に従って見直し、修正済みの完全な議事録をMarkdownで出力してください。
@@ -311,17 +315,22 @@ def _build_review_prompt(minutes_text: str) -> str:
      - Next Action
    - 矛盾がある場合は修正する
 
-6. 追加確認事項
-   - 重要論点で未確定なものがある場合のみ、最大1問の確認事項を「## 残論点」の末尾に追記する
-   - 追記する場合は「【要確認】」プレフィックスをつける
-   - 不要な場合は追記しない
-
 【出力要件】
 - 元の議事録と同じMarkdownフォーマットを維持すること
 - セクション見出し（## 会議概要 / ## 決まったこと / ## 残論点 / ## Next Action / ## 発言録（逐語））を変更しないこと
 - 「## 発言録（逐語）」セクションの内容は一切変更しないこと（そのまま出力）
 - 修正が不要な箇所は元の文言をそのまま維持すること
-- コードブロックや前置き文章は不要。Markdownの議事録本文のみ出力すること
+- フォローアップ質問を議事録本文に埋め込まないこと
+- コードブロックや前置き文章は不要
+
+【出力フォーマット】
+まず修正済みのMarkdown議事録本文のみを出力してください。
+その後、以下の区切り行でフォローアップ質問を出力してください。
+重要な未確定論点がある場合のみ最大1問。不要なら区切り行の中を空欄にしてください。
+
+<<<FOLLOWUP_QUESTION>>>
+（質問文 or 空欄）
+<<<END_FOLLOWUP_QUESTION>>>
 
 入力議事録:
 <<<MINUTES
@@ -630,8 +639,8 @@ def generate_minutes_with_claude(
         raise
 
 
-def review_minutes(minutes_text: str) -> str:
-    """議事録の品質レビューを1回実行し、修正済み議事録を返す。失敗時は元テキストを返す。"""
+def review_minutes(minutes_text: str) -> Tuple[str, str]:
+    """議事録の品質レビューを1回実行し、(修正済み議事録, followup_question) を返す。失敗時は (元テキスト, "") を返す。"""
     logger.info("=== REVIEW START ===")
     before_len = len(minutes_text)
 
@@ -649,12 +658,23 @@ def review_minutes(minutes_text: str) -> str:
             max_output_tokens=max_tokens,
             input=prompt,
         )
-        reviewed_text = _extract_text_from_response(response).strip()
+        raw_text = _extract_text_from_response(response).strip()
+
+        if _REVIEW_FOLLOWUP_START in raw_text and _REVIEW_FOLLOWUP_END in raw_text:
+            parts = raw_text.split(_REVIEW_FOLLOWUP_START, 1)
+            reviewed_text = parts[0].strip()
+            followup_raw = parts[1].split(_REVIEW_FOLLOWUP_END, 1)[0].strip()
+            followup_question = followup_raw if followup_raw and followup_raw != "（質問文 or 空欄）" else ""
+        else:
+            reviewed_text = raw_text
+            followup_question = ""
+
         after_len = len(reviewed_text)
         logger.info("REVIEW_APPLIED: true")
         logger.info("REVIEW_DIFF: before=%s after=%s", before_len, after_len)
-        return reviewed_text
+        logger.info("REVIEW_FOLLOWUP_PRESENT: %s", bool(followup_question))
+        return reviewed_text, followup_question
     except Exception as exc:
         logger.warning("REVIEW_FAILED: reason=%s", exc)
         logger.info("REVIEW_APPLIED: false (fallback to original)")
-        return minutes_text
+        return minutes_text, ""
