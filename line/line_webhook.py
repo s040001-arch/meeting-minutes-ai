@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 app = FastAPI()
 
 _LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply"
+_LINE_PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push"
 _LATEST_MINUTES_FILE = (Path(__file__).resolve().parent / ".." / "data" / "latest_minutes_state.json").resolve()
 _OPENAI_MODEL = "gpt-4.1-mini"
 
@@ -342,7 +343,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         updated["status"] = "completed"
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=max_questions docs_url=%s", docs_url)
-        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
+        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
 
     next_question = _generate_next_bottleneck_question(updated, updated_minutes)
     if not next_question:
@@ -351,7 +352,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         updated["answered"] = True
         save_session(updated)
         logger.info("LINE_QA_FLOW_COMPLETED: reason=no_more_bottleneck docs_url=%s", docs_url)
-        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
+        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
 
     if "\n" in next_question or "\r" in next_question:
         logger.warning("LINE_QA_FLOW_ERROR_MULTIPLE_QUESTION: raw=%s", next_question)
@@ -369,7 +370,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         refreshed["current_question"] = ""
         refreshed["answered"] = True
         save_session(refreshed)
-        return "回答を議事録に反映しました。\n全質問完了です。\n" + f"docs_url: {docs_url}"
+        return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n" + "全質問完了です。"
 
     refreshed = mark_question_sent(refreshed, sent_question)
     logger.info(
@@ -378,7 +379,7 @@ def _handle_ambiguity_answer(question_answer: str) -> str:
         int(refreshed.get("question_count") or 0),
         sent_question,
     )
-    return "回答を議事録に反映しました。\n" + f"docs_url: {docs_url}\n\n次の確認質問です。\n{sent_question}"
+    return "✅ 回答を議事録に反映しました\n" + f"docs_url: {docs_url}\n\n" + f"次の確認質問です。\n{sent_question}"
 
 
 def _reply_to_line(reply_token: str, message_text: str) -> None:
@@ -414,6 +415,39 @@ def _reply_to_line(reply_token: str, message_text: str) -> None:
     logger.info("LINE_QA_REPLY_MESSAGE_SEND_SUCCESS: status=ok")
 
 
+def _push_to_line_user(user_id: str, message_text: str) -> None:
+    access_token = settings.LINE_CHANNEL_ACCESS_TOKEN
+    if not access_token:
+        raise HTTPException(status_code=500, detail="LINE_CHANNEL_ACCESS_TOKEN is not set")
+
+    payload = {
+        "to": str(user_id or "").strip(),
+        "messages": [
+            {
+                "type": "text",
+                "text": str(message_text or "")[:4900],
+            }
+        ],
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    req = urlrequest.Request(
+        _LINE_PUSH_ENDPOINT,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        },
+        method="POST",
+    )
+
+    logger.info("LINE_QA_PUSH_MESSAGE_SEND_START: user_id_present=%s", bool(str(user_id or "").strip()))
+    with urlrequest.urlopen(req) as resp:
+        if resp.status >= 400:
+            raise HTTPException(status_code=500, detail="Failed to push to LINE")
+    logger.info("LINE_QA_PUSH_MESSAGE_SEND_SUCCESS: status=ok")
+
+
 def _process_callback_events(body: Dict[str, Any]) -> None:
     events = body.get("events", []) if isinstance(body, dict) else []
     minutes_markdown = _load_latest_minutes_markdown()
@@ -439,18 +473,24 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
 
         answer = ""
         active_session = None
+        is_qa_answer_flow = False
+        immediate_sent = False
         try:
             active_session = _find_target_active_session()
             if active_session is not None:
+                is_qa_answer_flow = True
+                if user_id:
+                    _reply_to_line(reply_token, "⏳ 処理中です（10〜30秒程度かかります）")
+                    immediate_sent = True
                 answer = _handle_ambiguity_answer(question)
             else:
                 answer = _generate_answer(question, minutes_markdown)
         except Exception as exc:
             logger.warning("OpenAI answer generation failed: %s", exc)
-            answer = "エラーが発生したため回答反映に失敗しました。時間をおいて再度お試しください。"
+            answer = "⚠️ エラーが発生しました（再試行してください）"
         finally:
             if not str(answer or "").strip():
-                answer = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
+                answer = "⚠️ エラーが発生しました（再試行してください）"
 
             logger.info(
                 "LINE_QA_REPLY_MESSAGE_PREPARED: answer_length=%s active_session=%s",
@@ -458,14 +498,20 @@ def _process_callback_events(body: Dict[str, Any]) -> None:
                 bool(active_session is not None),
             )
             try:
-                _reply_to_line(reply_token, str(answer)[:4900])
+                if is_qa_answer_flow and immediate_sent and user_id:
+                    _push_to_line_user(user_id, str(answer)[:4900])
+                else:
+                    _reply_to_line(reply_token, str(answer)[:4900])
             except Exception as reply_exc:
                 logger.warning("LINE_QA_REPLY_MESSAGE_SEND_FAILED: %s", reply_exc)
-                fallback_message = "エラーが発生しました。時間をおいて再度お試しください。"
+                fallback_message = "⚠️ エラーが発生しました（再試行してください）"
                 if str(answer).strip() == fallback_message:
                     continue
                 try:
-                    _reply_to_line(reply_token, fallback_message)
+                    if is_qa_answer_flow and immediate_sent and user_id:
+                        _push_to_line_user(user_id, fallback_message)
+                    else:
+                        _reply_to_line(reply_token, fallback_message)
                 except Exception as fallback_exc:
                     logger.warning("LINE_QA_REPLY_MESSAGE_FALLBACK_SEND_FAILED: %s", fallback_exc)
 
