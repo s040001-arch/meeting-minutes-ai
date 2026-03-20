@@ -279,6 +279,57 @@ TRANSCRIPT>>>
 """
 
 
+def _build_review_prompt(minutes_text: str) -> str:
+    return f"""あなたは議事録品質レビュー担当です。
+以下のMarkdown議事録を、品質基準に従って見直し、修正済みの完全な議事録をMarkdownで出力してください。
+
+【品質レビュー基準】
+
+1. 固有名詞の正規化
+   - 人名の表記ゆれを統一する（例：秋元 / 秋本 → どちらかに統一）
+   - 同一人物の複数表記を禁止する
+   - 不明な場合はそのまま残す（推測による補完・変更禁止）
+
+2. 決定事項の精査
+   - 「## 決まったこと」には、会議で明確に合意された内容のみ残す
+   - 仮説・推測・未確定の内容は「## 決まったこと」から除外し、「## 残論点」へ移動する
+
+3. Next Actionの具体化
+   - 「## Next Action」の全項目を「誰が / 何をする」が明確な形に修正する
+   - NG例：〜を検討する、〜を確認する（担当者が不明なもの）
+   - OK例：〇〇さんが△△を作成する、〇〇が□□に連絡する
+
+4. 残論点の明確化
+   - 未確定事項を明示する
+   - 可能な範囲で「誰が決めるか / 何が不足か」を補足する
+
+5. 構造整合性チェック
+   - 以下の区分が矛盾なく整合していること
+     - 会議概要
+     - 決まったこと
+     - 残論点
+     - Next Action
+   - 矛盾がある場合は修正する
+
+6. 追加確認事項
+   - 重要論点で未確定なものがある場合のみ、最大1問の確認事項を「## 残論点」の末尾に追記する
+   - 追記する場合は「【要確認】」プレフィックスをつける
+   - 不要な場合は追記しない
+
+【出力要件】
+- 元の議事録と同じMarkdownフォーマットを維持すること
+- セクション見出し（## 会議概要 / ## 決まったこと / ## 残論点 / ## Next Action / ## 発言録（逐語））を変更しないこと
+- 「## 発言録（逐語）」セクションの内容は一切変更しないこと（そのまま出力）
+- 修正が不要な箇所は元の文言をそのまま維持すること
+- コードブロックや前置き文章は不要。Markdownの議事録本文のみ出力すること
+
+入力議事録:
+<<<MINUTES
+{minutes_text}
+MINUTES>>>
+"""
+
+
 def _build_verbatim_transcript_lines(transcript: str) -> List[str]:
     lines = [line.strip() for line in str(transcript or "").splitlines() if line.strip()]
     if not lines:
@@ -577,3 +628,33 @@ def generate_minutes_with_claude(
             )
         logger.exception("OpenAI minutes generation failed: %s", e)
         raise
+
+
+def review_minutes(minutes_text: str) -> str:
+    """議事録の品質レビューを1回実行し、修正済み議事録を返す。失敗時は元テキストを返す。"""
+    logger.info("=== REVIEW START ===")
+    before_len = len(minutes_text)
+
+    model = getattr(settings, "OPENAI_GPT_PREPROCESS_MODEL", "gpt-4.1-mini")
+    max_tokens = int(getattr(settings, "CLAUDE_MAX_TOKENS", 4000))
+    temperature = float(getattr(settings, "CLAUDE_TEMPERATURE", 0))
+
+    prompt = _build_review_prompt(minutes_text)
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    try:
+        response = client.responses.create(
+            model=model,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            input=prompt,
+        )
+        reviewed_text = _extract_text_from_response(response).strip()
+        after_len = len(reviewed_text)
+        logger.info("REVIEW_APPLIED: true")
+        logger.info("REVIEW_DIFF: before=%s after=%s", before_len, after_len)
+        return reviewed_text
+    except Exception as exc:
+        logger.warning("REVIEW_FAILED: reason=%s", exc)
+        logger.info("REVIEW_APPLIED: false (fallback to original)")
+        return minutes_text

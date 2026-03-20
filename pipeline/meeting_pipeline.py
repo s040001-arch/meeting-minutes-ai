@@ -7,7 +7,7 @@ from dictionary.abbreviation_dictionary import load_abbreviation_dictionary
 from dictionary.company_dictionary import load_company_dictionary
 from docs.google_docs_writer import write_minutes_to_google_docs
 from minutes.minutes_formatter import format_minutes
-from minutes.minutes_generator_claude import generate_minutes_with_claude
+from minutes.minutes_generator_claude import generate_minutes_with_claude, review_minutes
 from preprocess.transcript_preprocessor_gpt import (
     detect_bottleneck_question,
     preprocess_transcript_with_gpt,
@@ -112,6 +112,11 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
             == "[MINUTES_GENERATION_SKIPPED_CLAUDE_AUTH_ERROR]"
         )
         formatted_minutes = format_minutes(minutes_result)
+
+    if not claude_fallback_used:
+        formatted_minutes = review_minutes(formatted_minutes)
+    else:
+        logger.info("REVIEW_SKIPPED: reason=claude_fallback_active")
 
     bottleneck_question = detect_bottleneck_question(
         cleaned_transcript=labeled_transcript,
