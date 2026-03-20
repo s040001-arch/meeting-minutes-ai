@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
@@ -698,13 +699,28 @@ _GENERIC_TARGET_WORDS = {
     "この件",
     "その件",
     "あの件",
+    "それぞれ",
+    "そのあたり",
+    "このあたり",
+    "あのあたり",
     "内容",
     "件",
 }
 
 
+def _normalize_question_target_text(target: str) -> str:
+    text = str(target or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"^[\s\"'「『（(【\[]+", "", text)
+    text = re.sub(r"[\s\"'」』）)】\]]+$", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _is_valid_single_target(target: str) -> bool:
-    cleaned = str(target or "").strip()
+    cleaned = _normalize_question_target_text(target)
     if not cleaned:
         return False
     if any(token in cleaned for token in _DISALLOWED_MULTI_TARGET_TOKENS):
@@ -767,6 +783,13 @@ def _normalize_single_line_question(raw_text: str) -> str:
     return _enforce_context_question_format(text)
 
 
+def _normalize_question_for_memory_compare(question: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(question or "")).strip().lower()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = normalized.rstrip("。？！?! ")
+    return normalized
+
+
 def detect_bottleneck_question(
     cleaned_transcript: str,
     minutes_markdown: str,
@@ -784,6 +807,7 @@ def detect_bottleneck_question(
         return ""
 
     answers_text_lines: List[str] = []
+    asked_questions_memory: set[str] = set()
     for item in answers:
         if not isinstance(item, dict):
             continue
@@ -792,6 +816,9 @@ def detect_bottleneck_question(
         if not question:
             continue
         answers_text_lines.append(f"- Q: {question} / A: {answer or '(スキップ)'}")
+        normalized_question = _normalize_question_for_memory_compare(question)
+        if normalized_question:
+            asked_questions_memory.add(normalized_question)
     answers_text = "\n".join(answers_text_lines) if answers_text_lines else "- なし"
 
     model = getattr(settings, "GPT_PREPROCESS_MODEL", None) or getattr(
@@ -864,5 +891,10 @@ def detect_bottleneck_question(
 
     candidate = _normalize_single_line_question(raw)
     if candidate in {"", "なし", "なし？"}:
+        return ""
+
+    normalized_candidate = _normalize_question_for_memory_compare(candidate)
+    if normalized_candidate in asked_questions_memory:
+        logger.info("LINE_QA_DUPLICATE_QUESTION_SKIPPED: question=%s", candidate)
         return ""
     return candidate

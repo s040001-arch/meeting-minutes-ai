@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -13,6 +13,8 @@ logger = get_logger(__name__)
 
 _MINUTES_PROMPT_MAX_TRANSCRIPT_LINES = 400
 _MIN_VERBATIM_LINES_FOR_CONFIDENCE = 3
+_MINUTES_CHUNK_MAX_LINES = 180
+_MINUTES_CHUNK_MAX_CHARS = 6000
 
 
 def _normalize_dictionary_items(raw: Any) -> List[Tuple[str, str]]:
@@ -183,6 +185,7 @@ def _build_minutes_prompt(
     meeting_info: Dict[str, Any],
     company_dictionary: List[Tuple[str, str]],
     abbreviation_dictionary: List[Tuple[str, str]],
+    prompt_max_lines_override: Optional[int] = None,
 ) -> str:
     dictionary_rule_text = _build_dictionary_rule_text(
         company_dictionary=company_dictionary,
@@ -195,7 +198,9 @@ def _build_minutes_prompt(
 
     parsed_transcript_entries = _parse_labeled_transcript_lines(transcript)
     prompt_max_lines = int(
-        getattr(
+        prompt_max_lines_override
+        if prompt_max_lines_override is not None
+        else getattr(
             settings,
             "MINUTES_PROMPT_MAX_TRANSCRIPT_LINES",
             _MINUTES_PROMPT_MAX_TRANSCRIPT_LINES,
@@ -543,6 +548,233 @@ def _extract_text_from_response(response: Any) -> str:
     return result
 
 
+def _is_incomplete_due_to_max_tokens(response: Any) -> bool:
+    details = getattr(response, "incomplete_details", None)
+    if details is None:
+        return False
+
+    reason = ""
+    if isinstance(details, dict):
+        reason = str(details.get("reason") or "").strip().lower()
+    else:
+        reason = str(getattr(details, "reason", "") or "").strip().lower()
+
+    return reason == "max_output_tokens"
+
+
+def _response_status_name(response: Any) -> str:
+    return str(getattr(response, "status", "") or "").strip().lower()
+
+
+def _extract_usage_input_tokens(response: Any) -> Optional[int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    if isinstance(usage, dict):
+        value = usage.get("input_tokens")
+    else:
+        value = getattr(usage, "input_tokens", None)
+
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_text_tokens(text: str) -> int:
+    # Rough fallback when tokenizer metadata is unavailable.
+    return max(1, (len(str(text or "")) + 3) // 4)
+
+
+def _is_incomplete_response(response: Any) -> bool:
+    status = _response_status_name(response)
+    return status == "incomplete" or _is_incomplete_due_to_max_tokens(response)
+
+
+def _missing_required_sections(markdown_text: str) -> List[str]:
+    text = str(markdown_text or "")
+    required = [
+        "## 発言録（逐語）",
+        "## 会議概要",
+        "## 決まったこと",
+        "## 残論点",
+        "## Next Action",
+    ]
+    return [section for section in required if section not in text]
+
+
+def _build_balanced_two_part_transcripts(transcript: str) -> Tuple[str, str]:
+    entries = _parse_labeled_transcript_lines(transcript)
+    if len(entries) <= 1:
+        single = _build_labeled_transcript_text(entries)
+        return single, single
+
+    mid = max(1, len(entries) // 2)
+    part1 = _build_labeled_transcript_text(entries[:mid])
+    part2 = _build_labeled_transcript_text(entries[mid:])
+    return part1, part2
+
+
+def _split_transcript_entries_for_minutes(
+    transcript_entries: List[Dict[str, str]],
+    max_lines_per_chunk: int,
+    max_chars_per_chunk: int,
+) -> List[List[Dict[str, str]]]:
+    if not transcript_entries:
+        return []
+
+    safe_max_lines = max(20, int(max_lines_per_chunk or _MINUTES_CHUNK_MAX_LINES))
+    safe_max_chars = max(1200, int(max_chars_per_chunk or _MINUTES_CHUNK_MAX_CHARS))
+
+    chunks: List[List[Dict[str, str]]] = []
+    current_chunk: List[Dict[str, str]] = []
+    current_chars = 0
+
+    for entry in transcript_entries:
+        speaker = _normalize_speaker_label(entry.get("speaker"))
+        text = str(entry.get("text", "")).strip()
+        if not text:
+            continue
+
+        normalized_entry = {"speaker": speaker, "text": text}
+        estimated_chars = len(speaker) + len(text) + 3
+
+        exceeds_lines = len(current_chunk) >= safe_max_lines
+        exceeds_chars = current_chars + estimated_chars > safe_max_chars
+        if current_chunk and (exceeds_lines or exceeds_chars):
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_chars = 0
+
+        current_chunk.append(normalized_entry)
+        current_chars += estimated_chars
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def _merge_chunk_minutes_markdown(
+    chunk_markdowns: List[str],
+    transcript: str,
+) -> str:
+    summary_blocks: List[str] = []
+    decision_lines: List[str] = []
+    issue_lines: List[str] = []
+    action_lines: List[str] = []
+
+    def _append_unique(target: List[str], lines: List[str]) -> None:
+        for line in lines:
+            normalized = str(line or "").strip()
+            if not normalized:
+                continue
+            if normalized not in target:
+                target.append(normalized)
+
+    for markdown_text in chunk_markdowns:
+        summary_body = _extract_section_body(markdown_text, "## 会議概要")
+        if summary_body:
+            summary_blocks.append(summary_body)
+
+        decisions_body = _extract_section_body(markdown_text, "## 決まったこと")
+        issues_body = _extract_section_body(markdown_text, "## 残論点")
+        actions_body = _extract_section_body(markdown_text, "## Next Action")
+
+        _append_unique(decision_lines, [line for line in decisions_body.splitlines() if line.strip()])
+        _append_unique(issue_lines, [line for line in issues_body.splitlines() if line.strip()])
+        _append_unique(action_lines, [line for line in actions_body.splitlines() if line.strip()])
+
+    summary_body_merged = "\n\n".join([block for block in summary_blocks if block.strip()]).strip() or "- なし"
+    decisions_body_merged = "\n".join(decision_lines).strip() or "- なし"
+    issues_body_merged = "\n".join(issue_lines).strip() or "- なし"
+    actions_body_merged = "\n".join(action_lines).strip() or "- なし"
+
+    raw_markdown = "\n".join(
+        [
+            "## 会議概要",
+            summary_body_merged,
+            "",
+            "## 決まったこと",
+            decisions_body_merged,
+            "",
+            "## 残論点",
+            issues_body_merged,
+            "",
+            "## Next Action",
+            actions_body_merged,
+        ]
+    ).strip()
+    return _normalize_markdown_minutes(raw_markdown, transcript)
+
+
+def _generate_minutes_once(
+    *,
+    client: OpenAI,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    transcript: str,
+    meeting_info: Dict[str, Any],
+    company_dictionary: List[Tuple[str, str]],
+    abbreviation_dictionary: List[Tuple[str, str]],
+    phase_label: str,
+) -> Tuple[str, bool]:
+    prompt = _build_minutes_prompt(
+        transcript=transcript,
+        meeting_info=meeting_info,
+        company_dictionary=company_dictionary,
+        abbreviation_dictionary=abbreviation_dictionary,
+        prompt_max_lines_override=100000,
+    )
+    prompt_chars = len(prompt)
+    prompt_lines = len([line for line in prompt.splitlines() if line.strip()])
+    estimated_input_tokens = _estimate_text_tokens(prompt)
+
+    logger.info(
+        "MINUTES_REQUEST: phase=%s prompt_chars=%s prompt_lines=%s estimated_input_tokens=%s max_output_tokens=%s",
+        phase_label,
+        prompt_chars,
+        prompt_lines,
+        estimated_input_tokens,
+        max_tokens,
+    )
+
+    response = client.responses.create(
+        model=model,
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        input=prompt,
+    )
+    usage_input_tokens = _extract_usage_input_tokens(response)
+    logger.info(
+        "MINUTES_RESPONSE: phase=%s status=%s usage_input_tokens=%s output_text_chars=%s",
+        phase_label,
+        getattr(response, "status", ""),
+        usage_input_tokens if usage_input_tokens is not None else "unknown",
+        len(str(getattr(response, "output_text", "") or "")),
+    )
+    is_incomplete = _is_incomplete_response(response)
+    if is_incomplete:
+        logger.warning(
+            "MINUTES_RESPONSE_INCOMPLETE: phase=%s status=%s usage_input_tokens=%s prompt_chars=%s prompt_lines=%s estimated_input_tokens=%s",
+            phase_label,
+            getattr(response, "status", ""),
+            usage_input_tokens if usage_input_tokens is not None else "unknown",
+            prompt_chars,
+            prompt_lines,
+            estimated_input_tokens,
+        )
+
+    response_text = _extract_text_from_response(response)
+    normalized = _normalize_markdown_minutes(str(response_text).strip(), transcript)
+    return normalized, is_incomplete
+
+
 def _parse_minutes_json(text: str) -> Dict[str, Any]:
     normalized_text = str(text or "").strip()
 
@@ -676,13 +908,6 @@ def generate_minutes_with_claude(
     normalized_company_dictionary = _normalize_dictionary_items(company_dictionary)
     normalized_abbreviation_dictionary = _normalize_dictionary_items(abbreviation_dictionary)
 
-    prompt = _build_minutes_prompt(
-        transcript=transcript,
-        meeting_info=meeting_info,
-        company_dictionary=normalized_company_dictionary,
-        abbreviation_dictionary=normalized_abbreviation_dictionary,
-    )
-
     transcript_line_count = len([line for line in str(transcript or "").splitlines() if line.strip()])
     prompt_max_lines = int(
         getattr(
@@ -700,25 +925,142 @@ def generate_minutes_with_claude(
     model = getattr(settings, "OPENAI_GPT_PREPROCESS_MODEL", "gpt-4.1-mini")
     max_tokens = int(getattr(settings, "CLAUDE_MAX_TOKENS", 4000))
     temperature = float(getattr(settings, "CLAUDE_TEMPERATURE", 0))
+    chunk_max_lines = int(getattr(settings, "MINUTES_CHUNK_MAX_LINES", _MINUTES_CHUNK_MAX_LINES))
+    chunk_max_chars = int(getattr(settings, "MINUTES_CHUNK_MAX_CHARS", _MINUTES_CHUNK_MAX_CHARS))
 
     logger.info(
-        "Start OpenAI minutes generation. company_dict=%s abbreviation_dict=%s model=%s",
+        "Start OpenAI minutes generation. company_dict=%s abbreviation_dict=%s model=%s max_output_tokens=%s",
         len(normalized_company_dictionary),
         len(normalized_abbreviation_dictionary),
         model,
+        max_tokens,
     )
 
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
+    parsed_transcript_entries = _parse_labeled_transcript_lines(transcript)
+    transcript_chunks = _split_transcript_entries_for_minutes(
+        transcript_entries=parsed_transcript_entries,
+        max_lines_per_chunk=chunk_max_lines,
+        max_chars_per_chunk=chunk_max_chars,
+    )
+    if not transcript_chunks:
+        transcript_chunks = [parsed_transcript_entries]
+
+    logger.info(
+        "TRANSCRIPT_CHUNK_PLAN: total_entries=%s chunks=%s chunk_max_lines=%s chunk_max_chars=%s",
+        len(parsed_transcript_entries),
+        len(transcript_chunks),
+        chunk_max_lines,
+        chunk_max_chars,
+    )
+
     try:
-        response = client.responses.create(
+        chunk_total = len(transcript_chunks)
+        collected_chunk_transcripts: List[str] = []
+
+        for idx, chunk_entries in enumerate(transcript_chunks, start=1):
+            chunk_transcript = _build_labeled_transcript_text(chunk_entries)
+            chunk_line_count = len(chunk_entries)
+            logger.info(
+                "TRANSCRIPT_CHUNK_DONE: chunk=%s/%s transcript_lines=%s transcript_chars=%s",
+                idx,
+                chunk_total,
+                chunk_line_count,
+                len(chunk_transcript),
+            )
+            collected_chunk_transcripts.append(chunk_transcript)
+
+        if len(collected_chunk_transcripts) != chunk_total:
+            raise RuntimeError(
+                f"Transcript chunk processing mismatch: expected={chunk_total} actual={len(collected_chunk_transcripts)}"
+            )
+
+        merged_transcript = "\n".join(
+            [chunk_text.strip() for chunk_text in collected_chunk_transcripts if chunk_text.strip()]
+        ).strip()
+        if not merged_transcript:
+            raise RuntimeError("Merged transcript is empty after chunk collection.")
+        logger.info(
+            "TRANSCRIPT_MERGE_DONE: chunks=%s merged_chars=%s",
+            chunk_total,
+            len(merged_transcript),
+        )
+
+        minutes_markdown, is_incomplete = _generate_minutes_once(
+            client=client,
             model=model,
             temperature=temperature,
-            max_output_tokens=max_tokens,
-            input=prompt,
+            max_tokens=max_tokens,
+            transcript=merged_transcript,
+            meeting_info=meeting_info,
+            company_dictionary=normalized_company_dictionary,
+            abbreviation_dictionary=normalized_abbreviation_dictionary,
+            phase_label="final_single_pass",
         )
-        response_text = _extract_text_from_response(response)
-        return _normalize_markdown_minutes(str(response_text).strip(), transcript)
+
+        final_markdown = minutes_markdown
+        if is_incomplete:
+            logger.warning(
+                "MINUTES_FINAL_INCOMPLETE_DETECTED: action=repartition_once transcript_chars=%s",
+                len(merged_transcript),
+            )
+            part1_transcript, part2_transcript = _build_balanced_two_part_transcripts(merged_transcript)
+            if not part1_transcript.strip() or not part2_transcript.strip():
+                raise RuntimeError("Transcript repartition failed: one of the parts is empty.")
+
+            logger.info(
+                "MINUTES_FINAL_REPARTITION_START: part1_chars=%s part2_chars=%s",
+                len(part1_transcript),
+                len(part2_transcript),
+            )
+            part1_markdown, part1_incomplete = _generate_minutes_once(
+                client=client,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                transcript=part1_transcript,
+                meeting_info=meeting_info,
+                company_dictionary=normalized_company_dictionary,
+                abbreviation_dictionary=normalized_abbreviation_dictionary,
+                phase_label="repartition_part1",
+            )
+            if part1_incomplete:
+                raise RuntimeError("Minutes repartition failed: part1 still incomplete.")
+
+            part2_markdown, part2_incomplete = _generate_minutes_once(
+                client=client,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                transcript=part2_transcript,
+                meeting_info=meeting_info,
+                company_dictionary=normalized_company_dictionary,
+                abbreviation_dictionary=normalized_abbreviation_dictionary,
+                phase_label="repartition_part2",
+            )
+            if part2_incomplete:
+                raise RuntimeError("Minutes repartition failed: part2 still incomplete.")
+
+            logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=1")
+            logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=2")
+            final_markdown = _merge_chunk_minutes_markdown(
+                chunk_markdowns=[part1_markdown, part2_markdown],
+                transcript=merged_transcript,
+            )
+            logger.info(
+                "MINUTES_FINAL_REPARTITION_MERGED: final_chars=%s",
+                len(final_markdown),
+            )
+
+        missing_sections = _missing_required_sections(final_markdown)
+        if missing_sections:
+            raise RuntimeError(f"Minutes structure validation failed: missing={','.join(missing_sections)}")
+        logger.info(
+            "MINUTES_STRUCTURE_VALIDATION_OK: required_sections=%s",
+            5,
+        )
+        return final_markdown
     except Exception as e:
         error_text = str(e)
         logger.warning("Minutes generation API error detail: %s", error_text)
