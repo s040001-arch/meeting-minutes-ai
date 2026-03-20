@@ -12,6 +12,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _MINUTES_PROMPT_MAX_TRANSCRIPT_LINES = 400
+_MIN_VERBATIM_LINES_FOR_CONFIDENCE = 3
 
 
 def _normalize_dictionary_items(raw: Any) -> List[Tuple[str, str]]:
@@ -217,16 +218,20 @@ def _build_minutes_prompt(
 出力要件:
 - 必ずMarkdownで出力する
 - 先頭から最後まで、以下の見出しをこの順序で必ず含める
+- ## 発言録（逐語）
 - ## 会議概要
 - ## 決まったこと
 - ## 残論点
 - ## Next Action
-- ## 発言録（逐語）
 - 推測で事実を足さない
 - 会議で実際に話された内容を優先する
 - 発言録（逐語）は前処理済み transcript をほぼ全文使用する
 - 発言録（逐語）では**要約しない**
 - 発言録（逐語）では**削除しない**
+- 発言録（逐語）を根拠データとし、後続項目はその派生情報として作成する
+- 決まったこと/残論点/Next Action は、発言録（逐語）に根拠がある内容だけを書く
+- 根拠が発言録に見当たらない内容は書かない
+- 発言録（逐語）が短い・不完全な場合は、会議概要の先頭に注意書きを入れ、後続項目の確定度を下げる
 - 会議で使われた表現を優先し、迷ったら正式名称を使う
 - 文書全体で表記を統一する
 
@@ -256,6 +261,10 @@ def _build_minutes_prompt(
 - 話者は「顧客」「プレセナ」で整理する
 
 Markdown形式の例:
+## 発言録（逐語）
+- 顧客: ...
+- プレセナ: ...
+
 ## 会議概要
 ...
 
@@ -267,10 +276,6 @@ Markdown形式の例:
 
 ## Next Action
 - ...
-
-## 発言録（逐語）
-- 顧客: ...
-- プレセナ: ...
 
 仮話者ラベル付き文字起こし:
 <<<TRANSCRIPT
@@ -289,13 +294,28 @@ _REVIEW_GENERIC_TARGET_WORDS = {
     "この件",
     "その件",
     "あの件",
+    "それぞれ",
+    "そのあたり",
+    "このあたり",
+    "あのあたり",
     "内容",
     "件",
 }
 
 
+def _normalize_review_question_target_text(target: str) -> str:
+    text = str(target or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"^[\s\"'「『（(【\[]+", "", text)
+    text = re.sub(r"[\s\"'」』）)】\]]+$", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _is_valid_review_single_target(target: str) -> bool:
-    cleaned = str(target or "").strip()
+    cleaned = _normalize_review_question_target_text(target)
     if not cleaned:
         return False
     if any(token in cleaned for token in _REVIEW_DISALLOWED_MULTI_TARGET_TOKENS):
@@ -361,6 +381,7 @@ def _build_review_prompt(minutes_text: str) -> str:
 
 5. 構造整合性チェック
    - 以下の区分が矛盾なく整合していること
+         - 発言録（逐語）
      - 会議概要
      - 決まったこと
      - 残論点
@@ -369,7 +390,13 @@ def _build_review_prompt(minutes_text: str) -> str:
 
 【出力要件】
 - 元の議事録と同じMarkdownフォーマットを維持すること
-- セクション見出し（## 会議概要 / ## 決まったこと / ## 残論点 / ## Next Action / ## 発言録（逐語））を変更しないこと
+- セクション見出し（## 発言録（逐語） / ## 会議概要 / ## 決まったこと / ## 残論点 / ## Next Action）を変更しないこと
+- セクションの順序は必ず次の順に固定すること（発言録が先頭）
+    1) 発言録（逐語）
+    2) 会議概要
+    3) 決まったこと
+    4) 残論点
+    5) Next Action
 - 「## 発言録（逐語）」セクションの内容は一切変更しないこと（そのまま出力）
 - 修正が不要な箇所は元の文言をそのまま維持すること
 - フォローアップ質問を議事録本文に埋め込まないこと
@@ -443,6 +470,7 @@ def _normalize_markdown_minutes(markdown_text: str, transcript: str) -> str:
     utterances_body = _extract_section_body(text, "## 発言録（逐語）")
 
     transcript_lines = _build_verbatim_transcript_lines(transcript)
+    transcript_line_count = len([line for line in str(transcript or "").splitlines() if line.strip()])
 
     if not decisions_body:
         decisions_body = "- なし"
@@ -461,8 +489,23 @@ def _normalize_markdown_minutes(markdown_text: str, transcript: str) -> str:
                 merged_lines.append(line)
         utterance_lines = merged_lines
 
+    summary_lines = [line for line in summary_body.splitlines() if line.strip()]
+    if transcript_line_count <= _MIN_VERBATIM_LINES_FOR_CONFIDENCE:
+        low_confidence_warning = "- ⚠ 発言録（逐語）が短いため、後続項目は確定度低（要確認）"
+        if low_confidence_warning not in summary_lines:
+            summary_lines.insert(0, low_confidence_warning)
+        summary_body = "\n".join(summary_lines).strip()
+        logger.warning(
+            "MINUTES_LOW_CONFIDENCE_VERBATIM: transcript_lines=%s threshold=%s",
+            transcript_line_count,
+            _MIN_VERBATIM_LINES_FOR_CONFIDENCE,
+        )
+
     return "\n".join(
         [
+            "## 発言録（逐語）",
+            *utterance_lines,
+            "",
             "## 会議概要",
             summary_body,
             "",
@@ -474,9 +517,6 @@ def _normalize_markdown_minutes(markdown_text: str, transcript: str) -> str:
             "",
             "## Next Action",
             next_action_body,
-            "",
-            "## 発言録（逐語）",
-            *utterance_lines,
         ]
     ).strip()
 

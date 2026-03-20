@@ -132,7 +132,6 @@ def format_minutes(minutes: Dict[str, Any]) -> str:
     if not isinstance(minutes, dict):
         return str(minutes or "").strip()
 
-    participants = _to_bullet_items(minutes.get("参加者"))
     summary_items = _to_bullet_items(minutes.get("会議概要"))
     decisions = _to_bullet_items(minutes.get("決まったこと"))
     open_points = _to_bullet_items(minutes.get("残論点"))
@@ -148,8 +147,8 @@ def format_minutes(minutes: Dict[str, Any]) -> str:
         logger.info("Minutes formatter record validation passed with utterance order preserved")
 
     sections: List[str] = []
-    sections.append("## 参加者")
-    sections.extend(_format_bullet_lines(participants) or ["- なし"])
+    sections.append("## 発言録（逐語）")
+    sections.extend(_format_bullet_lines(formatted_record_lines) or ["- なし"])
     sections.append("")
     sections.append("## 会議概要")
     sections.extend(_format_bullet_lines(summary_items) or ["- なし"])
@@ -162,7 +161,4 @@ def format_minutes(minutes: Dict[str, Any]) -> str:
     sections.append("")
     sections.append("## Next Action")
     sections.extend(_format_bullet_lines(next_actions) or ["- なし"])
-    sections.append("")
-    sections.append("## 発言録（逐語）")
-    sections.extend(_format_bullet_lines(formatted_record_lines) or ["- なし"])
     return "\n".join(sections).strip()
