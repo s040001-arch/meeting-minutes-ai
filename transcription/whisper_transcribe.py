@@ -1,5 +1,8 @@
 import tempfile
 import time
+import json
+import math
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -16,11 +19,110 @@ _WHISPER_SPLIT_CHANNELS: int = 1
 _WHISPER_SPLIT_BYTES_PER_SAMPLE: int = 2  # pcm_s16le
 _WHISPER_SPLIT_SIZE_SAFETY_MARGIN: float = 0.85
 _WHISPER_TRANSCRIBE_MAX_RETRIES: int = 6
+_WHISPER_SPLIT_MAX_CHUNKS_PER_RUN: int = 0
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 _TRANSCRIPTION_SKIPPED_NO_QUOTA = "[TRANSCRIPTION_SKIPPED_NO_QUOTA]"
 _TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND = "[TRANSCRIPTION_SKIPPED_FFMPEG_NOT_FOUND]"
+_TRANSCRIPTION_DEFERRED_REMAINING = "[TRANSCRIPTION_DEFERRED_REMAINING]"
+
+
+def _get_split_checkpoint_path() -> Path | None:
+    raw_path = str(os.getenv("MM_WHISPER_CHECKPOINT_PATH", "") or "").strip()
+    if not raw_path:
+        return None
+    return Path(raw_path)
+
+
+def _get_split_max_chunks_per_run() -> int:
+    raw = str(
+        os.getenv(
+            "WHISPER_SPLIT_MAX_CHUNKS_PER_RUN",
+            str(getattr(settings, "WHISPER_SPLIT_MAX_CHUNKS_PER_RUN", _WHISPER_SPLIT_MAX_CHUNKS_PER_RUN)),
+        )
+        or "0"
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    return max(0, value)
+
+
+def _build_source_fingerprint(file_path: str) -> str:
+    path = Path(file_path)
+    stat = path.stat()
+    return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _load_split_checkpoint(file_path: str, chunk_sec: float) -> dict:
+    checkpoint_path = _get_split_checkpoint_path()
+    if checkpoint_path is None or not checkpoint_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("WHISPER_SPLIT_CHECKPOINT_LOAD_FAILED: path=%s reason=%s", checkpoint_path, exc)
+        return {}
+
+    source_fingerprint = _build_source_fingerprint(file_path)
+    saved_fingerprint = str(payload.get("source_fingerprint") or "")
+    saved_chunk_sec = float(payload.get("chunk_sec") or 0.0)
+    if saved_fingerprint != source_fingerprint:
+        logger.info(
+            "WHISPER_SPLIT_CHECKPOINT_RESET: reason=fingerprint_mismatch saved=%s current=%s",
+            saved_fingerprint,
+            source_fingerprint,
+        )
+        return {}
+    if saved_chunk_sec <= 0 or abs(saved_chunk_sec - chunk_sec) > 0.01:
+        logger.info(
+            "WHISPER_SPLIT_CHECKPOINT_RESET: reason=chunk_sec_mismatch saved=%s current=%s",
+            saved_chunk_sec,
+            chunk_sec,
+        )
+        return {}
+    return payload
+
+
+def _persist_split_checkpoint(
+    file_path: str,
+    duration_sec: float,
+    chunk_sec: float,
+    next_chunk_index: int,
+    chunks_by_index: dict[int, str],
+) -> None:
+    checkpoint_path = _get_split_checkpoint_path()
+    if checkpoint_path is None:
+        return
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    ordered_chunks = [
+        {"index": int(idx), "text": str(chunks_by_index.get(idx) or "")}
+        for idx in sorted(chunks_by_index)
+    ]
+    payload = {
+        "source_fingerprint": _build_source_fingerprint(file_path),
+        "duration_sec": float(duration_sec),
+        "chunk_sec": float(chunk_sec),
+        "next_chunk_index": int(next_chunk_index),
+        "chunks": ordered_chunks,
+        "updated_at": int(time.time()),
+    }
+    checkpoint_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _clear_split_checkpoint() -> None:
+    checkpoint_path = _get_split_checkpoint_path()
+    if checkpoint_path is None:
+        return
+    try:
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+    except Exception as exc:
+        logger.warning("WHISPER_SPLIT_CHECKPOINT_CLEAR_FAILED: path=%s reason=%s", checkpoint_path, exc)
 
 
 def _create_whisper_transcription(audio_file, source_path: str, chunk_index: int):
@@ -178,15 +280,52 @@ def _split_and_transcribe(file_path: str) -> str:
         max_chunk_seconds,
     )
 
+    max_chunks_per_run = _get_split_max_chunks_per_run()
+    checkpoint = _load_split_checkpoint(file_path=file_path, chunk_sec=chunk_sec)
+    checkpoint_chunks = checkpoint.get("chunks") or []
+    chunks_by_index: dict[int, str] = {}
+    if isinstance(checkpoint_chunks, list):
+        for item in checkpoint_chunks:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            chunks_by_index[index] = str(item.get("text") or "")
+    resume_chunk_index = int(checkpoint.get("next_chunk_index") or 0)
+    resume_chunk_index = max(0, resume_chunk_index)
+    total_chunks_estimate = max(1, int(math.ceil(duration_sec / chunk_sec)))
+    logger.info(
+        "WHISPER_SPLIT_RESUME_STATE: total_chunks_estimate=%s resume_chunk_index=%s cached_chunks=%s max_chunks_per_run=%s",
+        total_chunks_estimate,
+        resume_chunk_index,
+        len(chunks_by_index),
+        max_chunks_per_run,
+    )
+
     chunks_text: List[str] = []
-    success_chunks = 0
+    success_chunks = len(chunks_by_index)
     failed_chunks = 0
-    processed_until_sec = 0.0
+    processed_until_sec = min(duration_sec, resume_chunk_index * chunk_sec)
     failed_ranges: List[Tuple[float, float]] = []
     with tempfile.TemporaryDirectory() as tmp_dir:
-        chunk_index = 0
-        offset = 0.0
+        chunk_index = resume_chunk_index
+        offset = min(duration_sec, chunk_index * chunk_sec)
+        processed_chunks_this_run = 0
         while offset < duration_sec:
+            if max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run:
+                _persist_split_checkpoint(
+                    file_path=file_path,
+                    duration_sec=duration_sec,
+                    chunk_sec=chunk_sec,
+                    next_chunk_index=chunk_index,
+                    chunks_by_index=chunks_by_index,
+                )
+                raise RuntimeError(
+                    f"{_TRANSCRIPTION_DEFERRED_REMAINING} next_chunk_index={chunk_index} total_chunks={total_chunks_estimate}"
+                )
+
             chunk_start = float(offset)
             chunk_end = float(min(offset + chunk_sec, duration_sec))
             logger.info(
@@ -279,9 +418,19 @@ def _split_and_transcribe(file_path: str) -> str:
                 offset += chunk_sec
                 chunk_index += 1
                 continue
-            chunks_text.append(response.text.strip())
+            chunk_text = response.text.strip()
+            chunks_by_index[chunk_index] = chunk_text
+            chunks_text.append(chunk_text)
             success_chunks += 1
+            processed_chunks_this_run += 1
             processed_until_sec = max(processed_until_sec, chunk_end)
+            _persist_split_checkpoint(
+                file_path=file_path,
+                duration_sec=duration_sec,
+                chunk_sec=chunk_sec,
+                next_chunk_index=chunk_index + 1,
+                chunks_by_index=chunks_by_index,
+            )
             logger.info(
                 "WHISPER_SPLIT_CHUNK_DONE: chunk_index=%s processed_until_sec=%.2f processed_until_min=%.2f",
                 chunk_index,
@@ -291,7 +440,9 @@ def _split_and_transcribe(file_path: str) -> str:
             offset += chunk_sec
             chunk_index += 1
 
-    merged = "\n".join(t for t in chunks_text if t)
+    ordered_texts = [chunks_by_index[idx] for idx in sorted(chunks_by_index) if chunks_by_index[idx]]
+    merged = "\n".join(ordered_texts)
+    _clear_split_checkpoint()
     coverage_percent = (processed_until_sec / duration_sec * 100.0) if duration_sec > 0 else 0.0
     logger.info(
         "WHISPER_SPLIT_SUMMARY: total_duration_sec=%.2f total_duration_min=%.2f total_chunks=%s success_chunks=%s failed_chunks=%s processed_until_sec=%.2f processed_until_min=%.2f coverage_percent=%.2f",
