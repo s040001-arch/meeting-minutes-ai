@@ -124,12 +124,7 @@ def _build_styled_doc_payload(meeting_info: Dict[str, Any], minutes_text: str) -
 
 
 def _build_drive_service():
-    credentials = settings.get_google_credentials()
-    return build("drive", "v3", credentials=credentials)
-
-
-def _build_oauth_drive_service():
-    credentials = settings.get_google_oauth_credentials()
+    credentials = settings.get_google_drive_write_credentials()
     return build("drive", "v3", credentials=credentials)
 
 
@@ -241,8 +236,7 @@ def _find_or_create_minutes_doc(
 
     logger.info("DRIVE_PERMISSION_GRANT_START: document_id=%s folder_id=%s", document_id, folder_id)
     try:
-        oauth_drive_service = _build_oauth_drive_service()
-        oauth_drive_service.files().update(
+        drive_service.files().update(
             fileId=document_id,
             addParents=folder_id,
             supportsAllDrives=True,

@@ -203,6 +203,12 @@ class Settings:
         )
         return credentials
 
+    def get_google_drive_read_credentials(self) -> Credentials:
+        return self.get_google_credentials()
+
+    def get_google_drive_write_credentials(self) -> Credentials:
+        return self.get_google_oauth_credentials()
+
     def get_speaker_labeling_config(self) -> Dict[str, Any]:
         return {
             "enabled": self.ENABLE_PROVISIONAL_SPEAKER_LABELING,

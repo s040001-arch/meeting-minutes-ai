@@ -46,8 +46,13 @@ def _safe_file_name(name: str) -> str:
     return safe or f"audio_{int(datetime.now(timezone.utc).timestamp())}.m4a"
 
 
-def _build_drive_service() -> Any:
-    credentials = settings.get_google_credentials()
+def _build_drive_read_service() -> Any:
+    credentials = settings.get_google_drive_read_credentials()
+    return build("drive", "v3", credentials=credentials)
+
+
+def _build_drive_write_service() -> Any:
+    credentials = settings.get_google_drive_write_credentials()
     return build("drive", "v3", credentials=credentials)
 
 
@@ -111,7 +116,7 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
 
 
 def _start_processing_job_if_eligible(
-    drive_service: Any,
+    drive_write_service: Any,
     file_item: Dict[str, Any],
 ) -> bool:
     file_id = str(file_item.get("id") or "").strip()
@@ -119,7 +124,7 @@ def _start_processing_job_if_eligible(
         return False
 
     latest = (
-        drive_service.files()
+        drive_write_service.files()
         .get(
             fileId=file_id,
             fields="appProperties",
@@ -150,7 +155,7 @@ def _start_processing_job_if_eligible(
         processing_props["mm_docs_retry"] = ""
 
     _set_drive_app_properties(
-        drive_service=drive_service,
+        drive_service=drive_write_service,
         file_id=file_id,
         properties=processing_props,
     )
@@ -312,8 +317,9 @@ def run_drive_polling_job_once(
                 "processed_folder_id and failed_folder_id are required when status_backend=folder_move"
             )
 
-    drive_service = _build_drive_service()
-    all_files = _list_drive_m4a_files_once(drive_service=drive_service, folder_id=drive_folder_id)
+    drive_read_service = _build_drive_read_service()
+    drive_write_service = _build_drive_write_service()
+    all_files = _list_drive_m4a_files_once(drive_service=drive_read_service, folder_id=drive_folder_id)
 
     retry_targets = []
     normal_targets = []
@@ -380,12 +386,19 @@ def run_drive_polling_job_once(
             os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "0"
 
             try:
-                if not _start_processing_job_if_eligible(drive_service=drive_service, file_item=item):
+                if not _start_processing_job_if_eligible(
+                    drive_write_service=drive_write_service,
+                    file_item=item,
+                ):
                     logger.info("DRIVE_CRON_SKIP_AFTER_STATUS_RECHECK: file_id=%s", file_id)
                     continue
 
                 logger.info("DRIVE_CRON_DOWNLOAD_START: file_id=%s file_name=%s", file_id, file_name)
-                _download_drive_file(drive_service=drive_service, file_id=file_id, destination_path=local_path)
+                _download_drive_file(
+                    drive_service=drive_read_service,
+                    file_id=file_id,
+                    destination_path=local_path,
+                )
 
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
                 pipeline_result = run_pipeline_from_cli(
@@ -397,13 +410,13 @@ def run_drive_polling_job_once(
                     ((pipeline_result or {}).get("google_doc_result") or {}).get("folder_id") or ""
                 ).strip()
                 _move_audio_file_to_docs_folder(
-                    drive_service=drive_service,
+                    drive_service=drive_write_service,
                     file_item=item,
                     docs_folder_id=docs_folder_id,
                 )
 
                 _set_drive_app_properties(
-                    drive_service=drive_service,
+                    drive_service=drive_write_service,
                     file_id=file_id,
                     properties={
                         "mm_docs_retry": "",
@@ -412,7 +425,7 @@ def run_drive_polling_job_once(
                     },
                 )
                 _record_drive_status(
-                    drive_service=drive_service,
+                    drive_service=drive_write_service,
                     file_item=item,
                     status="completed",
                     status_backend=status_backend,
@@ -437,7 +450,7 @@ def run_drive_polling_job_once(
                     )
                     try:
                         _record_drive_status(
-                            drive_service=drive_service,
+                            drive_service=drive_write_service,
                             file_item=item,
                             status="failed",
                             status_backend=status_backend,
@@ -457,7 +470,7 @@ def run_drive_polling_job_once(
                 logger.exception("DRIVE_CRON_FAILED: file_id=%s file_name=%s reason=%s", file_id, file_name, exc)
                 try:
                     _record_drive_status(
-                        drive_service=drive_service,
+                        drive_service=drive_write_service,
                         file_item=item,
                         status="failed",
                         status_backend=status_backend,
