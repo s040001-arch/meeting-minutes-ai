@@ -1,14 +1,13 @@
 print("=== CRON START ===")
 import argparse
 import os
-import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload
 
 from config.settings import settings
 from docs.google_docs_writer import run_oauth_docs_create_test_once
@@ -173,110 +172,6 @@ def _download_drive_file(drive_service: Any, file_id: str, destination_path: Pat
         done = False
         while not done:
             _, done = downloader.next_chunk()
-
-
-def _download_optional_checkpoint_file(
-    drive_service: Any,
-    checkpoint_file_id: str,
-    destination_path: Path,
-) -> bool:
-    checkpoint_id = str(checkpoint_file_id or "").strip()
-    if not checkpoint_id:
-        return False
-
-    try:
-        _download_drive_file(
-            drive_service=drive_service,
-            file_id=checkpoint_id,
-            destination_path=destination_path,
-        )
-        logger.info(
-            "DRIVE_CRON_CHECKPOINT_DOWNLOAD_DONE: checkpoint_file_id=%s local_path=%s",
-            checkpoint_id,
-            destination_path,
-        )
-        return True
-    except Exception as exc:
-        logger.warning(
-            "DRIVE_CRON_CHECKPOINT_DOWNLOAD_FAILED: checkpoint_file_id=%s reason=%s",
-            checkpoint_id,
-            exc,
-        )
-        return False
-
-
-def _upsert_checkpoint_file(
-    drive_service: Any,
-    local_checkpoint_path: Path,
-    parent_folder_id: str,
-    existing_checkpoint_file_id: str,
-    checkpoint_file_name: str,
-) -> str:
-    if not local_checkpoint_path.exists():
-        raise FileNotFoundError(f"checkpoint not found: {local_checkpoint_path}")
-
-    media = MediaFileUpload(
-        str(local_checkpoint_path),
-        mimetype="application/json",
-        resumable=False,
-    )
-    existing_id = str(existing_checkpoint_file_id or "").strip()
-    if existing_id:
-        response = (
-            drive_service.files()
-            .update(
-                fileId=existing_id,
-                media_body=media,
-                supportsAllDrives=True,
-                fields="id",
-            )
-            .execute()
-        )
-        return str(response.get("id") or existing_id)
-
-    body: Dict[str, Any] = {"name": checkpoint_file_name}
-    parent_id = str(parent_folder_id or "").strip()
-    if parent_id:
-        body["parents"] = [parent_id]
-
-    response = (
-        drive_service.files()
-        .create(
-            body=body,
-            media_body=media,
-            supportsAllDrives=True,
-            fields="id",
-        )
-        .execute()
-    )
-    return str(response.get("id") or "")
-
-
-def _delete_drive_file_if_exists(drive_service: Any, file_id: str) -> None:
-    target_id = str(file_id or "").strip()
-    if not target_id:
-        return
-
-    try:
-        drive_service.files().delete(fileId=target_id, supportsAllDrives=True).execute()
-        logger.info("DRIVE_CRON_CHECKPOINT_DELETE_DONE: checkpoint_file_id=%s", target_id)
-    except Exception as exc:
-        logger.warning(
-            "DRIVE_CRON_CHECKPOINT_DELETE_FAILED: checkpoint_file_id=%s reason=%s",
-            target_id,
-            exc,
-        )
-
-
-def _read_checkpoint_next_chunk(local_checkpoint_path: Path) -> int:
-    if not local_checkpoint_path.exists():
-        return 0
-
-    try:
-        payload = json.loads(local_checkpoint_path.read_text(encoding="utf-8"))
-        return max(0, int(payload.get("next_chunk_index") or 0))
-    except Exception:
-        return 0
 
 
 def _set_drive_app_properties(drive_service: Any, file_id: str, properties: Dict[str, str]) -> None:
@@ -478,23 +373,11 @@ def run_drive_polling_job_once(
         with tempfile.TemporaryDirectory(prefix="meeting_audio_") as tmp_dir:
             local_path = Path(tmp_dir) / safe_name
             checkpoint_local_path = Path(tmp_dir) / "whisper_split_checkpoint.json"
-            checkpoint_file_id = str(((item.get("appProperties") or {}).get("mm_whisper_checkpoint_file_id") or "")).strip()
-            checkpoint_file_name = f".mm_whisper_checkpoint_{file_id}.json"
-            parent_folder_id = ""
-            _parents = item.get("parents") or []
-            if isinstance(_parents, list) and _parents:
-                parent_folder_id = str(_parents[0] or "").strip()
-
-            _download_optional_checkpoint_file(
-                drive_service=drive_service,
-                checkpoint_file_id=checkpoint_file_id,
-                destination_path=checkpoint_local_path,
-            )
 
             prev_checkpoint_path_env = os.getenv("MM_WHISPER_CHECKPOINT_PATH")
             prev_chunk_limit_env = os.getenv("WHISPER_SPLIT_MAX_CHUNKS_PER_RUN")
             os.environ["MM_WHISPER_CHECKPOINT_PATH"] = str(checkpoint_local_path)
-            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "2"
+            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "0"
 
             try:
                 if not _start_processing_job_if_eligible(drive_service=drive_service, file_item=item):
@@ -528,7 +411,6 @@ def run_drive_polling_job_once(
                         "mm_whisper_next_chunk": "",
                     },
                 )
-                _delete_drive_file_if_exists(drive_service=drive_service, file_id=checkpoint_file_id)
                 _record_drive_status(
                     drive_service=drive_service,
                     file_item=item,
@@ -541,33 +423,34 @@ def run_drive_polling_job_once(
                 logger.info("DRIVE_CRON_PROCESSED: file_id=%s file_name=%s", file_id, file_name)
             except Exception as exc:
                 if _is_transcription_deferred_error(exc):
-                    deferred_count += 1
-                    next_chunk_index = _read_checkpoint_next_chunk(checkpoint_local_path)
-                    checkpoint_file_id = _upsert_checkpoint_file(
-                        drive_service=drive_service,
-                        local_checkpoint_path=checkpoint_local_path,
-                        parent_folder_id=parent_folder_id,
-                        existing_checkpoint_file_id=checkpoint_file_id,
-                        checkpoint_file_name=checkpoint_file_name,
-                    )
-                    _set_drive_app_properties(
-                        drive_service=drive_service,
-                        file_id=file_id,
-                        properties={
-                            "mm_status": "pending",
-                            "mm_docs_retry": "true",
-                            "mm_whisper_checkpoint_file_id": checkpoint_file_id,
-                            "mm_whisper_next_chunk": str(next_chunk_index),
-                            "mm_error": "",
-                        },
-                    )
-                    logger.info(
-                        "DRIVE_CRON_DEFERRED_FOR_NEXT_RUN: file_id=%s file_name=%s next_chunk_index=%s checkpoint_file_id=%s",
+                    logger.warning(
+                        "DRIVE_CRON_DEFERRED_DISABLED: file_id=%s file_name=%s reason=checkpoint_drive_save_disabled",
                         file_id,
                         file_name,
-                        next_chunk_index,
-                        checkpoint_file_id,
                     )
+                    deferred_count += 1
+                    failed_count += 1
+                    logger.exception(
+                        "DRIVE_CRON_FAILED: file_id=%s file_name=%s reason=deferred_not_supported_without_checkpoint",
+                        file_id,
+                        file_name,
+                    )
+                    try:
+                        _record_drive_status(
+                            drive_service=drive_service,
+                            file_item=item,
+                            status="failed",
+                            status_backend=status_backend,
+                            processed_folder_id=processed_folder_id,
+                            failed_folder_id=failed_folder_id,
+                            error_message="Deferred split not supported while checkpoint Drive save is disabled",
+                        )
+                    except Exception as status_exc:
+                        logger.exception(
+                            "DRIVE_CRON_STATUS_RECORD_FAILED: file_id=%s reason=%s",
+                            file_id,
+                            status_exc,
+                        )
                     continue
 
                 failed_count += 1
