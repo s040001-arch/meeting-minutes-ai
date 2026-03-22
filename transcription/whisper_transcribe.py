@@ -467,17 +467,19 @@ def _split_and_transcribe(file_path: str) -> str:
 
 def transcribe_audio(file_paths: List[str] | str) -> str:
     if isinstance(file_paths, str):
+        duration_sec = None
         try:
             duration_sec = _get_duration_seconds(file_paths)
-            if duration_sec >= _WHISPER_DURATION_LIMIT_SECONDS:
-                logger.info(
-                    "Audio duration %.2f sec exceeds limit. Using split transcription: %s",
-                    duration_sec,
-                    file_paths,
-                )
-                return _split_and_transcribe(file_paths)
         except Exception:
-            pass
+            duration_sec = None
+
+        if duration_sec is not None and duration_sec >= _WHISPER_DURATION_LIMIT_SECONDS:
+            logger.info(
+                "Audio duration %.2f sec exceeds limit. Using split transcription: %s",
+                duration_sec,
+                file_paths,
+            )
+            return _split_and_transcribe(file_paths)
 
         if Path(file_paths).stat().st_size > _WHISPER_MAX_BYTES:
             logger.info(
