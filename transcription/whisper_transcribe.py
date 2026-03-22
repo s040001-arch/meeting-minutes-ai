@@ -1,6 +1,7 @@
 import tempfile
 import time
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -51,9 +52,30 @@ def _get_split_max_chunks_per_run() -> int:
 
 
 def _build_source_fingerprint(file_path: str) -> str:
+    fingerprint, _, _, _ = _build_source_fingerprint_parts(file_path)
+    return fingerprint
+
+
+def _build_source_fingerprint_parts(file_path: str) -> tuple[str, str, int, str]:
     path = Path(file_path)
     stat = path.stat()
-    return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    content_sha256 = hasher.hexdigest()
+    file_name = path.name
+    file_size = int(stat.st_size)
+    fingerprint = f"{file_name}:{file_size}:{content_sha256}"
+    return fingerprint, file_name, file_size, content_sha256
+
+
+def _parse_fingerprint_parts(fingerprint: str) -> tuple[str, str, str]:
+    raw = str(fingerprint or "")
+    parts = raw.split(":", 2)
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    return "", "", raw
 
 
 def _load_split_checkpoint(file_path: str, chunk_sec: float) -> dict:
@@ -64,26 +86,56 @@ def _load_split_checkpoint(file_path: str, chunk_sec: float) -> dict:
     try:
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        logger.warning("WHISPER_SPLIT_CHECKPOINT_LOAD_FAILED: path=%s reason=%s", checkpoint_path, exc)
+        logger.error("WHISPER_SPLIT_CHECKPOINT_LOAD_FAILED: path=%s reason=%s -- FATAL: checkpoint load error (not sha256), aborting.", checkpoint_path, exc)
+        raise RuntimeError(f"Checkpoint load failed (not sha256): {exc}")
+
+    source_fingerprint, current_name, current_size, current_hash = _build_source_fingerprint_parts(file_path)
+    saved_fingerprint = str(payload.get("source_fingerprint") or "")
+    try:
+        saved_name, saved_size, saved_hash = _parse_fingerprint_parts(saved_fingerprint)
+    except Exception as exc:
+        logger.error("WHISPER_SPLIT_CHECKPOINT_FINGERPRINT_PARSE_FAILED: path=%s reason=%s -- FATAL: checkpoint fingerprint parse error (not sha256), aborting.", checkpoint_path, exc)
+        raise RuntimeError(f"Checkpoint fingerprint parse failed (not sha256): {exc}")
+
+    logger.info(
+        "WHISPER_SPLIT_FINGERPRINT_LOAD_CURRENT: components=name,size,sha256 file_name=%s file_size=%s file_sha256=%s fingerprint=%s",
+        current_name,
+        current_size,
+        current_hash,
+        source_fingerprint,
+    )
+    logger.info(
+        "WHISPER_SPLIT_FINGERPRINT_LOAD_SAVED: components=name,size,sha256 file_name=%s file_size=%s file_sha256=%s fingerprint=%s",
+        saved_name,
+        saved_size,
+        saved_hash,
+        saved_fingerprint,
+    )
+    saved_chunk_sec = float(payload.get("chunk_sec") or 0.0)
+    # Strict fingerprint validation
+    if saved_name != current_name or saved_size != str(current_size):
+        logger.error(
+            "WHISPER_SPLIT_CHECKPOINT_FINGERPRINT_MISMATCH: path=%s reason=name_or_size_mismatch saved_name=%s current_name=%s saved_size=%s current_size=%s -- FATAL: checkpoint name/size mismatch (not sha256), aborting.",
+            checkpoint_path, saved_name, current_name, saved_size, current_size
+        )
+        raise RuntimeError(f"Checkpoint name/size mismatch (not sha256) at {checkpoint_path}")
+
+    if saved_hash != current_hash:
+        logger.warning(
+            "WHISPER_SPLIT_CHECKPOINT_SHA256_MISMATCH: path=%s saved_hash=%s current_hash=%s -- checkpoint will be reset",
+            checkpoint_path, saved_hash, current_hash
+        )
+        _clear_split_checkpoint()
         return {}
 
-    source_fingerprint = _build_source_fingerprint(file_path)
-    saved_fingerprint = str(payload.get("source_fingerprint") or "")
-    saved_chunk_sec = float(payload.get("chunk_sec") or 0.0)
-    if saved_fingerprint != source_fingerprint:
-        logger.info(
-            "WHISPER_SPLIT_CHECKPOINT_RESET: reason=fingerprint_mismatch saved=%s current=%s",
-            saved_fingerprint,
-            source_fingerprint,
-        )
-        return {}
+    # Strict chunk_sec validation
     if saved_chunk_sec <= 0 or abs(saved_chunk_sec - chunk_sec) > 0.01:
-        logger.info(
-            "WHISPER_SPLIT_CHECKPOINT_RESET: reason=chunk_sec_mismatch saved=%s current=%s",
-            saved_chunk_sec,
-            chunk_sec,
+        logger.error(
+            "WHISPER_SPLIT_CHECKPOINT_INTEGRITY_FAILED: path=%s reason=chunk_sec_mismatch saved_chunk_sec=%s current_chunk_sec=%s -- FATAL: checkpoint chunk_sec mismatch (not sha256), aborting.",
+            checkpoint_path, saved_chunk_sec, chunk_sec
         )
-        return {}
+        raise RuntimeError(f"Checkpoint integrity failed: chunk_sec mismatch (not sha256) at {checkpoint_path}")
+
     return payload
 
 
@@ -103,8 +155,16 @@ def _persist_split_checkpoint(
         {"index": int(idx), "text": str(chunks_by_index.get(idx) or "")}
         for idx in sorted(chunks_by_index)
     ]
+    source_fingerprint, current_name, current_size, current_hash = _build_source_fingerprint_parts(file_path)
+    logger.info(
+        "WHISPER_SPLIT_FINGERPRINT_SAVE: components=name,size,sha256 file_name=%s file_size=%s file_sha256=%s fingerprint=%s",
+        current_name,
+        current_size,
+        current_hash,
+        source_fingerprint,
+    )
     payload = {
-        "source_fingerprint": _build_source_fingerprint(file_path),
+        "source_fingerprint": source_fingerprint,
         "duration_sec": float(duration_sec),
         "chunk_sec": float(chunk_sec),
         "next_chunk_index": int(next_chunk_index),
@@ -313,6 +373,14 @@ def _split_and_transcribe(file_path: str) -> str:
         chunk_index = resume_chunk_index
         offset = min(duration_sec, chunk_index * chunk_sec)
         processed_chunks_this_run = 0
+        logger.info(
+            "RESUME_CHECK: file_id=%s resume_chunk_index=%s applied_start_chunk_index=%s actual_chunk_start=%.2f",
+            str(os.getenv("MM_DRIVE_FILE_ID", "") or "").strip(),
+            resume_chunk_index,
+            chunk_index,
+            float(offset),
+        )
+        resume_start_logged = False
         while offset < duration_sec:
             defer_condition = max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run
             logger.info(
@@ -343,6 +411,15 @@ def _split_and_transcribe(file_path: str) -> str:
 
             chunk_start = float(offset)
             chunk_end = float(min(offset + chunk_sec, duration_sec))
+            if not resume_start_logged:
+                logger.info(
+                    "WHISPER_SPLIT_RESUME_APPLY: resume_chunk_index=%s applied_start_chunk_index=%s applied_start_sec=%.2f applied_start_min=%.2f",
+                    resume_chunk_index,
+                    chunk_index,
+                    chunk_start,
+                    chunk_start / 60.0,
+                )
+                resume_start_logged = True
             logger.info(
                 "WHISPER_SPLIT_CHUNK_START: chunk_index=%s start_sec=%.2f end_sec=%.2f start_min=%.2f end_min=%.2f",
                 chunk_index,
