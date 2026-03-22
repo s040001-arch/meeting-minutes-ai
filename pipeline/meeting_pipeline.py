@@ -17,6 +17,22 @@ from utils.file_parser import parse_audio_filename
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+_MIN_TRANSCRIPT_CHAR_COUNT = 120
+
+
+def _validate_transcript_before_minutes(transcript: str) -> None:
+    transcript_text = str(transcript or "")
+    transcript_char_count = len(transcript_text.strip())
+
+    if "[TRANSCRIPTION_SKIPPED_NO_QUOTA]" in transcript_text:
+        raise RuntimeError("Transcription skipped due to quota. Stop before minutes generation.")
+
+    if transcript_char_count < int(
+        getattr(settings, "MINUTES_MIN_TRANSCRIPT_CHAR_COUNT", _MIN_TRANSCRIPT_CHAR_COUNT)
+    ):
+        raise RuntimeError(
+            f"Transcript too short for minutes generation: char_count={transcript_char_count}"
+        )
 
 
 def _get_process_rss_mb() -> float | None:
@@ -62,6 +78,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
     logger.info("Whisper transcription completed.")
     _log_memory_usage("post_whisper")
     whisper_fallback_used = "[TRANSCRIPTION_SKIPPED_NO_QUOTA]" in str(transcript)
+    _validate_transcript_before_minutes(transcript)
 
     company_dictionary = load_company_dictionary()
     abbreviation_dictionary = load_abbreviation_dictionary()
