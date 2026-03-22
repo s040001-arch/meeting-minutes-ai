@@ -501,8 +501,10 @@ def run_drive_polling_job_once(
 
             prev_checkpoint_path_env = os.getenv("MM_WHISPER_CHECKPOINT_PATH")
             prev_chunk_limit_env = os.getenv("WHISPER_SPLIT_MAX_CHUNKS_PER_RUN")
+            prev_drive_file_id_env = os.getenv("MM_DRIVE_FILE_ID")
             os.environ["MM_WHISPER_CHECKPOINT_PATH"] = str(checkpoint_local_path)
-            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "2"
+            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "1"  # 1run=1chunkを強制
+            os.environ["MM_DRIVE_FILE_ID"] = file_id
 
             try:
                 if not _start_processing_job_if_eligible(
@@ -619,6 +621,11 @@ def run_drive_polling_job_once(
                     os.environ.pop("WHISPER_SPLIT_MAX_CHUNKS_PER_RUN", None)
                 else:
                     os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = prev_chunk_limit_env
+
+                if prev_drive_file_id_env is None:
+                    os.environ.pop("MM_DRIVE_FILE_ID", None)
+                else:
+                    os.environ["MM_DRIVE_FILE_ID"] = prev_drive_file_id_env
 
     logger.info(
         "DRIVE_CRON_DONE: processed=%s failed=%s deferred=%s scanned=%s",
