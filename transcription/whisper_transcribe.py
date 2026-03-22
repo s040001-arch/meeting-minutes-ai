@@ -314,13 +314,28 @@ def _split_and_transcribe(file_path: str) -> str:
         offset = min(duration_sec, chunk_index * chunk_sec)
         processed_chunks_this_run = 0
         while offset < duration_sec:
-            if max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run:
+            defer_condition = max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run
+            logger.info(
+                "WHISPER_SPLIT_DEFER_GATE: current_chunk_index=%s processed_chunks_this_run=%s max_chunks_per_run=%s defer_condition=%s",
+                chunk_index,
+                processed_chunks_this_run,
+                max_chunks_per_run,
+                defer_condition,
+            )
+            if defer_condition:
                 _persist_split_checkpoint(
                     file_path=file_path,
                     duration_sec=duration_sec,
                     chunk_sec=chunk_sec,
                     next_chunk_index=chunk_index,
                     chunks_by_index=chunks_by_index,
+                )
+                logger.info(
+                    "WHISPER_SPLIT_DEFER_TRIGGER: current_chunk_index=%s processed_chunks_this_run=%s max_chunks_per_run=%s next_chunk_index=%s",
+                    chunk_index,
+                    processed_chunks_this_run,
+                    max_chunks_per_run,
+                    chunk_index,
                 )
                 raise RuntimeError(
                     f"{_TRANSCRIPTION_DEFERRED_REMAINING} next_chunk_index={chunk_index} total_chunks={total_chunks_estimate}"
@@ -423,12 +438,24 @@ def _split_and_transcribe(file_path: str) -> str:
             chunks_text.append(chunk_text)
             success_chunks += 1
             processed_chunks_this_run += 1
+            next_chunk_index = chunk_index + 1
+            post_chunk_defer_condition = (
+                max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run
+            )
+            logger.info(
+                "WHISPER_SPLIT_POST_CHUNK_GATE: current_chunk_index=%s processed_chunks_this_run=%s max_chunks_per_run=%s next_chunk_index=%s defer_condition=%s",
+                chunk_index,
+                processed_chunks_this_run,
+                max_chunks_per_run,
+                next_chunk_index,
+                post_chunk_defer_condition,
+            )
             processed_until_sec = max(processed_until_sec, chunk_end)
             _persist_split_checkpoint(
                 file_path=file_path,
                 duration_sec=duration_sec,
                 chunk_sec=chunk_sec,
-                next_chunk_index=chunk_index + 1,
+                next_chunk_index=next_chunk_index,
                 chunks_by_index=chunks_by_index,
             )
             logger.info(
