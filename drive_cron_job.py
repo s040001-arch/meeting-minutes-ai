@@ -19,6 +19,17 @@ _PROCESSING_RETRY_GRACE_SECONDS = 1800
 _CRON_TARGET_AUDIO_EXTENSIONS = (".m4a", ".wav")
 
 
+def _normalize_mm_status(app_props: Dict[str, Any]) -> str:
+    raw_status = str((app_props or {}).get("mm_status") or "").strip().lower()
+    if raw_status in {"", "pending"}:
+        return "pending"
+    if raw_status in {"processed", "completed"}:
+        return "completed"
+    if raw_status in {"processing", "failed"}:
+        return raw_status
+    return "pending"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -86,35 +97,63 @@ def _is_unprocessed(file_item: Dict[str, Any]) -> bool:
     if str(app_props.get("mm_docs_retry") or "").strip().lower() == "true":
         return True
 
-    status = str(app_props.get("mm_status") or "").strip().lower()
-    if status in {"processed", "failed"}:
+    status = _normalize_mm_status(app_props)
+    if status in {"completed", "failed", "processing"}:
         return False
 
-    if status == "processing":
-        processing_started_at = str(app_props.get("processing_started_at") or "").strip()
-        if not processing_started_at:
-            return False
+    return True
 
-        try:
-            started_at = datetime.fromisoformat(processing_started_at.replace("Z", "+00:00"))
-            if started_at.tzinfo is None:
-                logger.warning(
-                    "DRIVE_CRON_PROCESSING_RETRY_GUARD_NAIVE_DATETIME: file_id=%s value=%s",
-                    file_item.get("id", ""),
-                    processing_started_at,
-                )
-                return True
-            elapsed_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
-            return elapsed_seconds >= _PROCESSING_RETRY_GRACE_SECONDS
-        except Exception as exc:
-            logger.warning(
-                "DRIVE_CRON_PROCESSING_RETRY_GUARD_PARSE_FAILED: file_id=%s value=%s reason=%s",
-                file_item.get("id", ""),
-                processing_started_at,
-                exc,
-            )
-            return False
 
+def _start_processing_job_if_eligible(
+    drive_service: Any,
+    file_item: Dict[str, Any],
+) -> bool:
+    file_id = str(file_item.get("id") or "").strip()
+    if not file_id:
+        return False
+
+    latest = (
+        drive_service.files()
+        .get(
+            fileId=file_id,
+            fields="appProperties",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    latest_app_props = latest.get("appProperties") or {}
+    if not isinstance(latest_app_props, dict):
+        latest_app_props = {}
+
+    latest_status = _normalize_mm_status(latest_app_props)
+    is_manual_retry = str(latest_app_props.get("mm_docs_retry") or "").strip().lower() == "true"
+    if latest_status in {"processing", "completed", "failed"} and not is_manual_retry:
+        logger.info(
+            "DRIVE_CRON_SKIP_BY_LATEST_STATUS: file_id=%s latest_status=%s manual_retry=%s",
+            file_id,
+            latest_status,
+            is_manual_retry,
+        )
+        return False
+
+    processing_props: Dict[str, str] = {
+        "mm_status": "processing",
+        "processing_started_at": _now_iso(),
+    }
+    if is_manual_retry:
+        processing_props["mm_docs_retry"] = ""
+
+    _set_drive_app_properties(
+        drive_service=drive_service,
+        file_id=file_id,
+        properties=processing_props,
+    )
+    logger.info(
+        "DRIVE_CRON_STATUS_TRANSITION: file_id=%s from=%s to=processing manual_retry=%s",
+        file_id,
+        latest_status,
+        is_manual_retry,
+    )
     return True
 
 
@@ -238,12 +277,12 @@ def _record_drive_status(
     if status == "failed":
         props["failed_at"] = now
         if error_message:
-            props["mm_error"] = str(error_message)[:500]
+            props["mm_error"] = str(error_message)[:120]
 
     _set_drive_app_properties(drive_service, file_id=file_id, properties=props)
 
     if status_backend == "folder_move":
-        target_folder_id = processed_folder_id if status == "processed" else failed_folder_id
+        target_folder_id = processed_folder_id if status == "completed" else failed_folder_id
         _move_drive_file_to_folder(
             drive_service=drive_service,
             file_item=file_item,
@@ -270,11 +309,10 @@ def run_drive_polling_job_once(
     drive_service = _build_drive_service()
     all_files = _list_drive_m4a_files_once(drive_service=drive_service, folder_id=drive_folder_id)
 
-    retry_targets = []
     normal_targets = []
     for _item in all_files:
         _app_props = _item.get("appProperties") or {}
-        _status = str(_app_props.get("mm_status") or "").strip().lower() or "(empty)"
+        _status = _normalize_mm_status(_app_props)
         logger.info(
             "DRIVE_CRON_FILTER: file_id=%s file_name=%s mm_status=%s app_props=%s",
             _item.get("id", ""),
@@ -283,10 +321,7 @@ def run_drive_polling_job_once(
             _app_props,
         )
         if _is_unprocessed(_item):
-            if _status == "processing":
-                retry_targets.append(_item)
-            else:
-                normal_targets.append(_item)
+            normal_targets.append(_item)
         else:
             logger.info(
                 "DRIVE_CRON_SKIP: file_id=%s file_name=%s reason=mm_status=%s",
@@ -295,10 +330,10 @@ def run_drive_polling_job_once(
                 _status,
             )
 
-    targets = retry_targets + normal_targets
+    targets = normal_targets
     logger.info(
         "DRIVE_CRON_RETRY_PRIORITY: retry_targets=%s normal_targets=%s",
-        len(retry_targets),
+        0,
         len(normal_targets),
     )
 
@@ -326,22 +361,12 @@ def run_drive_polling_job_once(
             local_path = Path(tmp_dir) / safe_name
 
             try:
+                if not _start_processing_job_if_eligible(drive_service=drive_service, file_item=item):
+                    logger.info("DRIVE_CRON_SKIP_AFTER_STATUS_RECHECK: file_id=%s", file_id)
+                    continue
+
                 logger.info("DRIVE_CRON_DOWNLOAD_START: file_id=%s file_name=%s", file_id, file_name)
                 _download_drive_file(drive_service=drive_service, file_id=file_id, destination_path=local_path)
-
-                existing_props = item.get("appProperties") or {}
-                if not isinstance(existing_props, dict):
-                    existing_props = {}
-                existing_status = str(existing_props.get("mm_status") or "").strip().lower()
-                processing_props: Dict[str, str] = {"mm_status": "processing"}
-                if existing_status != "processing":
-                    processing_props["processing_started_at"] = _now_iso()
-
-                _set_drive_app_properties(
-                    drive_service=drive_service,
-                    file_id=file_id,
-                    properties=processing_props,
-                )
 
                 logger.info("DRIVE_CRON_PIPELINE_START: file_id=%s local_path=%s", file_id, local_path)
                 pipeline_result = run_pipeline_from_cli(
@@ -366,7 +391,7 @@ def run_drive_polling_job_once(
                 _record_drive_status(
                     drive_service=drive_service,
                     file_item=item,
-                    status="processed",
+                    status="completed",
                     status_backend=status_backend,
                     processed_folder_id=processed_folder_id,
                     failed_folder_id=failed_folder_id,
@@ -376,23 +401,22 @@ def run_drive_polling_job_once(
             except Exception as exc:
                 failed_count += 1
                 logger.exception("DRIVE_CRON_FAILED: file_id=%s file_name=%s reason=%s", file_id, file_name, exc)
-                # TODO: re-enable after resolving appProperties 124-byte 403
-                # try:
-                #     _record_drive_status(
-                #         drive_service=drive_service,
-                #         file_item=item,
-                #         status="failed",
-                #         status_backend=status_backend,
-                #         processed_folder_id=processed_folder_id,
-                #         failed_folder_id=failed_folder_id,
-                #         error_message=str(exc),
-                #     )
-                # except Exception as status_exc:
-                #     logger.exception(
-                #         "DRIVE_CRON_STATUS_RECORD_FAILED: file_id=%s reason=%s",
-                #         file_id,
-                #         status_exc,
-                #     )
+                try:
+                    _record_drive_status(
+                        drive_service=drive_service,
+                        file_item=item,
+                        status="failed",
+                        status_backend=status_backend,
+                        processed_folder_id=processed_folder_id,
+                        failed_folder_id=failed_folder_id,
+                        error_message=str(exc),
+                    )
+                except Exception as status_exc:
+                    logger.exception(
+                        "DRIVE_CRON_STATUS_RECORD_FAILED: file_id=%s reason=%s",
+                        file_id,
+                        status_exc,
+                    )
 
     logger.info(
         "DRIVE_CRON_DONE: processed=%s failed=%s scanned=%s",
