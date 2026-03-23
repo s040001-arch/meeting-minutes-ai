@@ -503,7 +503,7 @@ def run_drive_polling_job_once(
             prev_chunk_limit_env = os.getenv("WHISPER_SPLIT_MAX_CHUNKS_PER_RUN")
             prev_drive_file_id_env = os.getenv("MM_DRIVE_FILE_ID")
             os.environ["MM_WHISPER_CHECKPOINT_PATH"] = str(checkpoint_local_path)
-            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "1"  # 1run=1chunkを強制
+            os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"] = "3"  # 3run=3chunksを強制
             logger.info("WHISPER_SPLIT_MAX_CHUNKS_PER_RUN_SET: value=%s", os.environ["WHISPER_SPLIT_MAX_CHUNKS_PER_RUN"])
             os.environ["MM_DRIVE_FILE_ID"] = file_id
 
