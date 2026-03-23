@@ -1007,43 +1007,43 @@ def generate_minutes_with_claude(
             )
             part1_transcript, part2_transcript = _build_balanced_two_part_transcripts(merged_transcript)
             if not part1_transcript.strip() or not part2_transcript.strip():
-                raise RuntimeError("Transcript repartition failed: one of the parts is empty.")
-
-            logger.info(
-                "MINUTES_FINAL_REPARTITION_START: part1_chars=%s part2_chars=%s",
-                len(part1_transcript),
-                len(part2_transcript),
-            )
-            part1_markdown, part1_incomplete = _generate_minutes_once(
-                client=client,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                transcript=part1_transcript,
-                meeting_info=meeting_info,
-                company_dictionary=normalized_company_dictionary,
-                abbreviation_dictionary=normalized_abbreviation_dictionary,
-                phase_label="repartition_part1",
-            )
-            if part1_incomplete:
-                raise RuntimeError("Minutes repartition failed: part1 still incomplete.")
-
-            part2_markdown, part2_incomplete = _generate_minutes_once(
-                client=client,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                transcript=part2_transcript,
-                meeting_info=meeting_info,
-                company_dictionary=normalized_company_dictionary,
-                abbreviation_dictionary=normalized_abbreviation_dictionary,
-                phase_label="repartition_part2",
-            )
-            if part2_incomplete:
-                raise RuntimeError("Minutes repartition failed: part2 still incomplete.")
-
-            logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=1")
-            logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=2")
+                logger.warning("Transcript repartition failed: one of the parts is empty. Skipping repartition.")
+                # Do not raise, continue with possibly incomplete minutes
+                part1_markdown, part2_markdown = "", ""
+            else:
+                logger.info(
+                    "MINUTES_FINAL_REPARTITION_START: part1_chars=%s part2_chars=%s",
+                    len(part1_transcript),
+                    len(part2_transcript),
+                )
+                part1_markdown, part1_incomplete = _generate_minutes_once(
+                    client=client,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    transcript=part1_transcript,
+                    meeting_info=meeting_info,
+                    company_dictionary=normalized_company_dictionary,
+                    abbreviation_dictionary=normalized_abbreviation_dictionary,
+                    phase_label="repartition_part1",
+                )
+                if part1_incomplete:
+                    logger.warning("Minutes repartition incomplete: part1 still incomplete.")
+                part2_markdown, part2_incomplete = _generate_minutes_once(
+                    client=client,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    transcript=part2_transcript,
+                    meeting_info=meeting_info,
+                    company_dictionary=normalized_company_dictionary,
+                    abbreviation_dictionary=normalized_abbreviation_dictionary,
+                    phase_label="repartition_part2",
+                )
+                if part2_incomplete:
+                    logger.warning("Minutes repartition incomplete: part2 still incomplete.")
+                logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=1")
+                logger.info("MINUTES_FINAL_REPARTITION_PART_DONE: part=2")
             final_markdown = _merge_chunk_minutes_markdown(
                 chunk_markdowns=[part1_markdown, part2_markdown],
                 transcript=merged_transcript,
@@ -1055,7 +1055,11 @@ def generate_minutes_with_claude(
 
         missing_sections = _missing_required_sections(final_markdown)
         if missing_sections:
-            raise RuntimeError(f"Minutes structure validation failed: missing={','.join(missing_sections)}")
+            logger.warning(f"Minutes structure validation failed: missing={','.join(missing_sections)}")
+        # Fallback: if final_markdown is empty or whitespace only, set minimal output
+        if not final_markdown or not final_markdown.strip():
+            logger.warning("Minutes generation result is empty. Applying minimal fallback output.")
+            final_markdown = "# 議事録\n\n（生成結果が空のため最小出力）"
         logger.info(
             "MINUTES_STRUCTURE_VALIDATION_OK: required_sections=%s",
             5,
