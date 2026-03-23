@@ -372,6 +372,9 @@ def write_minutes_to_google_docs(
     audio_file_path: Optional[str] = None,
     existing_document_id: Optional[str] = None,
 ) -> Dict[str, str]:
+    """
+    minutes + transcript を合成した本文を同一document_idに一括反映する。
+    """
     if not meeting_info:
         raise ValueError("meeting_info is required.")
     if not minutes_text or not minutes_text.strip():
@@ -385,7 +388,7 @@ def write_minutes_to_google_docs(
     doc_name = f"{folder_name}_議事録"
 
     if not getattr(settings, "ENABLE_GOOGLE_DOCS_WRITE", True):
-        logger.info("Google Docs write skipped by ENABLE_GOOGLE_DOCS_WRITE=false")
+        logger.info("Google Docs write skipped by ENABLE_GOOGLE_DOCS_WRITE=false (minutes+transcript)")
         dummy_document_id = "DUMMY_DOC_WRITE_DISABLED"
         dummy_url = f"https://docs.google.com/document/d/{dummy_document_id}/edit"
         return {
@@ -398,10 +401,10 @@ def write_minutes_to_google_docs(
             "created": "false",
         }
 
-    # --- Fast path: update existing doc directly, no folder/name lookup, no new folder/doc ---
+    # --- 必ず同一document_idに minutes+transcript 合成本文を反映 ---
     if existing_document_id:
         logger.info(
-            "DOCS_UPDATE_TARGET: existing_document_id=%s folder_name=%s (no new folder or doc created)",
+            "DOCS_COMBINED_MINUTES_TRANSCRIPT_SAVE_START: existing_document_id=%s folder_name=%s",
             existing_document_id, folder_name,
         )
         try:
@@ -414,7 +417,7 @@ def write_minutes_to_google_docs(
                 meeting_info=meeting_info,
             )
             document_url = f"https://docs.google.com/document/d/{existing_document_id}/edit"
-            logger.info("DOCS_UPDATE_EXISTING_SUCCESS: document_id=%s", existing_document_id)
+            logger.info("DOCS_COMBINED_MINUTES_TRANSCRIPT_SAVE_DONE: document_id=%s", existing_document_id)
             return {
                 "folder_id": "",
                 "document_id": existing_document_id,
@@ -426,11 +429,12 @@ def write_minutes_to_google_docs(
             }
         except Exception as exc:
             logger.warning(
-                "DOCS_UPDATE_EXISTING_FAILED: document_id=%s reason=%s (no fallback create)",
+                "MINUTES_DOCS_SAVE_FAILED: document_id=%s reason=%s (no fallback create)",
                 existing_document_id, exc,
             )
             raise
 
+    # fallback: 新規作成（通常は通らない）
     parent_folder_id = getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", None)
     logger.info(
         "GOOGLE_DOCS_SAVE_CONTEXT: parent_folder_id=%s enable_google_docs_write=%s",
@@ -474,6 +478,9 @@ def write_minutes_to_google_docs(
             "created": "true" if is_created else "false",
         }
     except Exception as exc:
+        logger.warning(
+            "MINUTES_DOCS_SAVE_FAILED: reason=%s", exc
+        )
         error_text = str(exc).lower()
         has_permission_error = "permission" in error_text
         has_storage_quota_error = "storagequotaexceeded" in error_text
@@ -496,3 +503,138 @@ def write_minutes_to_google_docs(
         raise
 def save_latest_minutes_state(*args, **kwargs):
     return None
+
+
+def write_transcript_to_google_docs(
+    meeting_info: Dict[str, Any],
+    transcript_text: str,
+    audio_file_path: Optional[str] = None,
+    existing_document_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    逐語録（transcript）をGoogle Docsに保存・更新する。
+    既存のDocsがあればupdate、なければcreate。
+    """
+    if not meeting_info:
+        raise ValueError("meeting_info is required.")
+    if not transcript_text or not transcript_text.strip():
+        raise ValueError("transcript_text is empty.")
+
+    meeting_date = meeting_info.get("date", "")
+    customer_name = meeting_info.get("customer_name", "")
+    meeting_title = meeting_info.get("meeting_title", "")
+
+    folder_name = f"{meeting_date}_{customer_name}_{meeting_title}"
+    doc_name = f"{folder_name}_逐語録"
+
+    if not getattr(settings, "ENABLE_GOOGLE_DOCS_WRITE", True):
+        logger.info("Google Docs write skipped by ENABLE_GOOGLE_DOCS_WRITE=false (transcript)")
+        dummy_document_id = "DUMMY_DOC_WRITE_DISABLED"
+        dummy_url = f"https://docs.google.com/document/d/{dummy_document_id}/edit"
+        return {
+            "folder_id": "",
+            "document_id": dummy_document_id,
+            "document_url": dummy_url,
+            "google_docs_url": dummy_url,
+            "folder_name": folder_name,
+            "document_name": doc_name,
+            "created": "false",
+        }
+
+    # --- Fast path: update existing doc directly ---
+    if existing_document_id:
+        logger.info(
+            "TRANSCRIPT_DOCS_UPDATE_TARGET: existing_document_id=%s folder_name=%s (no new folder or doc created)",
+            existing_document_id, folder_name,
+        )
+        try:
+            docs_service = _build_docs_service()
+            _clear_document_content(docs_service=docs_service, document_id=existing_document_id)
+            _write_document_text(
+                docs_service=docs_service,
+                document_id=existing_document_id,
+                text=transcript_text.strip(),
+                meeting_info=meeting_info,
+            )
+            document_url = f"https://docs.google.com/document/d/{existing_document_id}/edit"
+            logger.info("TRANSCRIPT_DOCS_UPDATE_EXISTING_SUCCESS: document_id=%s", existing_document_id)
+            return {
+                "folder_id": "",
+                "document_id": existing_document_id,
+                "document_url": document_url,
+                "google_docs_url": document_url,
+                "folder_name": folder_name,
+                "document_name": doc_name,
+                "created": "false",
+            }
+        except Exception as exc:
+            logger.warning(
+                "TRANSCRIPT_DOCS_UPDATE_EXISTING_FAILED: document_id=%s reason=%s (no fallback create)",
+                existing_document_id, exc,
+            )
+            raise
+
+    parent_folder_id = getattr(settings, "GOOGLE_DRIVE_BASE_FOLDER_ID", None)
+    logger.info(
+        "GOOGLE_DOCS_TRANSCRIPT_SAVE_CONTEXT: parent_folder_id=%s enable_google_docs_write=%s",
+        str(parent_folder_id or ""),
+        bool(getattr(settings, "ENABLE_GOOGLE_DOCS_WRITE", True)),
+    )
+
+    try:
+        drive_service = _build_drive_service()
+        docs_service = _build_docs_service()
+
+        folder_id = _find_or_create_meeting_folder(
+            drive_service=drive_service,
+            folder_name=folder_name,
+            parent_folder_id=parent_folder_id,
+        )
+
+        doc_name = f"{folder_name}_逐語録"
+        document_id, is_created = _find_or_create_minutes_doc(
+            drive_service=drive_service,
+            docs_service=docs_service,
+            doc_name=doc_name,
+            folder_id=folder_id,
+        )
+
+        _clear_document_content(docs_service=docs_service, document_id=document_id)
+        _write_document_text(
+            docs_service=docs_service,
+            document_id=document_id,
+            text=transcript_text.strip(),
+            meeting_info=meeting_info,
+        )
+
+        document_url = f"https://docs.google.com/document/d/{document_id}/edit"
+
+        return {
+            "folder_id": folder_id,
+            "document_id": document_id,
+            "document_url": document_url,
+            "folder_name": folder_name,
+            "document_name": doc_name,
+            "created": "true" if is_created else "false",
+        }
+    except Exception as exc:
+        error_text = str(exc).lower()
+        has_permission_error = "permission" in error_text
+        has_storage_quota_error = "storagequotaexceeded" in error_text
+        if "403" in error_text and (has_permission_error or has_storage_quota_error):
+            if has_permission_error:
+                logger.warning("Google Docs transcript write skipped due to permission error (403): %s", exc)
+            if has_storage_quota_error:
+                logger.warning("Google Docs transcript write skipped due to storageQuotaExceeded (403): %s", exc)
+            dummy_document_id = "DUMMY_DOC_PERMISSION_DENIED"
+            dummy_url = f"https://docs.google.com/document/d/{dummy_document_id}/edit"
+            return {
+                "folder_id": "",
+                "document_id": dummy_document_id,
+                "document_url": dummy_url,
+                "google_docs_url": dummy_url,
+                "folder_name": folder_name,
+                "document_name": doc_name,
+                "created": "false",
+            }
+        raise
