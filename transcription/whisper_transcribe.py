@@ -301,7 +301,9 @@ def _get_duration_seconds(file_path: str) -> float:
     return float(result.stdout.strip())
 
 
-def _split_and_transcribe(file_path: str) -> str:
+from docs.google_docs_writer import append_text_to_google_doc
+
+def _split_and_transcribe(file_path: str, document_id: str = None, meeting_info: dict = None) -> str:
     import subprocess
 
     logger.info("Splitting large audio file via ffmpeg: %s", file_path)
@@ -381,6 +383,7 @@ def _split_and_transcribe(file_path: str) -> str:
             float(offset),
         )
         resume_start_logged = False
+        chunk_number = 1 + resume_chunk_index
         while offset < duration_sec:
             defer_condition = max_chunks_per_run > 0 and processed_chunks_this_run >= max_chunks_per_run
             logger.info(
@@ -535,6 +538,20 @@ def _split_and_transcribe(file_path: str) -> str:
                 next_chunk_index=next_chunk_index,
                 chunks_by_index=chunks_by_index,
             )
+            # append条件判定の事前ログ
+            has_document_id = bool(document_id)
+            has_chunk_text = bool(chunk_text)
+            logger.info(
+                "APPEND_DOCS_CHECK: chunk_index=%s has_document_id=%s has_chunk_text=%s doc_id=%s chars=%s",
+                chunk_index, has_document_id, has_chunk_text, document_id, len(chunk_text)
+            )
+            # chunkごとにGoogle Docsへ追記
+            if has_document_id and has_chunk_text:
+                logger.info(
+                    "APPEND_DOCS_CALLED: chunk_index=%s chunk_number=%s doc_id=%s chars=%s",
+                    chunk_index, chunk_number, document_id, len(chunk_text)
+                )
+                append_text_to_google_doc(document_id=document_id, chunk_text=chunk_text, chunk_index=chunk_number, meeting_info=meeting_info)
             logger.info(
                 "WHISPER_SPLIT_CHUNK_DONE: chunk_index=%s processed_until_sec=%.2f processed_until_min=%.2f",
                 chunk_index,
@@ -543,6 +560,7 @@ def _split_and_transcribe(file_path: str) -> str:
             )
             offset += chunk_sec
             chunk_index += 1
+            chunk_number += 1
 
     ordered_texts = [chunks_by_index[idx] for idx in sorted(chunks_by_index) if chunks_by_index[idx]]
     merged = "\n".join(ordered_texts)

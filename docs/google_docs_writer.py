@@ -1,3 +1,35 @@
+def append_text_to_google_doc(document_id: str, chunk_text: str, chunk_index: int, meeting_info: dict = None) -> None:
+    """
+    Google Docsの末尾にchunkテキストを追記する。フォーマット: ChunkN:\n(テキスト)\n
+    Args:
+        document_id (str): Google DocsのID
+        chunk_text (str): 追記するテキスト
+        chunk_index (int): チャンク番号（1始まり）
+        meeting_info (dict, optional): ログ用
+    """
+    from config.settings import settings
+    from googleapiclient.discovery import build
+    credentials = settings.get_google_drive_write_credentials()
+    logger.info(f"GOOGLE_AUTH_TYPE_DOCS: service_account | credentials_type={type(credentials).__name__}")
+    docs_service = build("docs", "v1", credentials=credentials)
+    # 末尾index取得
+    doc = docs_service.documents().get(documentId=document_id).execute()
+    end_index = doc.get("body", {}).get("content", [])[-1].get("endIndex", 1)
+    # 追記内容をフォーマット
+    formatted = f"Chunk{chunk_index}:\n{chunk_text}\n\n"
+    requests = [
+        {
+            "insertText": {
+                "location": {"index": end_index - 1},
+                "text": formatted,
+            }
+        }
+    ]
+    docs_service.documents().batchUpdate(
+        documentId=document_id,
+        body={"requests": requests},
+    ).execute()
+    logger.info(f"APPEND_CHUNK_TO_DOC: doc_id={document_id} chunk={chunk_index} chars={len(chunk_text)}")
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -125,26 +157,19 @@ def _build_styled_doc_payload(meeting_info: Dict[str, Any], minutes_text: str) -
 
 def _build_drive_service():
     credentials = settings.get_google_drive_write_credentials()
+    logger.info(f"GOOGLE_AUTH_TYPE_DRIVE: service_account | credentials_type={type(credentials).__name__}")
     return build("drive", "v3", credentials=credentials)
 
 
 def _build_docs_service():
-    credentials = settings.get_google_oauth_credentials()
-    logger.info("DOCS_AUTH_PATH: oauth")
+    credentials = settings.get_google_drive_write_credentials()
+    logger.info(f"GOOGLE_AUTH_TYPE_DOCS: service_account | credentials_type={type(credentials).__name__}")
+    logger.info("DOCS_AUTH_PATH: service_account")
     return build("docs", "v1", credentials=credentials)
 
 
 def run_oauth_docs_create_test_once() -> None:
-    logger.info("OAUTH_TEST_START: Testing Docs API with OAuth credentials")
-    try:
-        docs_service = _build_docs_service()
-        test_result = docs_service.documents().create(
-            body={"title": "OAuth Test Doc"}
-        ).execute()
-        test_doc_id = test_result.get("documentId", "")
-        logger.info("OAUTH_TEST_SUCCESS: document_id=%s", test_doc_id)
-    except Exception as oauth_test_exc:
-        logger.warning("OAUTH_TEST_FAILED: error=%s", oauth_test_exc)
+    logger.info("OAUTH_TEST_SKIPPED: Service Account mode active")
 
 
 def _find_or_create_meeting_folder(

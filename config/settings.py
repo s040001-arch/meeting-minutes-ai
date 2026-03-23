@@ -204,10 +204,47 @@ class Settings:
         return credentials
 
     def get_google_drive_read_credentials(self) -> Credentials:
-        return self.get_google_credentials()
+        # Service Account認証でDrive Read
+        import json
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
+        ]
+        service_account_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not service_account_json_str:
+            raise ValueError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set. "
+                "Please provide Service Account JSON as a string."
+            )
+        try:
+            service_account_info = json.loads(service_account_json_str)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON as JSON: {exc}"
+            )
+        resolved_client_email = str(service_account_info.get("client_email") or "").strip()
+        resolved_project_id = str(service_account_info.get("project_id") or "").strip()
+        logger.info(
+            "GOOGLE_AUTH_RESOLVED: method=service_account_json env=GOOGLE_SERVICE_ACCOUNT_JSON client_email=%s project_id=%s scopes=%s",
+            resolved_client_email or "(missing)",
+            resolved_project_id or "(missing)",
+            ",".join(scopes),
+        )
+        from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+        credentials = ServiceAccountCredentials.from_service_account_info(
+            service_account_info,
+            scopes=scopes,
+        )
+        logger.info(
+            "GOOGLE_AUTH_CREDENTIALS_READY: credential_type=%s service_account_email=%s",
+            type(credentials).__name__,
+            str(getattr(credentials, "service_account_email", "") or "(missing)"),
+        )
+        return credentials
 
     def get_google_drive_write_credentials(self) -> Credentials:
-        return self.get_google_oauth_credentials()
+        # Service Account認証でDrive Write
+        return self.get_google_drive_read_credentials()
 
     def get_speaker_labeling_config(self) -> Dict[str, Any]:
         return {

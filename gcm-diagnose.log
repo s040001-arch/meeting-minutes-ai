@@ -1,0 +1,188 @@
+﻿Diagnose log at 2026-03-18T06:35:56Z
+
+AppPath: C:\Program Files\Git\mingw64\bin\git-credential-manager.exe
+InstallDir: C:\Program Files\Git\mingw64\bin\
+Version: 2.7.3+5fa7116896c82164996a609accd1c5ad90fe730a
+
+------------
+Diagnostic: Environment
+Skipped: False
+Success: True
+Exception: None
+Log:
+OSType: Windows
+OSVersion: 10.0 (build 26200)
+Reading environment variables... OK
+ Variables:
+SystemDrive=C:
+ProgramFiles(x86)=C:\Program Files (x86)
+MSYSTEM=MINGW64
+ProgramW6432=C:\Program Files
+PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 186 Stepping 2, GenuineIntel
+TMP=C:\Users\AIHARA~1\AppData\Local\Temp
+PROCESSOR_ARCHITECTURE=AMD64
+_OLD_VIRTUAL_PATH=c:\Users\AiharaRyutaro\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\AiharaRyutaro\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\AiharaRyutaro\AppData\Local\Programs\Microsoft VS Code;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\PROGRA~1\JPKI;C:\Program Files\Git\cmd;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Python314\Scripts\;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Python314\;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Launcher\;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WindowsApps;C:\Users\AiharaRyutaro\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\AiharaRyutaro\AppData\Local\Programs\Antigravity\bin;C:\Users\AiharaRyutaro\Downloads\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin;c:\Users\AiharaRyutaro\.vscode\extensions\ms-python.debugpy-2025.18.0-win32-x64\bundled\scripts\noConfigScripts
+Path=C:/Program Files/Git/mingw64/libexec/git-core;C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;C:\Users\AiharaRyutaro\bin;C:\Automation｜meeting-minutes-ai\.venv\Scripts;c:\Users\AiharaRyutaro\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\AiharaRyutaro\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\AiharaRyutaro\AppData\Local\Programs\Microsoft VS Code;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\PROGRA~1\JPKI;C:\Program Files\Git\cmd;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Python314\Scripts\;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Python314\;C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Launcher\;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WindowsApps;C:\Users\AiharaRyutaro\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\AiharaRyutaro\AppData\Local\Programs\Antigravity\bin;C:\Users\AiharaRyutaro\Downloads\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin;C:\Users\AiharaRyutaro\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin;c:\Users\AiharaRyutaro\.vscode\extensions\ms-python.debugpy-2025.18.0-win32-x64\bundled\scripts\noConfigScripts
+PROCESSOR_REVISION=ba02
+TEMP=C:\Users\AIHARA~1\AppData\Local\Temp
+USERPROFILE=C:\Users\AiharaRyutaro
+LOGONSERVER=\\VAIO146
+TERM=xterm-256color
+PYDEVD_DISABLE_FILE_VALIDATION=1
+USERNAME=AiharaRyutaro
+SystemRoot=C:\WINDOWS
+VSCODE_DEBUGPY_ADAPTER_ENDPOINTS=c:\Users\AiharaRyutaro\.vscode\extensions\ms-python.debugpy-2025.18.0-win32-x64\.noConfigDebugAdapterEndpoints\endpoint-268607e6093cad77.txt
+CHROME_CRASHPAD_PIPE_NAME=\\.\pipe\crashpad_33112_GPGLUWTULIROAXFZ
+GIT_EXEC_PATH=C:/Program Files/Git/mingw64/libexec/git-core
+PLINK_PROTOCOL=ssh
+OneDrive=C:\Users\AiharaRyutaro\OneDrive - 株式会社プレセナ・ストラテジック・パートナーズ
+USERDOMAIN_ROAMINGPROFILE=AzureAD
+CommonProgramFiles=C:\Program Files\Common Files
+EFC_1920_1592913036=1
+VSCODE_PYTHON_AUTOACTIVATE_GUARD=1
+PYTHON_BASIC_REPL=1
+ProgramData=C:\ProgramData
+LANG=en_US.UTF-8
+HOMEPATH=\Users\AiharaRyutaro
+IGCCSVC_DB=AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAgTTZibPQYECQW+i6Ds1JkAQAAAACAAAAAAAQZgAAAAEAACAAAADJMpz6j7sABemVNIllDruQfeLTjNLjUJvhEOMivhjtJQAAAAAOgAAAAAIAACAAAABLg9RAg9M6TfAMW+t+AxBJRT8pm5SGfnDJvcZKPiCUmGAAAACBTNm8rOtKUO/s+qONwfybB9yeRTk8olaLRGH0umQtpdSOEZqnZ50xt2llmf1OxNhSAM+2e709Je7lcvCcpQbHTjbNKyLr1W/2E50k8+MC3a4aoi6w4K2vtd4Z3E6FblFAAAAACfqiVdaTq+uKOfr5nK4wuZPyF/2uB6OOsLfaHctpNAILknjnGNWZYVi6DYigIVZEkEcoNUQ8tNJD8yo6mBfM+Q==
+COMPUTERNAME=VAIO146
+PYTHONSTARTUP=c:\Users\AiharaRyutaro\AppData\Roaming\Code\User\workspaceStorage\4d20a8de8dff46aac4e857b46380acba\ms-python.python\pythonrc.py
+VSCODE_INJECTION=1
+ALLUSERSPROFILE=C:\ProgramData
+CommonProgramW6432=C:\Program Files\Common Files
+SESSIONNAME=Console
+DriverData=C:\Windows\System32\Drivers\DriverData
+HOMEDRIVE=C:
+windir=C:\WINDOWS
+GIT_TRACE2_PARENT_SID=f956271f-8852-4d33-acba-808cf1f91890
+NUMBER_OF_PROCESSORS=16
+OS=Windows_NT
+ZES_ENABLE_SYSMAN=1
+ProgramFiles=C:\Program Files
+ComSpec=C:\WINDOWS\system32\cmd.exe
+PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL
+HOME=C:\Users\AiharaRyutaro
+PSModulePath=C:\Users\AiharaRyutaro\Documents\WindowsPowerShell\Modules;C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules
+TMPDIR=C:\Users\AIHARA~1\AppData\Local\Temp
+VIRTUAL_ENV_PROMPT=.venv
+APPDATA=C:\Users\AiharaRyutaro\AppData\Roaming
+USERDOMAIN=AzureAD
+PROCESSOR_LEVEL=6
+VIRTUAL_ENV=C:\Automation｜meeting-minutes-ai\.venv
+LOCALAPPDATA=C:\Users\AiharaRyutaro\AppData\Local
+BUNDLED_DEBUGPY_PATH=c:\Users\AiharaRyutaro\.vscode\extensions\ms-python.debugpy-2025.18.0-win32-x64\bundled\libs\debugpy
+TERM_PROGRAM_VERSION=1.111.0
+CommonProgramFiles(x86)=C:\Program Files (x86)\Common Files
+COLORTERM=truecolor
+PUBLIC=C:\Users\Public
+TERM_PROGRAM=vscode
+
+
+------------
+Diagnostic: File system
+Skipped: False
+Success: True
+Exception: None
+Log:
+Temporary directory is 'C:\Users\AiharaRyutaro\AppData\Local\Temp\'...
+Checking basic file I/O...
+Writing to temporary file 'C:\Users\AiharaRyutaro\AppData\Local\Temp\8884409dbeccc225fe499b07'... OK
+Reading from temporary file 'C:\Users\AiharaRyutaro\AppData\Local\Temp\8884409dbeccc225fe499b07'... OK
+Deleting temporary file 'C:\Users\AiharaRyutaro\AppData\Local\Temp\8884409dbeccc225fe499b07'... OK
+Testing IFileSystem instance...
+UserHomePath: C:\Users\AiharaRyutaro
+UserDataDirectoryPath: C:\Users\AiharaRyutaro\.gcm
+GetCurrentDirectory(): C:\Automation｜meeting-minutes-ai
+
+------------
+Diagnostic: Networking
+Skipped: False
+Success: True
+Exception: None
+Log:
+Checking networking and HTTP stack...
+Creating HTTP client... OK
+IsNetworkAvailable: True
+Sending HEAD request to http://example.com...Sending HEAD request to https://example.com... OK
+ OK
+Acquiring free TCP port... OK
+Testing local HTTP loopback connections...
+Creating new HTTP listener for http://localhost:49949/... OK
+Waiting for loopback connection... OK
+Writing response... OK
+Waiting for response data... OK
+Loopback connection data OK
+
+------------
+Diagnostic: Git
+Skipped: False
+Success: True
+Exception: None
+Log:
+Getting Git version... OK
+Git version is '2.53.0.windows.2'
+Locating current repository...Git repository at 'C:/Automation｜meeting-minutes-ai/.git'
+ OK
+Listing all Git configuration... OK
+Git configuration:
+file:C:/Program Files/Git/etc/gitconfig	diff.astextplain.textconv=astextplain
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.clean=git-lfs clean -- %f
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.smudge=git-lfs smudge -- %f
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.process=git-lfs filter-process
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.required=true
+file:C:/Program Files/Git/etc/gitconfig	http.sslbackend=schannel
+file:C:/Program Files/Git/etc/gitconfig	core.autocrlf=true
+file:C:/Program Files/Git/etc/gitconfig	core.fscache=true
+file:C:/Program Files/Git/etc/gitconfig	core.symlinks=false
+file:C:/Program Files/Git/etc/gitconfig	pull.rebase=false
+file:C:/Program Files/Git/etc/gitconfig	credential.helper=manager
+file:C:/Program Files/Git/etc/gitconfig	credential.https://dev.azure.com.usehttppath=true
+file:C:/Program Files/Git/etc/gitconfig	init.defaultbranch=master
+file:C:/Users/AiharaRyutaro/.gitconfig	core.editor="C:\Users\AiharaRyutaro\AppData\Local\Programs\Microsoft VS Code\bin\code" --wait
+file:C:/Users/AiharaRyutaro/.gitconfig	user.name=Ryutaro Aihara
+file:C:/Users/AiharaRyutaro/.gitconfig	user.email=s040001@gmail.com
+file:.git/config	core.repositoryformatversion=0
+file:.git/config	core.filemode=false
+file:.git/config	core.bare=false
+file:.git/config	core.logallrefupdates=true
+file:.git/config	core.symlinks=false
+file:.git/config	core.ignorecase=true
+file:.git/config	remote.origin.url=https://github.com/ryutaroaihara-cloud/meeting-minutes-ai.git
+file:.git/config	remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*
+
+
+------------
+Diagnostic: Credential storage
+Skipped: False
+Success: True
+Exception: None
+Log:
+ICredentialStore instance is of type: CredentialStore
+Writing test credential... OK
+Reading test credential... OK
+Deleting test credential... OK
+
+------------
+Diagnostic: Microsoft authentication (AAD/MSA)
+Skipped: False
+Success: True
+Exception: None
+Log:
+Broker is not enabled.
+Flow type is: Auto
+Gathering MSAL token cache data... OK
+CacheDirectory: C:\Users\AiharaRyutaro\AppData\Local\.IdentityService
+CacheFileName: msal.cache
+CacheFilePath: C:\Users\AiharaRyutaro\AppData\Local\.IdentityService\msal.cache
+Creating cache helper... OK
+Verifying MSAL token cache persistence... OK
+
+------------
+Diagnostic: GitHub API
+Skipped: False
+Success: True
+Exception: None
+Log:
+Using 'https://github.com/' as API target.
+Querying '/meta' endpoint... OK
+
