@@ -80,6 +80,26 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
     whisper_fallback_used = "[TRANSCRIPTION_SKIPPED_NO_QUOTA]" in str(transcript)
     _validate_transcript_before_minutes(transcript)
 
+    # transcript保存（minutes生成前・先行）
+    from docs.google_docs_writer import write_transcript_to_google_docs
+    transcript_doc_result = None
+    transcript_doc_id = None
+    try:
+        transcript_doc_result = write_transcript_to_google_docs(
+            meeting_info=meeting_info,
+            transcript_text=transcript,
+            audio_file_path=audio_file_path,
+        )
+        transcript_doc_id = transcript_doc_result.get("document_id")
+        logger.info(
+            "TRANSCRIPT_DOCS_SAVE_DONE: doc_id=%s url=%s",
+            transcript_doc_result.get("document_id"),
+            transcript_doc_result.get("document_url"),
+        )
+    except Exception as exc:
+        logger.warning("TRANSCRIPT_DOCS_SAVE_FAILED: reason=%s", exc)
+        raise
+
     company_dictionary = load_company_dictionary()
     abbreviation_dictionary = load_abbreviation_dictionary()
     logger.info(
@@ -152,6 +172,7 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         meeting_info=meeting_info,
         minutes_text=formatted_minutes,
         audio_file_path=audio_file_path,
+        existing_document_id=transcript_doc_id,
     )
     logger.info("Google Docs write completed.")
     google_docs_fallback_used = (
@@ -195,6 +216,9 @@ def run_meeting_pipeline(audio_file_path: str) -> dict:
         "review_followup_question": review_followup,
         "utterance_validations": [],
         "google_doc_result": google_doc_result,
+        "transcript_doc_result": transcript_doc_result,
+        "transcript_doc_id": transcript_doc_id,
+        "transcript_doc_url": transcript_doc_result.get("document_url") if transcript_doc_result else None,
         "execution_summary": {
             "filename_fallback_used": filename_fallback_used,
             "whisper_fallback_used": whisper_fallback_used,

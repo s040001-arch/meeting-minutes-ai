@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from docs.google_docs_writer import save_latest_minutes_state
+from docs.google_docs_writer import save_latest_minutes_state, write_transcript_to_google_docs
 from line.qa_session_state import (
     close_active_sessions_except,
     create_or_reset_session,
@@ -329,7 +329,39 @@ def run_pipeline_from_cli(
         Path(audio_file_path).suffix.lower(),
     )
 
+
     result = run_meeting_pipeline(audio_file_path)
+
+
+    # --- 逐語録Docs保存は meeting_pipeline で実施済み ---
+    meeting_info = result.get("meeting_info") or {}
+    transcript_text = result.get("labeled_transcript") or ""
+    transcript_doc_id = result.get("transcript_doc_id") or None
+
+    # --- minutes+transcript合成・同一Doc反映 ---
+    minutes_text = result.get("formatted_minutes") or ""
+    if meeting_info and minutes_text and transcript_text and transcript_doc_id:
+        try:
+            combined_text = minutes_text.strip() + "\n\n## 発言録（逐語）\n" + transcript_text.strip()
+            from docs.google_docs_writer import write_minutes_to_google_docs
+            minutes_doc_result = write_minutes_to_google_docs(
+                meeting_info=meeting_info,
+                minutes_text=combined_text,
+                audio_file_path=audio_file_path,
+                existing_document_id=transcript_doc_id,
+            )
+            logger.info(
+                "MINUTES_DOCS_SAVE_DONE: doc_id=%s url=%s",
+                minutes_doc_result.get("document_id"),
+                minutes_doc_result.get("document_url"),
+            )
+            result["google_doc_result"] = minutes_doc_result
+            result["google_docs_url"] = minutes_doc_result.get("document_url")
+        except Exception as exc:
+            logger.warning("MINUTES_DOCS_SAVE_FAILED: reason=%s", exc)
+            # failed時はcheckpoint保持（既存ロジックに委ねる）
+    else:
+        logger.info("MINUTES_DOCS_SAVE_SKIP: 必要情報不足 (meeting_info, minutes_text, transcript_text, transcript_doc_id)")
 
     close_reason = "次の音声ファイル到着による強制終了"
     current_meeting_id = str((result.get("google_doc_result") or {}).get("folder_id") or "").strip()
