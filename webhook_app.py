@@ -26,6 +26,7 @@ def handle_user_input(text: str) -> str:
         print(text)
         # 入力を後で参照できるように保存する（MVP: purposeのみ）
         state["answers"]["purpose"] = text
+        print(state["answers"])
         state["step"] = "idle"
         return "ありがとうございます"
 
