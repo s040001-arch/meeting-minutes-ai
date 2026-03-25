@@ -7,6 +7,8 @@ app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
+ANSWERS_SAVE_PATH = os.path.join("data", "line_answers.json")
+
 state = {
     # 質問送信は行わず、回答受付だけ行う前提のため
     # 「今は回答待ちの質問が存在する」状態から開始する。
@@ -16,6 +18,37 @@ state = {
     },
     "answers": {},
 }
+
+def save_answer_to_json(question_id: str, answer_text: str, question_text: str | None = None) -> None:
+    """
+    MVP用: webhookで受け取った回答をローカルJSONへ追記保存する。
+    ここは低リスクの永続化で、失敗してもLINE応答は落とさない。
+    """
+    try:
+        os.makedirs(os.path.dirname(ANSWERS_SAVE_PATH) or ".", exist_ok=True)
+        record = {
+            "question_id": question_id,
+            "question_text": question_text,
+            "answer_text": answer_text,
+        }
+        if os.path.exists(ANSWERS_SAVE_PATH):
+            import json
+
+            with open(ANSWERS_SAVE_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        else:
+            existing = []
+
+        if not isinstance(existing, list):
+            existing = []
+
+        existing.append(record)
+        import json
+
+        with open(ANSWERS_SAVE_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"save_answer_to_json_failed={e}")
 
 
 def handle_user_input(text: str) -> str:
@@ -35,6 +68,11 @@ def handle_user_input(text: str) -> str:
     state["answers"][question_id] = text
     print("unknown_answer_received=")
     print({"question_id": question_id, "answer_text": text})
+    save_answer_to_json(
+        question_id=question_id,
+        answer_text=text,
+        question_text=pending_dict.get("question_text"),
+    )
     # 回答受領後は pending_question を None に統一（次の質問は決めない）
     state["pending_question"] = None
 
