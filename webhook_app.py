@@ -7,7 +7,7 @@ app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
-state = {"step": "idle"}
+state = {"step": "idle", "answers": {}}
 
 
 def handle_user_input(text: str) -> str:
@@ -18,10 +18,14 @@ def handle_user_input(text: str) -> str:
     step = state.get("step", "idle")
     if step == "idle":
         state["step"] = "waiting_answer"
+        if "answers" not in state or not isinstance(state.get("answers"), dict):
+            state["answers"] = {}
         return "今日の会議の目的は何ですか？"
 
     if step == "waiting_answer":
         print(text)
+        # 入力を後で参照できるように保存する（MVP: purposeのみ）
+        state["answers"]["purpose"] = text
         state["step"] = "idle"
         return "ありがとうございます"
 
