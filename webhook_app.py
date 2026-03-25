@@ -7,42 +7,38 @@ app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
-state = {"step": "ask_purpose", "answers": {}}
+state = {
+    # 質問送信は行わず、回答受付だけ行う前提のため
+    # 「今は回答待ちの質問が存在する」状態から開始する。
+    "pending_question": {
+        "question_id": "purpose",
+        "question_text": "今日の会議の目的は何ですか？",
+    },
+    "answers": {},
+}
 
 
 def handle_user_input(text: str) -> str:
-    """LINEからのユーザー入力の入口。質問回答フローやOpenAI連携はここから接続する。"""
-    # MVPではシングルユーザー前提で、状態はグローバルに保持する
+    """LINEからのユーザー入力の入口。pending question 1件に対する回答受付だけ行う。"""
     global state
 
-    step = state.get("step", "ask_purpose")
     if "answers" not in state or not isinstance(state.get("answers"), dict):
         state["answers"] = {}
 
-    if step == "ask_purpose":
-        state["step"] = "waiting_purpose"
-        return "今日の会議の目的は何ですか？"
+    pending = state.get("pending_question")
+    if pending is None:
+        return "現在、回答待ちの質問はありません。"
+    pending_dict = pending if isinstance(pending, dict) else {}
+    question_id = str(pending_dict.get("question_id") or "unknown")
 
-    if step == "waiting_purpose":
-        print(text)
-        state["answers"]["purpose"] = text
-        print(state["answers"])
-        state["step"] = "waiting_participants"
-        return "誰が参加しますか？"
+    # 要件：少なくとも question_id と answer_text が確認できるログ
+    state["answers"][question_id] = text
+    print("unknown_answer_received=")
+    print({"question_id": question_id, "answer_text": text})
+    # 回答受領後は pending_question を None に統一（statusは持たない）
+    state["pending_question"] = None
 
-    if step == "waiting_participants":
-        print(text)
-        state["answers"]["participants"] = text
-        print(state["answers"])
-        state["step"] = "done"
-        return "ありがとうございます"
-
-    if step == "done":
-        return "すでに回答済みです"
-
-    # 想定外のstepの場合は安全側に戻す
-    state["step"] = "ask_purpose"
-    return "今日の会議の目的は何ですか？"
+    return "ありがとうございます"
 
 
 @app.get("/")
