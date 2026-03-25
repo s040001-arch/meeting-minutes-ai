@@ -8,6 +8,11 @@ app = FastAPI()
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
 
+def handle_user_input(text: str) -> None:
+    """LINEからのユーザー入力の入口。質問回答フローやOpenAI連携はここから接続する。"""
+    pass
+
+
 @app.get("/")
 def health():
     return {"status": "ok"}
@@ -33,6 +38,9 @@ async def callback(request: Request):
         text = message.get("text")
         if not reply_token or text is None:
             return {"status": "ok"}
+
+        print(text)
+        handle_user_input(text)
 
         channel_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
         if not channel_token:
