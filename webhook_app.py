@@ -35,8 +35,14 @@ def handle_user_input(text: str) -> str:
     state["answers"][question_id] = text
     print("unknown_answer_received=")
     print({"question_id": question_id, "answer_text": text})
-    # 回答受領後は pending_question を None に統一（statusは持たない）
-    state["pending_question"] = None
+    # 回答受領後は pending_question を更新（statusは持たない）
+    next_by_question_id = {
+        "purpose": {
+            "question_id": "participants",
+            "question_text": "誰が参加しますか？",
+        },
+    }
+    state["pending_question"] = next_by_question_id.get(question_id)
 
     return "ありがとうございます"
 
