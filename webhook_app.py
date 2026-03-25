@@ -7,18 +7,14 @@ app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
-_user_state: dict[str, dict] = {}
+state = {"step": "idle"}
 
 
-def handle_user_input(text: str, user_id: str) -> None:
+def handle_user_input(text: str) -> None:
     """LINEからのユーザー入力の入口。質問回答フローやOpenAI連携はここから接続する。"""
-    # まずはメモリ上でユーザー状態を保持する（MVP: process内限定）
-    if user_id not in _user_state:
-        _user_state[user_id] = {"step": "idle"}
-
-    # ここでは最小構成のため状態遷移はまだ実装しない
+    # MVPではシングルユーザー前提で、状態はグローバルに保持する
     _ = text
-    _ = _user_state[user_id]
+    _ = state
 
 
 @app.get("/")
@@ -48,11 +44,7 @@ async def callback(request: Request):
             return {"status": "ok"}
 
         print(text)
-        source = evt.get("source") or {}
-        user_id = source.get("userId")
-        if not user_id:
-            user_id = "unknown"
-        handle_user_input(text, user_id)
+        handle_user_input(text)
 
         channel_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
         if not channel_token:
