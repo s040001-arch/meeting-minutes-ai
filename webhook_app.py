@@ -18,16 +18,16 @@ def handle_user_input(text: str) -> str:
     step = state.get("step", "idle")
     if step == "idle":
         state["step"] = "waiting_answer"
-        return "質問を開始します"
+        return "今日の会議の目的は何ですか？"
 
     if step == "waiting_answer":
         print(text)
         state["step"] = "idle"
-        return "回答を受け取りました"
+        return "ありがとうございます"
 
     # 想定外のstepの場合は安全側に戻す
     state["step"] = "idle"
-    return "質問を開始します"
+    return "今日の会議の目的は何ですか？"
 
 
 @app.get("/")
