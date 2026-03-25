@@ -10,11 +10,24 @@ LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 state = {"step": "idle"}
 
 
-def handle_user_input(text: str) -> None:
+def handle_user_input(text: str) -> str:
     """LINEからのユーザー入力の入口。質問回答フローやOpenAI連携はここから接続する。"""
     # MVPではシングルユーザー前提で、状態はグローバルに保持する
-    _ = text
-    _ = state
+    global state
+
+    step = state.get("step", "idle")
+    if step == "idle":
+        state["step"] = "waiting_answer"
+        return "質問を開始します"
+
+    if step == "waiting_answer":
+        print(text)
+        state["step"] = "idle"
+        return "回答を受け取りました"
+
+    # 想定外のstepの場合は安全側に戻す
+    state["step"] = "idle"
+    return "質問を開始します"
 
 
 @app.get("/")
@@ -43,8 +56,7 @@ async def callback(request: Request):
         if not reply_token or text is None:
             return {"status": "ok"}
 
-        print(text)
-        handle_user_input(text)
+        reply_text = handle_user_input(text)
 
         channel_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
         if not channel_token:
@@ -53,7 +65,7 @@ async def callback(request: Request):
 
         payload = {
             "replyToken": reply_token,
-            "messages": [{"type": "text", "text": text}],
+            "messages": [{"type": "text", "text": reply_text}],
         }
         resp = requests.post(
             LINE_REPLY_URL,
