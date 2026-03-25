@@ -7,7 +7,7 @@ app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
-state = {"step": "idle", "answers": {}}
+state = {"step": "ask_purpose", "answers": {}}
 
 
 def handle_user_input(text: str) -> str:
@@ -15,23 +15,33 @@ def handle_user_input(text: str) -> str:
     # MVPではシングルユーザー前提で、状態はグローバルに保持する
     global state
 
-    step = state.get("step", "idle")
-    if step == "idle":
-        state["step"] = "waiting_answer"
-        if "answers" not in state or not isinstance(state.get("answers"), dict):
-            state["answers"] = {}
+    step = state.get("step", "ask_purpose")
+    if "answers" not in state or not isinstance(state.get("answers"), dict):
+        state["answers"] = {}
+
+    if step == "ask_purpose":
+        state["step"] = "waiting_purpose"
         return "今日の会議の目的は何ですか？"
 
-    if step == "waiting_answer":
+    if step == "waiting_purpose":
         print(text)
-        # 入力を後で参照できるように保存する（MVP: purposeのみ）
         state["answers"]["purpose"] = text
         print(state["answers"])
-        state["step"] = "idle"
+        state["step"] = "waiting_participants"
+        return "誰が参加しますか？"
+
+    if step == "waiting_participants":
+        print(text)
+        state["answers"]["participants"] = text
+        print(state["answers"])
+        state["step"] = "done"
         return "ありがとうございます"
 
+    if step == "done":
+        return "すでに回答済みです"
+
     # 想定外のstepの場合は安全側に戻す
-    state["step"] = "idle"
+    state["step"] = "ask_purpose"
     return "今日の会議の目的は何ですか？"
 
 
