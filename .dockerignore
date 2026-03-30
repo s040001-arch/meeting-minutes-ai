@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.pytest_cache
+.env
+.cursor
+*.md
+!README.md
+data/chunks
+data/transcriptions
+data/incoming_audio
+data/google_docs_export
+logs
+terminals
