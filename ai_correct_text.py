@@ -105,6 +105,10 @@ def split_mechanical_for_ai_correction(
 
 _PLACEHOLDER_STRICT_RE = re.compile(r"<[A-Z]+_[0-9]{4}>")
 _FILLER_RE = re.compile(r"(?:うん|なんか|えーと|えっと|あのー?|ま)(?:、|。|\\s|$)")
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？]")
+_TOPIC_BREAK_HINT_RE = re.compile(
+    r"(?:^|\n)\s*(?:で、|ただ、|一方で、|一方、|あと、|なので、|まず、|次に、|つまり、|そのうえで、|一方で|ちなみに、)"
+)
 
 # Priority (small -> large):
 # MONEY / DATE / PERSON / COMPANY should win over generic NUM.
@@ -213,6 +217,43 @@ def compute_readability_stats(text: str) -> dict[str, int]:
     }
 
 
+def compute_structure_quality(text: str) -> dict[str, float]:
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    sentence_count = len(sentences)
+    paragraph_count = _count_paragraphs(text)
+    sentence_lengths = [len(s) for s in sentences]
+    avg_sentence_len = (sum(sentence_lengths) / sentence_count) if sentence_count else 0.0
+    short_sentence_rate = (
+        (sum(1 for n in sentence_lengths if n <= 8) / sentence_count) if sentence_count else 0.0
+    )
+    long_sentence_rate = (
+        (sum(1 for n in sentence_lengths if n >= 80) / sentence_count) if sentence_count else 0.0
+    )
+    sentences_per_paragraph = (sentence_count / paragraph_count) if paragraph_count > 0 else 0.0
+    topic_break_hint_count = len(_TOPIC_BREAK_HINT_RE.findall(text))
+
+    # 5-item rubric: prioritize "readable structure", not raw punctuation counts.
+    rubric = {
+        "has_enough_sentences": 1.0 if sentence_count >= 2 else 0.0,
+        "avg_sentence_len_band": 1.0 if 18.0 <= avg_sentence_len <= 65.0 else 0.0,
+        "short_sentence_rate_ok": 1.0 if short_sentence_rate <= 0.40 else 0.0,
+        "long_sentence_rate_ok": 1.0 if long_sentence_rate <= 0.25 else 0.0,
+        "paragraph_density_ok": 1.0 if 1.2 <= sentences_per_paragraph <= 6.5 else 0.0,
+    }
+    quality_score = float(sum(rubric.values()))
+    return {
+        "sentence_count": float(sentence_count),
+        "paragraph_count": float(paragraph_count),
+        "avg_sentence_len": float(avg_sentence_len),
+        "short_sentence_rate": float(short_sentence_rate),
+        "long_sentence_rate": float(long_sentence_rate),
+        "sentences_per_paragraph": float(sentences_per_paragraph),
+        "topic_break_hint_count": float(topic_break_hint_count),
+        "quality_score": quality_score,
+        **rubric,
+    }
+
+
 def _build_system_prompt(*, aggressive_structure: bool) -> str:
     base = (
         "あなたは議事録の可読性整形アシスタントです。"
@@ -229,11 +270,14 @@ def _build_system_prompt(*, aggressive_structure: bool) -> str:
             base
             + "意味を変えない範囲で、句読点・改行・段落・文境界・明らかな脱字/崩れの修正を行ってください。"
             + "軽微なフィラー削除と言いよどみ整理は許可します。"
+            + "段落は文数よりも話題のまとまりを優先して調整してください。"
         )
     return (
         base
         + "意味を変えない範囲で文構造の再構成を積極的に行ってください。"
-        + "長すぎる文は分割し、話題ごとに段落分けしてください。"
+        + "長すぎる文は分割し、話題単位で段落分けしてください。"
+        + "段落の文数目安は3-5文ですが、意味のまとまりを優先してください。"
+        + "過分割（短文だけの段落乱立）は避け、理解しやすいまとまりにしてください。"
         + "フィラー（例: うん、なんか、えーと）を削除し、言いよどみや重複表現を整理してください。"
         + "語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
     )
@@ -251,6 +295,7 @@ def call_openai_for_correction_detailed(
     OpenAI Responses API で議事録可読性整形を実行し、評価用メタを返す。
     """
     stats_before = compute_readability_stats(text)
+    structure_before = compute_structure_quality(text)
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
 
     url = "https://api.openai.com/v1/responses"
@@ -332,9 +377,12 @@ def call_openai_for_correction_detailed(
 
     corrected = _restore_masked_text(corrected_masked, placeholder_mapping)
     stats_after = compute_readability_stats(corrected)
+    structure_after = compute_structure_quality(corrected)
     meta: dict[str, object] = {
         "stats_before": stats_before,
         "stats_after": stats_after,
+        "structure_before": structure_before,
+        "structure_after": structure_after,
         "placeholder_ok": True,
         "aggressive_structure": aggressive_structure,
     }

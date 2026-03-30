@@ -468,6 +468,8 @@ def main() -> None:
 
         stats_before = ai_meta.get("stats_before") if isinstance(ai_meta.get("stats_before"), dict) else {}
         stats_after = ai_meta.get("stats_after") if isinstance(ai_meta.get("stats_after"), dict) else {}
+        structure_before = ai_meta.get("structure_before") if isinstance(ai_meta.get("structure_before"), dict) else {}
+        structure_after = ai_meta.get("structure_after") if isinstance(ai_meta.get("structure_after"), dict) else {}
         period_before = int(stats_before.get("period_count", chunk.count("。")))
         period_after = int(stats_after.get("period_count", ai_chunk.count("。")))
         comma_before = int(stats_before.get("comma_count", chunk.count("、")))
@@ -478,13 +480,33 @@ def main() -> None:
         paragraph_after = int(stats_after.get("paragraph_count", 1 if ai_chunk.strip() else 0))
         filler_before = int(stats_before.get("filler_count", 0))
         filler_after = int(stats_after.get("filler_count", 0))
+        quality_before = float(structure_before.get("quality_score", 0.0))
+        quality_after = float(structure_after.get("quality_score", 0.0))
+        avg_sentence_len_before = float(structure_before.get("avg_sentence_len", 0.0))
+        avg_sentence_len_after = float(structure_after.get("avg_sentence_len", 0.0))
+        short_sentence_rate_before = float(structure_before.get("short_sentence_rate", 0.0))
+        short_sentence_rate_after = float(structure_after.get("short_sentence_rate", 0.0))
+        long_sentence_rate_before = float(structure_before.get("long_sentence_rate", 0.0))
+        long_sentence_rate_after = float(structure_after.get("long_sentence_rate", 0.0))
+        topic_break_hint_before = int(float(structure_before.get("topic_break_hint_count", 0.0)))
+        topic_break_hint_after = int(float(structure_after.get("topic_break_hint_count", 0.0)))
         ai_eq_mech = (ai_chunk == chunk)
 
-        improvement_zero = (
+        # Legacy readability heuristics (kept for continuity)
+        basic_improvement_zero = (
             (period_after <= period_before)
             and (newline_after <= newline_before)
+            and (paragraph_after <= paragraph_before)
             and (filler_after >= filler_before)
         )
+        # Structure quality heuristics (new primary)
+        structure_not_improved = (
+            (quality_after <= quality_before)
+            and (long_sentence_rate_after >= long_sentence_rate_before)
+            and (short_sentence_rate_after >= short_sentence_rate_before)
+            and (topic_break_hint_after <= topic_break_hint_before)
+        )
+        improvement_zero = basic_improvement_zero and structure_not_improved
         if (placeholder_status == "OK") and improvement_zero:
             try:
                 retry_chunk, retry_meta = call_openai_for_correction_detailed(
@@ -502,12 +524,26 @@ def main() -> None:
                 newline_after = int(stats_after.get("newline_count", ai_chunk.count("\n")))
                 paragraph_after = int(stats_after.get("paragraph_count", 1 if ai_chunk.strip() else 0))
                 filler_after = int(stats_after.get("filler_count", 0))
+                structure_after = ai_meta.get("structure_after") if isinstance(ai_meta.get("structure_after"), dict) else {}
+                quality_after = float(structure_after.get("quality_score", 0.0))
+                avg_sentence_len_after = float(structure_after.get("avg_sentence_len", 0.0))
+                short_sentence_rate_after = float(structure_after.get("short_sentence_rate", 0.0))
+                long_sentence_rate_after = float(structure_after.get("long_sentence_rate", 0.0))
+                topic_break_hint_after = int(float(structure_after.get("topic_break_hint_count", 0.0)))
                 ai_eq_mech = (ai_chunk == chunk)
-                improvement_zero = (
+                basic_improvement_zero = (
                     (period_after <= period_before)
                     and (newline_after <= newline_before)
+                    and (paragraph_after <= paragraph_before)
                     and (filler_after >= filler_before)
                 )
+                structure_not_improved = (
+                    (quality_after <= quality_before)
+                    and (long_sentence_rate_after >= long_sentence_rate_before)
+                    and (short_sentence_rate_after >= short_sentence_rate_before)
+                    and (topic_break_hint_after <= topic_break_hint_before)
+                )
+                improvement_zero = basic_improvement_zero and structure_not_improved
             except Exception as e:
                 log_line(
                     log_path,
@@ -524,7 +560,14 @@ def main() -> None:
                 f"newline_before={newline_before} newline_after={newline_after} "
                 f"paragraph_before={paragraph_before} paragraph_after={paragraph_after} "
                 f"filler_before={filler_before} filler_after={filler_after} "
+                f"quality_before={quality_before:.2f} quality_after={quality_after:.2f} "
+                f"avg_sentence_len_before={avg_sentence_len_before:.2f} avg_sentence_len_after={avg_sentence_len_after:.2f} "
+                f"short_sentence_rate_before={short_sentence_rate_before:.3f} short_sentence_rate_after={short_sentence_rate_after:.3f} "
+                f"long_sentence_rate_before={long_sentence_rate_before:.3f} long_sentence_rate_after={long_sentence_rate_after:.3f} "
+                f"topic_break_hint_before={topic_break_hint_before} topic_break_hint_after={topic_break_hint_after} "
                 f"ai_eq_mech={ai_eq_mech} placeholder_status={placeholder_status} "
+                f"basic_improvement_zero={basic_improvement_zero} "
+                f"structure_not_improved={structure_not_improved} "
                 f"improvement_zero={improvement_zero} retry_used={retry_used}"
             ),
         )
