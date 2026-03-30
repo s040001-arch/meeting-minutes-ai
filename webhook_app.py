@@ -475,6 +475,28 @@ def job_progress(job_id: str | None = None):
     return data
 
 
+@app.get("/worker-status")
+def worker_status():
+    """
+    Drive worker状態の常時参照用。
+    - polling / processing / idle / error
+    - last_result: success / no_new_files / failed 等
+    """
+    path = os.getenv("WORKER_STATUS_PATH", os.path.join("data", "worker_status.json")).strip()
+    if not path:
+        path = os.path.join("data", "worker_status.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="worker status not found")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"worker status read failed: {e}") from e
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=500, detail="worker status is invalid")
+    return data
+
+
 @app.post("/line/pending")
 async def line_pending_sync(request: Request):
     """

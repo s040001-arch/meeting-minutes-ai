@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -84,7 +85,68 @@ def release_lock(lock_path: str) -> None:
         pass
 
 
-def run_once(args: argparse.Namespace) -> int:
+def _atomic_write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_known_ids_count(path: str) -> int:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict):
+            if isinstance(data.get("ids"), list):
+                return len(data["ids"])
+            return len(data)
+    except Exception:
+        return 0
+    return 0
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def update_worker_status(status_path: str, **patch) -> dict:
+    current = _read_json(status_path)
+    current.update(patch)
+    current["updated_at"] = _now_iso()
+    _atomic_write_json(status_path, current)
+    return current
+
+
+def _parse_run_once_output(stdout_text: str) -> dict:
+    result = {
+        "status": "failed",
+        "job_id": "",
+        "processed_file_name": "",
+    }
+    for line in stdout_text.splitlines():
+        s = line.strip()
+        if s.startswith("status="):
+            result["status"] = s.split("=", 1)[1].strip() or result["status"]
+        elif s.startswith("job_id="):
+            result["job_id"] = s.split("=", 1)[1].strip()
+        elif s.startswith("processed_file_name="):
+            result["processed_file_name"] = s.split("=", 1)[1].strip()
+    return result
+
+
+def run_once(args: argparse.Namespace) -> tuple[int, dict]:
     cmd = [
         sys.executable,
         os.path.join(os.getcwd(), "drive_auto_run_once.py"),
@@ -118,7 +180,8 @@ def run_once(args: argparse.Namespace) -> int:
         print(completed.stderr.rstrip())
 
     print(f"[{now_iso()}] run_once_exit_code={completed.returncode}")
-    return completed.returncode
+    parsed = _parse_run_once_output(completed.stdout or "")
+    return completed.returncode, parsed
 
 
 def main() -> None:
@@ -181,6 +244,11 @@ def main() -> None:
         default=900,
         help="失敗時バックオフの上限秒（デフォルト: 900）",
     )
+    parser.add_argument(
+        "--worker-status-path",
+        default=os.path.join("data", "worker_status.json"),
+        help="worker状態のJSON保存先（デフォルト: data/worker_status.json）",
+    )
     args = parser.parse_args()
 
     folder_id = (args.folder_id or os.getenv("DRIVE_FOLDER_ID", "").strip())
@@ -200,20 +268,73 @@ def main() -> None:
     if not acquire_lock(args.lock_file):
         print(f"[{now_iso()}] already_running lock_file={args.lock_file}")
         print("status=skipped_locked")
+        update_worker_status(
+            args.worker_status_path,
+            worker_state="idle",
+            lock_state="skipped_locked",
+            last_result="skipped_locked",
+        )
         return
 
     try:
         print(f"[{now_iso()}] drive_auto_run_forever_start interval_sec={args.interval_sec}")
         print(f"[{now_iso()}] stop_with=Ctrl+C")
+        update_worker_status(
+            args.worker_status_path,
+            worker_state="idle",
+            lock_state="acquired",
+            interval_sec=args.interval_sec,
+            started_at=_now_iso(),
+            last_result="startup",
+            poll_count=0,
+            consecutive_no_new_files=0,
+        )
         consecutive_failures = 0
+        consecutive_no_new_files = 0
+        poll_count = 0
         while True:
+            poll_count += 1
+            update_worker_status(
+                args.worker_status_path,
+                worker_state="polling",
+                last_poll_at=_now_iso(),
+                poll_count=poll_count,
+                known_ids_count=_read_known_ids_count(args.state),
+            )
             try:
-                exit_code = run_once(args)
-                if exit_code == 0:
+                update_worker_status(args.worker_status_path, worker_state="processing")
+                exit_code, run_meta = run_once(args)
+                run_status = str(run_meta.get("status") or "")
+                run_job_id = str(run_meta.get("job_id") or "")
+                if exit_code == 0 and run_status == "success":
                     consecutive_failures = 0
+                    consecutive_no_new_files = 0
                     sleep_sec = args.interval_sec
+                    update_worker_status(
+                        args.worker_status_path,
+                        worker_state="idle",
+                        last_result="success",
+                        last_detected_file_at=_now_iso(),
+                        last_started_job_id=(run_job_id or None),
+                        last_finished_job_id=(run_job_id or None),
+                        last_processed_file_name=(run_meta.get("processed_file_name") or None),
+                        consecutive_no_new_files=consecutive_no_new_files,
+                        last_error=None,
+                    )
+                elif exit_code == 0 and run_status == "no_new_files":
+                    consecutive_failures = 0
+                    consecutive_no_new_files += 1
+                    sleep_sec = args.interval_sec
+                    update_worker_status(
+                        args.worker_status_path,
+                        worker_state="idle",
+                        last_result="no_new_files",
+                        consecutive_no_new_files=consecutive_no_new_files,
+                        last_error=None,
+                    )
                 else:
                     consecutive_failures += 1
+                    consecutive_no_new_files = 0
                     sleep_sec = min(
                         args.interval_sec * (2 ** min(consecutive_failures - 1, 4)),
                         args.max_backoff_sec,
@@ -222,8 +343,19 @@ def main() -> None:
                         f"[{now_iso()}] run_once_failed "
                         f"consecutive_failures={consecutive_failures} next_sleep_sec={sleep_sec}"
                     )
+                    update_worker_status(
+                        args.worker_status_path,
+                        worker_state="error",
+                        last_result="failed",
+                        consecutive_no_new_files=consecutive_no_new_files,
+                        last_error=(
+                            f"run_once_failed exit_code={exit_code} status={run_status} "
+                            f"job_id={run_job_id}"
+                        ),
+                    )
             except Exception as e:  # noqa: BLE001
                 consecutive_failures += 1
+                consecutive_no_new_files = 0
                 sleep_sec = min(
                     args.interval_sec * (2 ** min(consecutive_failures - 1, 4)),
                     args.max_backoff_sec,
@@ -233,8 +365,21 @@ def main() -> None:
                     f"[{now_iso()}] exception_backoff "
                     f"consecutive_failures={consecutive_failures} next_sleep_sec={sleep_sec}"
                 )
+                update_worker_status(
+                    args.worker_status_path,
+                    worker_state="error",
+                    last_result="failed",
+                    consecutive_no_new_files=consecutive_no_new_files,
+                    last_error=f"exception={e!r}",
+                )
             time.sleep(sleep_sec)
     finally:
+        update_worker_status(
+            args.worker_status_path,
+            worker_state="idle",
+            lock_state="released",
+            stopped_at=_now_iso(),
+        )
         release_lock(args.lock_file)
 
 
