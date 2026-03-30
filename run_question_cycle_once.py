@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import requests
 
+from ai_correct_text import resolve_openai_api_key
 from generate_one_question import TYPE_PRIORITY, load_unknown_points
 from line_send_question import build_line_message, push_line_message
 from question_value_selection import (
@@ -41,6 +42,106 @@ RISKY_TYPE_PRIORITY = {
     "suspicious_word": "固有名詞",
     "suspicious_number_or_role": "数値",
 }
+
+
+def _build_unknown_points_compact(unknown_points: list[dict], limit: int = 25) -> list[dict]:
+    out: list[dict] = []
+    for item in unknown_points[:limit]:
+        out.append(
+            {
+                "type": str(item.get("type", "")).strip(),
+                "text": str(item.get("text", "")).strip()[:220],
+                "reason": str(item.get("reason", "")).strip()[:220],
+            }
+        )
+    return out
+
+
+def _generate_one_question_by_ai(
+    *,
+    full_text: str,
+    unknown_points: list[dict],
+    model: str,
+    api_key: str,
+    timeout_sec: int = 180,
+) -> dict:
+    """
+    AI主導で「全体文脈に最も効く1問」を生成する。
+    戻り値は dict:
+      - question_status: generated / none
+      - question_text
+      - selected_unknown
+      - selection_audit
+      - message
+    """
+    url = "https://api.openai.com/v1/responses"
+    compact_unknowns = _build_unknown_points_compact(unknown_points)
+    transcript = (full_text or "").strip()
+    if len(transcript) > 12000:
+        transcript = transcript[:12000]
+
+    schema_hint = {
+        "question_status": "generated|none",
+        "question_text": "string",
+        "selected_unknown": {"type": "string", "text": "string", "reason": "string"},
+        "selection_audit": {
+            "selection_mode": "ai_global_context",
+            "why_this_question": "string",
+            "resolved_if_answered": "string",
+            "confidence": "low|medium|high",
+        },
+        "message": "string",
+    }
+    user_payload = {
+        "transcript": transcript,
+        "unknown_points": compact_unknowns,
+        "output_schema": schema_hint,
+    }
+    system_prompt = (
+        "あなたは議事録品質管理アシスタントです。"
+        "目的は、全文の文脈が最も繋がるように、質問は常に1問だけ選ぶことです。"
+        "細かな表記ゆれより、全体の解釈が分岐する論点を優先してください。"
+        "質問の結果で本文全体がどこまで確定するかを重視してください。"
+        "不確実性が低く、そのまま提出可能と判断できる場合のみ question_status=none を返してください。"
+        "出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
+    )
+    payload = {
+        "model": model,
+        "temperature": 0.2,
+        "max_output_tokens": 1600,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+    }
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout_sec,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"OpenAI API error: status={resp.status_code} body={resp.text[:500]}")
+    result = resp.json()
+    output_items = result.get("output", [])
+    texts: list[str] = []
+    for item in output_items:
+        for c in item.get("content", []):
+            if c.get("type") == "output_text":
+                texts.append(c.get("text", ""))
+    content = "\n".join(t for t in texts if t).strip()
+    if not content:
+        raise RuntimeError("OpenAI response did not contain output_text.")
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"AI question JSON parse failed: {e}") from e
+    if not isinstance(parsed, dict):
+        raise RuntimeError("AI question output is not an object.")
+    return parsed
 
 
 def select_one_unknown_prioritized(unknown_points: list[dict]) -> tuple[dict, dict]:
@@ -182,6 +283,11 @@ def main() -> None:
         default=8,
         help="この値未満の候補は質問せず完了扱い（デフォルト: 8）",
     )
+    parser.add_argument(
+        "--question-model",
+        default="gpt-4.1",
+        help="質問生成で使うOpenAIモデル（デフォルト: gpt-4.1）",
+    )
     args = parser.parse_args()
 
     job_dir = os.path.join(args.input_root, args.job_id)
@@ -209,44 +315,96 @@ def main() -> None:
             "question_text": "",
         }
     else:
-        if args.debug_selection:
-            deduped_dbg, _ = deduplicate_unknown_points_by_type_text(unknown_points)
-            print(format_top_candidates_debug(deduped_dbg, full_text), flush=True)
-        selected, selection_audit = select_one_unknown_value_based(unknown_points, full_text)
-        value = int(selection_audit.get("value", 0))
-        if value < args.min_question_value:
-            pop_value_fields(selected)
-            result_payload = {
-                "job_id": args.job_id,
-                "question_status": "none",
-                "message": (
-                    "推測に頼らず読める水準に達しているため、追加質問は行いません。"
-                    f"（top_value={value}, threshold={args.min_question_value}）"
-                ),
-                "selected_unknown": selected,
-                "selection_audit": selection_audit,
-                "question_text": "",
-            }
-        else:
-            pop_value_fields(selected)
-            question_text = build_user_friendly_question(selected)
-            question_id = str(uuid.uuid4())
-            result_payload = {
-                "job_id": args.job_id,
-                "question_id": question_id,
-                "question_status": "generated",
-                "message": "",
-                "selected_unknown": selected,
-                "selection_audit": selection_audit,
-                "question_text": question_text,
-            }
-            write_line_pending_context(
-                job_id=args.job_id,
-                question_id=question_id,
-                question_text=question_text,
-                selected_unknown=selected,
-                selection_audit=selection_audit,
+        api_key, key_source = resolve_openai_api_key()
+        print(f"question_generation_openai_api_key_found={bool(api_key)} source={key_source}")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set for AI question generation.")
+        try:
+            ai_result = _generate_one_question_by_ai(
+                full_text=full_text,
+                unknown_points=unknown_points,
+                model=args.question_model,
+                api_key=api_key,
             )
+            question_status = str(ai_result.get("question_status", "generated")).strip() or "generated"
+            selected_unknown = ai_result.get("selected_unknown")
+            if not isinstance(selected_unknown, dict):
+                selected_unknown = None
+            question_text = str(ai_result.get("question_text", "")).strip()
+            selection_audit = ai_result.get("selection_audit")
+            if not isinstance(selection_audit, dict):
+                selection_audit = {"selection_mode": "ai_global_context"}
+            selection_audit["selection_mode"] = "ai_global_context"
+            message = str(ai_result.get("message", "")).strip()
+
+            if question_status == "none" or not question_text:
+                result_payload = {
+                    "job_id": args.job_id,
+                    "question_status": "none",
+                    "message": message or "全文文脈は提出可能水準のため、追加質問は行いません。",
+                    "selected_unknown": selected_unknown,
+                    "selection_audit": selection_audit,
+                    "question_text": "",
+                }
+            else:
+                question_id = str(uuid.uuid4())
+                result_payload = {
+                    "job_id": args.job_id,
+                    "question_id": question_id,
+                    "question_status": "generated",
+                    "message": "",
+                    "selected_unknown": selected_unknown,
+                    "selection_audit": selection_audit,
+                    "question_text": question_text,
+                }
+                write_line_pending_context(
+                    job_id=args.job_id,
+                    question_id=question_id,
+                    question_text=question_text,
+                    selected_unknown=(selected_unknown or {}),
+                    selection_audit=selection_audit,
+                )
+        except Exception as e:
+            print(f"question_generation_ai_failed={e!r}")
+            # AI失敗時のみ既存ロジックへフォールバック
+            if args.debug_selection:
+                deduped_dbg, _ = deduplicate_unknown_points_by_type_text(unknown_points)
+                print(format_top_candidates_debug(deduped_dbg, full_text), flush=True)
+            selected, selection_audit = select_one_unknown_value_based(unknown_points, full_text)
+            value = int(selection_audit.get("value", 0))
+            if value < args.min_question_value:
+                pop_value_fields(selected)
+                result_payload = {
+                    "job_id": args.job_id,
+                    "question_status": "none",
+                    "message": (
+                        "推測に頼らず読める水準に達しているため、追加質問は行いません。"
+                        f"（top_value={value}, threshold={args.min_question_value}）"
+                    ),
+                    "selected_unknown": selected,
+                    "selection_audit": selection_audit,
+                    "question_text": "",
+                }
+            else:
+                pop_value_fields(selected)
+                question_text = build_user_friendly_question(selected)
+                question_id = str(uuid.uuid4())
+                result_payload = {
+                    "job_id": args.job_id,
+                    "question_id": question_id,
+                    "question_status": "generated",
+                    "message": "",
+                    "selected_unknown": selected,
+                    "selection_audit": selection_audit,
+                    "question_text": question_text,
+                }
+                write_line_pending_context(
+                    job_id=args.job_id,
+                    question_id=question_id,
+                    question_text=question_text,
+                    selected_unknown=selected,
+                    selection_audit=selection_audit,
+                )
 
     with open(question_output, "w", encoding="utf-8") as f:
         json.dump(result_payload, f, ensure_ascii=False, indent=2)

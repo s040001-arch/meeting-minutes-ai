@@ -168,8 +168,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="OpenAIモデル名（デフォルト: gpt-4o-mini）",
+        default="gpt-4.1",
+        help="OpenAIモデル名（デフォルト: gpt-4.1）",
     )
     parser.add_argument(
         "--openai-timeout-sec",
