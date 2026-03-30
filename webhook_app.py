@@ -184,10 +184,15 @@ def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
         "--after-answer",
         "--push",
     ]
+    line_user_id = os.getenv("LINE_USER_ID", "").strip()
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if line_user_id and line_token:
+        cmd.append("--send-line")
     print(
         "auto_after_answer_cmd="
         f"{sys.executable} run_docs_hub_e2e.py "
-        f"--job-id {jid!r} --after-answer --push cwd={_REPO_ROOT!r}"
+        f"--job-id {jid!r} --after-answer --push "
+        f"{'--send-line ' if ('--send-line' in cmd) else ''}cwd={_REPO_ROOT!r}"
     )
 
     try:

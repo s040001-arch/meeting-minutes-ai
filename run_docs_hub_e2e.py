@@ -138,6 +138,40 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.input_root,
         ]
     )
+    # 回答反映後の全文から未知点を再抽出し、必要なら「次の1問」を生成する。
+    after_qa_path = os.path.join(
+        args.input_root,
+        args.job_id,
+        "merged_transcript_after_qa.txt",
+    )
+    unknowns_path = os.path.join(args.input_root, args.job_id, "unknown_points.json")
+    _run(
+        [
+            _py(),
+            os.path.join(REPO_ROOT, "extract_unknown_points.py"),
+            "--input",
+            after_qa_path,
+            "--output",
+            unknowns_path,
+        ]
+    )
+    qcycle_cmd = [
+        _py(),
+        os.path.join(REPO_ROOT, "run_question_cycle_once.py"),
+        "--job-id",
+        args.job_id,
+        "--input-root",
+        args.input_root,
+        "--unknowns",
+        unknowns_path,
+        "--text",
+        after_qa_path,
+        "--min-question-value",
+        str(args.min_question_value),
+    ]
+    if args.send_line:
+        qcycle_cmd.append("--send-line")
+    _run(qcycle_cmd)
     cmd_sync_docs(args)
 
 
@@ -167,6 +201,17 @@ def main() -> None:
     parser.add_argument("--drive-parent-folder-id", default=None)
     parser.add_argument("--drive-subfolder-name", default=None)
     parser.add_argument("--title", default=None, help="Docs タイトル（未指定時は job_id）")
+    parser.add_argument(
+        "--send-line",
+        action="store_true",
+        help="after-answer 時に次の質問を LINE 送信する",
+    )
+    parser.add_argument(
+        "--min-question-value",
+        type=int,
+        default=8,
+        help="次質問を出す最小value（デフォルト: 8）",
+    )
     args = parser.parse_args()
 
     if args.after_answer:

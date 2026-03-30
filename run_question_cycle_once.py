@@ -6,12 +6,14 @@ from datetime import datetime, timezone
 
 import requests
 
-from generate_one_question import (
-    TYPE_PRIORITY,
-    find_context,
-    load_unknown_points,
-)
+from generate_one_question import TYPE_PRIORITY, load_unknown_points
 from line_send_question import build_line_message, push_line_message
+from question_value_selection import (
+    deduplicate_unknown_points_by_type_text,
+    format_top_candidates_debug,
+    pop_value_fields,
+    select_one_unknown_value_based,
+)
 from repo_env import load_dotenv_local
 
 LINE_PENDING_CONTEXT_PATH = os.path.join("data", "line_pending_context.json")
@@ -169,6 +171,17 @@ def main() -> None:
         action="store_true",
         help="指定時のみ LINE API へ push する（未指定時は送信しない）",
     )
+    parser.add_argument(
+        "--debug-selection",
+        action="store_true",
+        help="選定の上位候補（value/impact/risk/dependency 等）を標準出力に出す",
+    )
+    parser.add_argument(
+        "--min-question-value",
+        type=int,
+        default=8,
+        help="この値未満の候補は質問せず完了扱い（デフォルト: 8）",
+    )
     args = parser.parse_args()
 
     job_dir = os.path.join(args.input_root, args.job_id)
@@ -196,25 +209,44 @@ def main() -> None:
             "question_text": "",
         }
     else:
-        selected, selection_audit = select_one_unknown_prioritized(unknown_points)
-        question_text = build_user_friendly_question(selected)
-        question_id = str(uuid.uuid4())
-        result_payload = {
-            "job_id": args.job_id,
-            "question_id": question_id,
-            "question_status": "generated",
-            "message": "",
-            "selected_unknown": selected,
-            "selection_audit": selection_audit,
-            "question_text": question_text,
-        }
-        write_line_pending_context(
-            job_id=args.job_id,
-            question_id=question_id,
-            question_text=question_text,
-            selected_unknown=selected,
-            selection_audit=selection_audit,
-        )
+        if args.debug_selection:
+            deduped_dbg, _ = deduplicate_unknown_points_by_type_text(unknown_points)
+            print(format_top_candidates_debug(deduped_dbg, full_text), flush=True)
+        selected, selection_audit = select_one_unknown_value_based(unknown_points, full_text)
+        value = int(selection_audit.get("value", 0))
+        if value < args.min_question_value:
+            pop_value_fields(selected)
+            result_payload = {
+                "job_id": args.job_id,
+                "question_status": "none",
+                "message": (
+                    "推測に頼らず読める水準に達しているため、追加質問は行いません。"
+                    f"（top_value={value}, threshold={args.min_question_value}）"
+                ),
+                "selected_unknown": selected,
+                "selection_audit": selection_audit,
+                "question_text": "",
+            }
+        else:
+            pop_value_fields(selected)
+            question_text = build_user_friendly_question(selected)
+            question_id = str(uuid.uuid4())
+            result_payload = {
+                "job_id": args.job_id,
+                "question_id": question_id,
+                "question_status": "generated",
+                "message": "",
+                "selected_unknown": selected,
+                "selection_audit": selection_audit,
+                "question_text": question_text,
+            }
+            write_line_pending_context(
+                job_id=args.job_id,
+                question_id=question_id,
+                question_text=question_text,
+                selected_unknown=selected,
+                selection_audit=selection_audit,
+            )
 
     with open(question_output, "w", encoding="utf-8") as f:
         json.dump(result_payload, f, ensure_ascii=False, indent=2)
