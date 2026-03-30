@@ -27,7 +27,13 @@ def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except PermissionError:
+            # Windows: readers may hold the file handle; replace can fail.
+            # For progress tracking we prefer "never crash the pipeline" over strict atomicity.
+            with open(path, "w", encoding="utf-8") as wf:
+                json.dump(payload, wf, ensure_ascii=False, indent=2)
     finally:
         try:
             os.remove(tmp_path)
