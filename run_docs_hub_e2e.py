@@ -26,6 +26,12 @@ def _run(args: list[str], cwd: str | None = None) -> None:
         raise SystemExit(r.returncode)
 
 
+def _line_push_env_ready() -> bool:
+    user_id = os.getenv("LINE_USER_ID", "").strip()
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    return bool(user_id and token)
+
+
 def _meta_path(job_id: str, input_root: str) -> str:
     return os.path.join(input_root, job_id, "google_doc_hub.json")
 
@@ -169,7 +175,9 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
         "--min-question-value",
         str(args.min_question_value),
     ]
-    if args.send_line:
+    send_line_enabled = bool(args.send_line or _line_push_env_ready())
+    print(f"[run_docs_hub_e2e] send_line_enabled={send_line_enabled}", flush=True)
+    if send_line_enabled:
         qcycle_cmd.append("--send-line")
     _run(qcycle_cmd)
     cmd_sync_docs(args)
