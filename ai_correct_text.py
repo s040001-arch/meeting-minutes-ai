@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import urllib.error
 import urllib.request
 
@@ -102,6 +103,100 @@ def split_mechanical_for_ai_correction(
     return chunks
 
 
+_PLACEHOLDER_STRICT_RE = re.compile(r"<[A-Z]+_[0-9]{4}>")
+
+# Priority (small -> large):
+# MONEY / DATE / PERSON / COMPANY should win over generic NUM.
+_MASK_PATTERN_SPECS: list[tuple[str, re.Pattern[str], int]] = [
+    (
+        "MONEY",
+        re.compile(
+            r"(?:¥\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:円|万円|億円|千円|百万円|兆円)"
+        ),
+        10,
+    ),
+    (
+        "DATE",
+        re.compile(
+            r"(?:\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)"
+        ),
+        20,
+    ),
+    (
+        "PERSON",
+        re.compile(r"[\u4E00-\u9FFF]{1,4}(?:さん|氏|様|殿)"),
+        30,
+    ),
+    (
+        "COMPANY",
+        re.compile(
+            r"(?:株式会社[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}|[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}(?:社|グループ|ホールディングス))"
+        ),
+        40,
+    ),
+    (
+        "NUM",
+        re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*(?:社|人|名|問|回|件|本|台|社数|日|時間|分))?"),
+        90,
+    ),
+]
+
+
+def _extract_placeholders_strict(text: str) -> list[str]:
+    return [m.group(0) for m in _PLACEHOLDER_STRICT_RE.finditer(text)]
+
+
+def _mask_protected_tokens(text: str) -> tuple[str, dict[str, str], list[str]]:
+    candidates: list[tuple[int, int, int, str]] = []
+    for p_type, pattern, priority in _MASK_PATTERN_SPECS:
+        for m in pattern.finditer(text):
+            s, e = m.span()
+            if s >= e:
+                continue
+            candidates.append((s, e, priority, p_type))
+
+    # start asc, priority asc, length desc
+    candidates.sort(key=lambda x: (x[0], x[2], -(x[1] - x[0])))
+
+    selected: list[tuple[int, int, str]] = []
+    last_end = -1
+    for s, e, _priority, p_type in candidates:
+        if s < last_end:
+            continue
+        selected.append((s, e, p_type))
+        last_end = e
+
+    counters: dict[str, int] = {}
+    mapping: dict[str, str] = {}
+    expected: list[str] = []
+
+    out_parts: list[str] = []
+    pos = 0
+    for s, e, p_type in selected:
+        if s < pos:
+            continue
+        original = text[s:e]
+        if not original.strip():
+            continue
+        out_parts.append(text[pos:s])
+        counters[p_type] = counters.get(p_type, 0) + 1
+        placeholder = f"<{p_type}_{counters[p_type]:04d}>"
+        out_parts.append(placeholder)
+        mapping[placeholder] = original
+        expected.append(placeholder)
+        pos = e
+    out_parts.append(text[pos:])
+    return "".join(out_parts), mapping, expected
+
+
+def _restore_masked_text(masked_text: str, mapping: dict[str, str]) -> str:
+    def repl(m: re.Match[str]) -> str:
+        token = m.group(0)
+        return mapping.get(token, token)
+
+    return _PLACEHOLDER_STRICT_RE.sub(repl, masked_text)
+
+
 def call_openai_for_correction(
     text: str,
     model: str,
@@ -112,35 +207,29 @@ def call_openai_for_correction(
     最小実装:
     OpenAI Responses API を直接呼び出し、自然な日本語へ整形する。
     """
+    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+
     url = "https://api.openai.com/v1/responses"
     payload = {
         "model": model,
+        "temperature": 0.2,
         "max_output_tokens": 12000,
         "input": [
             {
                 "role": "system",
                 "content": (
-                    "あなたは議事録の文字起こし整形アシスタントです。"
-                    "入力テキストの全文を保持したまま、誤変換の修正と文の整形のみを行ってください。"
-                    "要約・省略・言い換えによる情報圧縮は禁止です。"
-                    "文・段落・箇条書き・数値・固有名詞を削除しないでください。"
-                    "不明な箇所を推測で補完しないでください。"
-                    "入力が長文でも省略・要約せず、全内容を保持したまま出力してください。途中で打ち切らないでください。"
-                    "許可される処理は次の範囲のみです: "
-                    "1) 明らかな誤字脱字/誤変換の修正 "
-                    "2) 句読点・改行・文区切りの調整 "
-                    "3) フィラーの最小限の除去。"
-                    "削除してよいのは、意味を変えない軽微なノイズに限定します。"
-                    "重複する挨拶（例：お疲れ様ですの連続）、意味を持たない相槌の連打（例：はい、はい、はい）、"
-                    "明らかなフィラー（例：えーと、あのー、ま）、"
-                    "同一内容の言い直しで、直後に明確に同一内容が繰り返されている場合のみ、前半の重複部分を削除してよいです。"
-                    "出力は入力と同程度の情報量・長さを維持してください。"
-                    "上記以外は原文を保持し、要約・圧縮はしないでください。"
-                    "削除に迷う場合は削除せず、そのまま残してください。"
+                    "あなたは議事録の可読性整形アシスタントです。"
+                    "要約・言い換え・内容の追加/削除は禁止です。"
+                    "許可される編集は、句読点・改行・段落・文境界・明らかな脱字/崩れの修正に限定します。"
+                    "固有名詞・人名・会社名・日付・時刻・数値・金額・社数・スケジュールの推測補正は禁止です。"
+                    "入力には保護トークン <TYPE_0001> 形式が含まれます。"
+                    "この保護トークンは1文字も変更・削除・追加・並べ替えしてはいけません。"
+                    "保護トークンの出現順は入力と完全に一致させてください。"
+                    "迷う場合は推測せず、原文を残してください。"
                     "出力は整形後テキスト本文のみとし、説明文や注釈は付けないでください。"
                 ),
             },
-            {"role": "user", "content": text},
+            {"role": "user", "content": masked_text},
         ],
     }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -198,10 +287,19 @@ def call_openai_for_correction(
             if c.get("type") == "output_text":
                 texts.append(c.get("text", ""))
 
-    corrected = "\n".join(t for t in texts if t).strip()
-    print(f"debug_openai_output_text_len={len(corrected)}")
-    if not corrected:
+    corrected_masked = "\n".join(t for t in texts if t).strip()
+    print(f"debug_openai_output_text_len={len(corrected_masked)}")
+    if not corrected_masked:
         raise RuntimeError("OpenAI response did not contain output_text.")
+
+    actual_placeholders = _extract_placeholders_strict(corrected_masked)
+    if actual_placeholders != expected_placeholders:
+        raise RuntimeError(
+            "placeholder_sequence_mismatch "
+            f"expected={expected_placeholders} actual={actual_placeholders}"
+        )
+
+    corrected = _restore_masked_text(corrected_masked, placeholder_mapping)
     return corrected
 
 
@@ -304,8 +402,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="OpenAIモデル名（デフォルト: gpt-4o-mini）",
+        default="gpt-4.1",
+        help="OpenAIモデル名（デフォルト: gpt-4.1）",
     )
     args = parser.parse_args()
 

@@ -184,7 +184,7 @@ def main() -> None:
     parser.add_argument("--whisper-model", default="small", help="Whisperモデル（デフォルト: small）")
     parser.add_argument("--whisper-language", default="ja", help="Whisper言語（デフォルト: ja）")
     parser.add_argument("--compute-type", default="int8", help="Whisper compute type（デフォルト: int8）")
-    parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAIモデル（デフォルト: gpt-4o-mini）")
+    parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAIモデル（デフォルト: gpt-4.1）")
     parser.add_argument(
         "--min-ai-length-ratio",
         type=float,
@@ -430,7 +430,7 @@ def main() -> None:
         try:
             ai_chunk = call_openai_for_correction(
                 text=chunk,
-                model="gpt-4o",
+                model=args.openai_model,
                 api_key=api_key,
             )
         except TimeoutError as e:
