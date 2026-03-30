@@ -22,6 +22,8 @@ from fastapi import FastAPI, HTTPException, Request
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 
+from progress_tracker import read_job_progress, read_last_job_progress
+
 app = FastAPI()
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
@@ -451,6 +453,26 @@ def _on_app_startup() -> None:
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/job-progress")
+def job_progress(job_id: str | None = None):
+    """
+    進捗の常時参照用。
+    - job_id 無指定: data/last_job_progress.json を返す
+    - job_id 指定: data/transcriptions/{job_id}/progress.json を返す
+    """
+    input_root = os.getenv("PROGRESS_INPUT_ROOT", "data/transcriptions").strip() or "data/transcriptions"
+    if job_id:
+        data = read_job_progress(input_root=input_root, job_id=job_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="job progress not found")
+        return data
+
+    data = read_last_job_progress()
+    if not data:
+        raise HTTPException(status_code=404, detail="last job progress not found")
+    return data
 
 
 @app.post("/line/pending")
