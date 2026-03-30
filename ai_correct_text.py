@@ -104,6 +104,7 @@ def split_mechanical_for_ai_correction(
 
 
 _PLACEHOLDER_STRICT_RE = re.compile(r"<[A-Z]+_[0-9]{4}>")
+_FILLER_RE = re.compile(r"(?:うん|なんか|えーと|えっと|あのー?|ま)(?:、|。|\\s|$)")
 
 # Priority (small -> large):
 # MONEY / DATE / PERSON / COMPANY should win over generic NUM.
@@ -197,16 +198,59 @@ def _restore_masked_text(masked_text: str, mapping: dict[str, str]) -> str:
     return _PLACEHOLDER_STRICT_RE.sub(repl, masked_text)
 
 
-def call_openai_for_correction(
+def _count_paragraphs(text: str) -> int:
+    blocks = [b for b in re.split(r"\n\s*\n+", text) if b.strip()]
+    return len(blocks)
+
+
+def compute_readability_stats(text: str) -> dict[str, int]:
+    return {
+        "period_count": text.count("。"),
+        "comma_count": text.count("、"),
+        "newline_count": text.count("\n"),
+        "paragraph_count": _count_paragraphs(text),
+        "filler_count": len(_FILLER_RE.findall(text)),
+    }
+
+
+def _build_system_prompt(*, aggressive_structure: bool) -> str:
+    base = (
+        "あなたは議事録の可読性整形アシスタントです。"
+        "要約・言い換え・内容の追加/削除は禁止です。"
+        "固有名詞・人名・会社名・日付・時刻・数値・金額・社数・スケジュールの推測補正は禁止です。"
+        "不明語は意味推測で置換せず、そのまま残してください。"
+        "入力には保護トークン <TYPE_0001> 形式が含まれます。"
+        "この保護トークンは1文字も変更・削除・追加・並べ替えしてはいけません。"
+        "保護トークンの出現順は入力と完全に一致させてください。"
+        "出力は整形後テキスト本文のみとし、説明文や注釈は付けないでください。"
+    )
+    if not aggressive_structure:
+        return (
+            base
+            + "意味を変えない範囲で、句読点・改行・段落・文境界・明らかな脱字/崩れの修正を行ってください。"
+            + "軽微なフィラー削除と言いよどみ整理は許可します。"
+        )
+    return (
+        base
+        + "意味を変えない範囲で文構造の再構成を積極的に行ってください。"
+        + "長すぎる文は分割し、話題ごとに段落分けしてください。"
+        + "フィラー（例: うん、なんか、えーと）を削除し、言いよどみや重複表現を整理してください。"
+        + "語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
+    )
+
+
+def call_openai_for_correction_detailed(
     text: str,
     model: str,
     api_key: str,
     timeout_sec: int = 300,
-) -> str:
+    *,
+    aggressive_structure: bool = False,
+) -> tuple[str, dict[str, object]]:
     """
-    最小実装:
-    OpenAI Responses API を直接呼び出し、自然な日本語へ整形する。
+    OpenAI Responses API で議事録可読性整形を実行し、評価用メタを返す。
     """
+    stats_before = compute_readability_stats(text)
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
 
     url = "https://api.openai.com/v1/responses"
@@ -217,17 +261,7 @@ def call_openai_for_correction(
         "input": [
             {
                 "role": "system",
-                "content": (
-                    "あなたは議事録の可読性整形アシスタントです。"
-                    "要約・言い換え・内容の追加/削除は禁止です。"
-                    "許可される編集は、句読点・改行・段落・文境界・明らかな脱字/崩れの修正に限定します。"
-                    "固有名詞・人名・会社名・日付・時刻・数値・金額・社数・スケジュールの推測補正は禁止です。"
-                    "入力には保護トークン <TYPE_0001> 形式が含まれます。"
-                    "この保護トークンは1文字も変更・削除・追加・並べ替えしてはいけません。"
-                    "保護トークンの出現順は入力と完全に一致させてください。"
-                    "迷う場合は推測せず、原文を残してください。"
-                    "出力は整形後テキスト本文のみとし、説明文や注釈は付けないでください。"
-                ),
+                "content": _build_system_prompt(aggressive_structure=aggressive_structure),
             },
             {"role": "user", "content": masked_text},
         ],
@@ -253,8 +287,6 @@ def call_openai_for_correction(
         raise RuntimeError(f"OpenAI API connection error: {e}") from e
 
     result = json.loads(body)
-
-    # 診断ログ（挙動確認用）: 既存ロジックは変えずに観測情報のみ追加
     response_status = result.get("status")
     incomplete_details = result.get("incomplete_details")
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
@@ -262,7 +294,6 @@ def call_openai_for_correction(
     output_tokens = usage.get("output_tokens")
     output_items = result.get("output", [])
     output_count = len(output_items) if isinstance(output_items, list) else 0
-
     print(f"debug_openai_response_status={response_status}")
     print(
         "debug_openai_response_incomplete_details="
@@ -280,7 +311,6 @@ def call_openai_for_correction(
     )
     print(f"debug_openai_response_output_count={output_count}")
 
-    # Responses API の最小抽出ロジック
     texts: list[str] = []
     for item in output_items:
         for c in item.get("content", []):
@@ -293,13 +323,41 @@ def call_openai_for_correction(
         raise RuntimeError("OpenAI response did not contain output_text.")
 
     actual_placeholders = _extract_placeholders_strict(corrected_masked)
-    if actual_placeholders != expected_placeholders:
+    placeholder_ok = (actual_placeholders == expected_placeholders)
+    if not placeholder_ok:
         raise RuntimeError(
             "placeholder_sequence_mismatch "
             f"expected={expected_placeholders} actual={actual_placeholders}"
         )
 
     corrected = _restore_masked_text(corrected_masked, placeholder_mapping)
+    stats_after = compute_readability_stats(corrected)
+    meta: dict[str, object] = {
+        "stats_before": stats_before,
+        "stats_after": stats_after,
+        "placeholder_ok": True,
+        "aggressive_structure": aggressive_structure,
+    }
+    return corrected, meta
+
+
+def call_openai_for_correction(
+    text: str,
+    model: str,
+    api_key: str,
+    timeout_sec: int = 300,
+) -> str:
+    """
+    最小実装:
+    OpenAI Responses API を直接呼び出し、自然な日本語へ整形する。
+    """
+    corrected, _meta = call_openai_for_correction_detailed(
+        text=text,
+        model=model,
+        api_key=api_key,
+        timeout_sec=timeout_sec,
+        aggressive_structure=False,
+    )
     return corrected
 
 
