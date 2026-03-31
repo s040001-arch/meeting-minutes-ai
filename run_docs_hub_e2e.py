@@ -1,5 +1,9 @@
 """
-Docs ハブ一括: 発言録候補・確認ワークスペースを Google Docs に出し、同一 job_id で更新する薄いオーケストレータ。
+Docs ハブ一括: 発言録本文（＋任意テンプレ）を Google Docs に出し、同一 job_id で更新する薄いオーケストレータ。
+
+デフォルトの Markdown には確認質問・ユーザー回答を載せない（回答は recorrect で本文に反映済みである前提）。
+社内デバッグ用に確認ワークスペースを戻す場合は --include-internal-workspace または
+環境変数 DOCS_HUB_INCLUDE_INTERNAL_WORKSPACE=1。
 
 前提:
   - run_job_once.py まで完了している（または --after-answer 用に transcript / question がある）
@@ -93,19 +97,19 @@ def _export_cmd(
 
 
 def cmd_sync_docs(args: argparse.Namespace) -> None:
-    _run(
-        [
-            _py(),
-            os.path.join(REPO_ROOT, "compose_docs_hub_markdown.py"),
-            "--job-id",
-            args.job_id,
-            "--input-root",
-            args.input_root,
-            "--answers-json",
-            args.answers_json,
-        ]
-        + (["--title", args.title] if args.title else [])
-    )
+    compose_cmd = [
+        _py(),
+        os.path.join(REPO_ROOT, "compose_docs_hub_markdown.py"),
+        "--job-id",
+        args.job_id,
+        "--input-root",
+        args.input_root,
+        "--answers-json",
+        args.answers_json,
+    ]
+    if getattr(args, "include_internal_workspace", False):
+        compose_cmd.append("--include-internal-workspace")
+    _run(compose_cmd + (["--title", args.title] if args.title else []))
     _run(
         _export_cmd(
             args.job_id,
@@ -220,7 +224,14 @@ def main() -> None:
         default=8,
         help="次質問を出す最小value（デフォルト: 8）",
     )
+    parser.add_argument(
+        "--include-internal-workspace",
+        action="store_true",
+        help="Docs 用 MD に確認ワークスペース・回答メタを含める（デフォルトは成果物のみ）",
+    )
     args = parser.parse_args()
+    if os.getenv("DOCS_HUB_INCLUDE_INTERNAL_WORKSPACE", "").strip().lower() in ("1", "true", "yes"):
+        args.include_internal_workspace = True
 
     if args.after_answer:
         cmd_after_answer(args)

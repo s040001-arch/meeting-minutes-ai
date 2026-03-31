@@ -1,6 +1,10 @@
 """
-Docs ハブ用: 確認ワークスペース（対象・質問・理由・仮説・次アクション）＋発言録候補を
-1 本の minutes_structured.md にまとめる（Task 6-2 の代替出力）。
+Docs ハブ用: minutes_structured.md を生成する。
+
+デフォルトは「提出・共有向け」: タイトル・発言録本文・その他テンプレのみ。
+確認質問・ユーザー回答・内部メタは含めない（回答は recorrect で本文に織り込む前提）。
+
+--include-internal-workspace 指定時のみ、従来どおり確認ワークスペース＋回答記録を付与する。
 """
 import argparse
 import json
@@ -59,23 +63,12 @@ def _reason_from_selected(selected: dict[str, Any] | None) -> str:
     return f"タイプ: {t}" if t else ""
 
 
-def build_hub_minutes_md(
+def _build_internal_workspace_md(
     job_id: str,
     input_root: str,
-    title_override: str | None,
     answers_json: str,
 ) -> str:
     job_dir = os.path.join(input_root, job_id)
-    draft_path = os.path.join(job_dir, "minutes_draft.md")
-    if not os.path.isfile(draft_path):
-        raise FileNotFoundError(f"minutes_draft.md not found: {draft_path} (run generate_minutes_transcript first)")
-
-    with open(draft_path, "r", encoding="utf-8") as f:
-        draft = f.read()
-    title, transcript_md = extract_title_and_transcript(draft)
-    if title_override:
-        title = title_override
-
     full_text = _resolve_transcript_for_context(job_id, input_root)
     qres = _load_question_result(job_dir)
     question_status = str((qres or {}).get("question_status") or "")
@@ -124,7 +117,7 @@ def build_hub_minutes_md(
                 )
 
     if question_status == "none" or not question_text:
-        workspace = (
+        return (
             "## 確認ワークスペース（現時点最新）\n\n"
             "### 現在の確認対象\n\n"
             "- 不明箇所リストからの追加質問はありません（または未生成）。\n\n"
@@ -138,35 +131,54 @@ def build_hub_minutes_md(
             "### 次のアクション\n\n"
             f"- 回答を `data/line_answers.json` に追記後、`python run_docs_hub_e2e.py --job-id {job_id} --after-answer` で再補正・Docs 更新。\n\n"
         )
-    else:
-        workspace = (
-            "## 確認ワークスペース（現時点最新）\n\n"
-            "### 現在の確認対象\n\n"
-            f"{target_quote or '（テキスト未設定）'}"
-            f"{transcript_updated_note}\n\n"
-            "### 前後の文脈（参照用）\n\n"
-            f"- 前: {prev_ctx or '（なし）'}\n"
-            f"- 後: {next_ctx or '（なし）'}\n\n"
-            "### 今回の質問（1問）\n\n"
-            f"{question_text}\n\n"
-            "### 質問理由\n\n"
-            f"{reason or '（理由フィールドなし）'} {audit_note}\n\n"
-            "### 仮説（断定しない）\n\n"
-            "- 自動では推測補完しません。前後文脈のみ上記に示します。\n"
-            f"{answer_block}\n"
-            "### 次のアクション\n\n"
-            + (
-                "- 回答の反映と Docs 更新まで完了している場合は、ここでの追加作業は不要です。\n\n"
-                if answer_rec
-                and target_quote
-                and full_text.strip()
-                and target_quote not in full_text
-                else (
-                    "- 回答を `data/line_answers.json` に追記（`job_id` を付与）後、\n"
-                    f"  `python run_docs_hub_e2e.py --job-id {job_id} --after-answer` を実行すると再補正と Docs 更新が行われます。\n\n"
-                )
+    return (
+        "## 確認ワークスペース（現時点最新）\n\n"
+        "### 現在の確認対象\n\n"
+        f"{target_quote or '（テキスト未設定）'}"
+        f"{transcript_updated_note}\n\n"
+        "### 前後の文脈（参照用）\n\n"
+        f"- 前: {prev_ctx or '（なし）'}\n"
+        f"- 後: {next_ctx or '（なし）'}\n\n"
+        "### 今回の質問（1問）\n\n"
+        f"{question_text}\n\n"
+        "### 質問理由\n\n"
+        f"{reason or '（理由フィールドなし）'} {audit_note}\n\n"
+        "### 仮説（断定しない）\n\n"
+        "- 自動では推測補完しません。前後文脈のみ上記に示します。\n"
+        f"{answer_block}\n"
+        "### 次のアクション\n\n"
+        + (
+            "- 回答の反映と Docs 更新まで完了している場合は、ここでの追加作業は不要です。\n\n"
+            if answer_rec
+            and target_quote
+            and full_text.strip()
+            and target_quote not in full_text
+            else (
+                "- 回答を `data/line_answers.json` に追記（`job_id` を付与）後、\n"
+                f"  `python run_docs_hub_e2e.py --job-id {job_id} --after-answer` を実行すると再補正と Docs 更新が行われます。\n\n"
             )
         )
+    )
+
+
+def build_hub_minutes_md(
+    job_id: str,
+    input_root: str,
+    title_override: str | None,
+    answers_json: str,
+    *,
+    include_internal_workspace: bool = False,
+) -> str:
+    job_dir = os.path.join(input_root, job_id)
+    draft_path = os.path.join(job_dir, "minutes_draft.md")
+    if not os.path.isfile(draft_path):
+        raise FileNotFoundError(f"minutes_draft.md not found: {draft_path} (run generate_minutes_transcript first)")
+
+    with open(draft_path, "r", encoding="utf-8") as f:
+        draft = f.read()
+    title, transcript_md = extract_title_and_transcript(draft)
+    if title_override:
+        title = title_override
 
     other = (
         "## その他項目\n\n"
@@ -185,10 +197,19 @@ def build_hub_minutes_md(
         "- 意味の補完や推測による書き換え、要約生成は禁止\n"
     )
 
+    if include_internal_workspace:
+        workspace = _build_internal_workspace_md(job_id, input_root, answers_json)
+        return (
+            f"# {title}\n\n"
+            f"{workspace}"
+            "## 発言録（候補）\n\n"
+            f"{transcript_md.strip()}\n\n"
+            f"{other}"
+        )
+
     return (
         f"# {title}\n\n"
-        f"{workspace}"
-        "## 発言録（候補）\n\n"
+        "## 発言録\n\n"
         f"{transcript_md.strip()}\n\n"
         f"{other}"
     )
@@ -202,6 +223,12 @@ def main() -> None:
     parser.add_argument(
         "--answers-json",
         default=os.path.join("data", "line_answers.json"),
+        help="--include-internal-workspace 時のみ使用（回答・質問メタの表示用）",
+    )
+    parser.add_argument(
+        "--include-internal-workspace",
+        action="store_true",
+        help="確認ワークスペース・line_answers 由来のブロックを含める（デバッグ・社内用）",
     )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
@@ -214,6 +241,7 @@ def main() -> None:
         input_root=args.input_root,
         title_override=args.title,
         answers_json=args.answers_json,
+        include_internal_workspace=bool(args.include_internal_workspace),
     )
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
