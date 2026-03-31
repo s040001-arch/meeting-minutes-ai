@@ -130,6 +130,103 @@ def relocate_input_into_stem_subfolder(input_path: str) -> str:
     return str(dest_file)
 
 
+def run_transcription_stage_docs_export(
+    *,
+    log_path: str,
+    py: str,
+    repo: str,
+    job_id: str,
+    job_dir: str,
+    input_root: str,
+    input_audio_path: str,
+    merged_path: str,
+    docs_chunk_size: int,
+    docs_push: bool,
+    docs_parent_folder_id: str | None,
+    docs_subfolder_name: str | None,
+    skip_export_docs: bool,
+) -> None:
+    """
+    merged_transcript.txt 直後（機械補正の前）に、生テキストのみの Google Doc を作成または更新する。
+    ユーザーが進捗を確認できるよう、ファイル名は「【文字起こし】<stem>」とする。
+    """
+    if skip_export_docs or not docs_push or not (docs_parent_folder_id or "").strip():
+        log_line(
+            log_path,
+            "step_4_0_transcription_docs: skipped "
+            "(skip_export_docs or not docs_push or missing docs_parent_folder_id)",
+        )
+        return
+
+    stem = Path(input_audio_path).stem
+    title = f"【文字起こし】{stem}"
+    hub_meta_path = os.path.join(input_root, job_id, "google_doc_hub.json")
+    stage_md = os.path.join(job_dir, "transcript_stage_docs.md")
+
+    with open(merged_path, "r", encoding="utf-8") as f:
+        merged_text = f.read()
+    with open(stage_md, "w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\n## 発言録\n\n{merged_text}")
+        if merged_text and not merged_text.endswith("\n"):
+            f.write("\n")
+
+    subfolder_name = docs_subfolder_name or stem
+    docs_cmd = [
+        py,
+        os.path.join(repo, "export_minutes_to_google_docs.py"),
+        "--job-id",
+        job_id,
+        "--input-root",
+        input_root,
+        "--input",
+        stage_md,
+        "--chunk-size",
+        str(docs_chunk_size),
+        "--title",
+        title,
+        "--push",
+        "--drive-parent-folder-id",
+        docs_parent_folder_id.strip(),
+        "--drive-subfolder-name",
+        subfolder_name,
+        "--write-doc-meta-json",
+        hub_meta_path,
+    ]
+    hub_doc_id = load_google_doc_hub_doc_id(hub_meta_path)
+    if hub_doc_id:
+        docs_cmd.extend(["--update-doc-id", hub_doc_id])
+        log_line(
+            log_path,
+            "step_4_0_transcription_docs: existing google_doc_hub.json を更新（本文＝文字起こし直後）",
+        )
+
+    update_job_progress(
+        input_root=input_root,
+        job_id=job_id,
+        phase="step_4_0_transcription_docs",
+        status="running",
+        detail={"title": title},
+    )
+    try:
+        run_cmd(log_path, docs_cmd, "step_4_0_transcription_docs")
+        update_job_progress(
+            input_root=input_root,
+            job_id=job_id,
+            phase="step_4_0_transcription_docs",
+            status="success",
+            detail={"title": title},
+        )
+    except Exception:
+        update_job_progress(
+            input_root=input_root,
+            job_id=job_id,
+            phase="step_4_0_transcription_docs",
+            status="error",
+            detail={"title": title},
+        )
+        raise
+
+
 def load_google_doc_hub_doc_id(hub_meta_path: str) -> str | None:
     """run_docs_hub_e2e と同形式の google_doc_hub.json から doc_id を読む（無ければ None）。"""
     if not os.path.isfile(hub_meta_path):
@@ -379,6 +476,22 @@ def main() -> None:
         )
     else:
         raise ValueError(f"unsupported input extension: {input_ext}")
+
+    run_transcription_stage_docs_export(
+        log_path=log_path,
+        py=py,
+        repo=repo,
+        job_id=args.job_id,
+        job_dir=job_dir,
+        input_root=args.input_root,
+        input_audio_path=args.input_audio,
+        merged_path=merged_path,
+        docs_chunk_size=args.docs_chunk_size,
+        docs_push=args.docs_push,
+        docs_parent_folder_id=args.docs_parent_folder_id,
+        docs_subfolder_name=args.docs_subfolder_name,
+        skip_export_docs=args.skip_export_docs,
+    )
 
     update_job_progress(
         input_root=args.input_root,

@@ -500,6 +500,15 @@ def main() -> None:
     char_delta = actual_chars - expected_chars
 
     doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+    # 同一ドキュメントを更新するとき、Drive 上のファイル名も --title に合わせる（ステータス接頭辞の付け替え用）
+    if args.push and args.title and args.update_doc_id:
+        drive_service.files().update(
+            fileId=doc_id,
+            body={"name": args.title.strip()},
+            fields="id,name",
+        ).execute()
+
     if args.write_doc_meta_json:
         meta_path = args.write_doc_meta_json
         os.makedirs(os.path.dirname(meta_path) or ".", exist_ok=True)
