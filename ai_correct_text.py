@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from filename_hints import format_hints_for_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -273,7 +275,11 @@ def compute_structure_quality(text: str) -> dict[str, float]:
     }
 
 
-def _build_system_prompt(*, aggressive_structure: bool) -> str:
+def _build_system_prompt(
+    *,
+    aggressive_structure: bool,
+    filename_hints: list[str] | None = None,
+) -> str:
     base = (
         "あなたは議事録の可読性整形アシスタントです。"
         "要約・言い換え・内容の追加/削除は禁止です。"
@@ -290,6 +296,7 @@ def _build_system_prompt(*, aggressive_structure: bool) -> str:
             + "意味を変えない範囲で、句読点・改行・段落・文境界・明らかな脱字/崩れの修正を行ってください。"
             + "軽微なフィラー削除と言いよどみ整理は許可します。"
             + "段落は文数よりも話題のまとまりを優先して調整してください。"
+            + format_hints_for_prompt(filename_hints or [])
         )
     return (
         base
@@ -299,10 +306,11 @@ def _build_system_prompt(*, aggressive_structure: bool) -> str:
         + "過分割（短文だけの段落乱立）は避け、理解しやすいまとまりにしてください。"
         + "フィラー（例: うん、なんか、えーと）を削除し、言いよどみや重複表現を整理してください。"
         + "語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
+        + format_hints_for_prompt(filename_hints or [])
     )
 
 
-def _build_detection_system_prompt() -> str:
+def _build_detection_system_prompt(filename_hints: list[str] | None = None) -> str:
     return (
         "あなたは議事録補正の分析アシスタントです。"
         "入力はマスク済みの日本語テキストです。"
@@ -317,6 +325,7 @@ def _build_detection_system_prompt() -> str:
         "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
         "location は該当箇所の前後10文字程度の短い抜粋、original は元の問題箇所そのもの、"
         "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
+        + format_hints_for_prompt(filename_hints or [])
     )
 
 
@@ -432,9 +441,13 @@ def _correct_full_text_legacy(
     model: str,
     timeout_sec: int,
     max_tokens: int,
+    filename_hints: list[str] | None = None,
 ) -> str:
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
-    system_prompt = _build_system_prompt(aggressive_structure=False)
+    system_prompt = _build_system_prompt(
+        aggressive_structure=False,
+        filename_hints=filename_hints,
+    )
     full_response, stop_reason = _stream_anthropic_text(
         api_key=api_key,
         model=model,
@@ -588,6 +601,7 @@ def correct_full_text(
     model: str = "claude-sonnet-4-20250514",
     timeout_sec: int = 900,
     on_phase: Optional[Callable[[str], None]] = None,
+    filename_hints: list[str] | None = None,
 ) -> str:
     """
     全文を一括でAI補正する。チャンク分割なし。
@@ -626,7 +640,7 @@ def correct_full_text(
         detection_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
             model=model,
-            system_prompt=_build_detection_system_prompt(),
+            system_prompt=_build_detection_system_prompt(filename_hints),
             user_message=masked_text,
             max_tokens=max_tokens,
             timeout_sec=timeout_sec,
@@ -645,6 +659,7 @@ def correct_full_text(
                 model=model,
                 timeout_sec=timeout_sec,
                 max_tokens=max_tokens,
+                filename_hints=filename_hints,
             )
 
         detections = _parse_detection_response(detection_response)
@@ -702,6 +717,7 @@ def correct_full_text(
                 model=model,
                 timeout_sec=timeout_sec,
                 max_tokens=max_tokens,
+                filename_hints=filename_hints,
             )
         except Exception as legacy_e:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -724,6 +740,7 @@ def correct_full_text(
                     model=model,
                     timeout_sec=timeout_sec,
                     max_tokens=max_tokens,
+                    filename_hints=filename_hints,
                 )
             except Exception as legacy_e:
                 _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True

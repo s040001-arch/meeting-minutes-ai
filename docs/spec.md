@@ -14,6 +14,7 @@
 | LINE Webhook | `webhook_app.py` | `data/line_answers.json`、`data/line_pending_context.json`（任意） |
 | 回答後 Docs 一括 | `run_docs_hub_e2e.py` → `compose_docs_hub_markdown.py` + `export_minutes_to_google_docs.py` | `credentials.json` / `token.json`、各 job の `google_doc_hub.json` |
 | AI 補正（単体） | `ai_correct_text.py` | `call_openai_for_correction_detailed` / `call_openai_for_correction`、`split_mechanical_for_ai_correction`（分割） |
+| ファイル名ヒント抽出 | `filename_hints.py` | 入力ファイル名から固有名詞・キーワード候補を抽出し、Step 4.3 の AI 補正プロンプトへ追加する補助テキストを生成 |
 
 **重要:** ローカル `data/incoming_audio` を **ファイルシステム監視しているわけではない**。自動投入は **Google Drive 上の指定フォルダ** を API で一覧し、新規ファイルをダウンロードしてから `run_job_once` を起動する。
 
@@ -147,8 +148,8 @@
 ```
 
 ##### ③の判定ロジック
-- guess_level < 10 → 自動修正を適用（ほぼ確実に正しい修正）
-- guess_level >= 10 → フェーズBへ（将来実装まではそのまま残す）
+- guess_level < 40 → 自動修正を適用（音声認識の典型的な誤変換もここで拾う）
+- guess_level >= 40 → フェーズBへ（将来実装まではそのまま残す）
 
 ##### フェーズB：人間確認ループ（将来実装）
 
@@ -175,6 +176,13 @@
 - 固有名詞のマスク/アンマスク処理は従来通り維持
 - ①②の入力時にマスク済みテキストを渡す
 - ③の出力後にアンマスクする
+
+#### Step 4.3 の処理フロー（補足）
+1. `run_job_once.py` が入力ファイル名から `filename_hints.py` で固有名詞ヒントを抽出する
+2. 抽出したヒントを Claude の検出プロンプト / レガシー補正プロンプト末尾へ **ファイル名ヒント注入**する
+3. Claude が誤変換候補を検出し、`guess_level` を返す
+4. `guess_level < 40` の候補のみローカル置換で自動適用する
+5. プレースホルダー検証後に `merged_transcript_ai.txt` を保存する
 
 ### ハイブリッド検出レイヤー（step_4_35 + step_4_4）
 
@@ -210,6 +218,7 @@
 ### LINE 質問サイクル（step_5_1〜5_4）
 
 - **1ジョブにつき最大 1 問**。`run_question_cycle_once.py` は `question_result.json` / `question_message.txt` を 1 件ぶんだけ生成する。
+- **ファイル名ヒント注入:** 入力ファイル名から抽出した固有名詞ヒントは、Step 4.3 の AI 補正で優先的に利用する。これにより Step 5 に渡る `merged_transcript_ai.txt` / `merged_transcript_after_qa.txt` 側でも、質問対象の固有名詞が安定しやすくなる。
 - **Step 5.1:** `question_result.json` を出力。`question_status` は `generated` または `none`。
 - **Step 5.2:** `data/line_pending_context.json` に直近の `job_id` / `question_id` / `question_text` / `selected_unknown` / `selection_audit` を保存し、Webhook 側で回答を job に紐づける。
 - **Step 5.3:** `question_message.txt` を作成し、`--send-line` 指定かつ LINE 環境変数が揃う場合のみ push する。

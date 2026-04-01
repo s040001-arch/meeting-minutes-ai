@@ -12,6 +12,7 @@ from ai_correct_text import (
     get_last_correct_full_text_meta,
     resolve_openai_api_key,
 )
+from filename_hints import extract_filename_hints, format_hints_for_prompt
 from progress_tracker import (
     ensure_artifact_flags,
     finalize_job_progress,
@@ -599,7 +600,13 @@ def main() -> None:
     repo = os.getcwd()
     input_ext = Path(args.input_audio).suffix.lower()
     stem = Path(args.input_audio).stem
+    filename = Path(args.input_audio).name
+    hints = extract_filename_hints(filename)
+    hints_prompt_text = format_hints_for_prompt(hints)
     hub_meta_path = os.path.join(args.input_root, args.job_id, "google_doc_hub.json")
+    if hints:
+        log_line(log_path, f"📎 ファイル名ヒント抽出: {hints}")
+        log_line(log_path, f"filename_hints_prompt_enabled={bool(hints_prompt_text)}")
     try:
         if input_ext in TEXT_EXTENSIONS:
             log_line(log_path, "input_type=txt")
@@ -768,7 +775,11 @@ def main() -> None:
             update_doc_title_from_hub(hub_meta_path, title, log_path)
             append_log_to_drive(args.job_id, f"Step 4.3: {label}開始")
 
-        ai_text = correct_full_text(text=mechanical_text, on_phase=_on_ai_phase)
+        ai_text = correct_full_text(
+            text=mechanical_text,
+            on_phase=_on_ai_phase,
+            filename_hints=hints,
+        )
 
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)
