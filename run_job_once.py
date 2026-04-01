@@ -8,9 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ai_correct_text import (
-    call_openai_for_correction_detailed,
+    correct_full_text,
     resolve_openai_api_key,
-    split_mechanical_for_ai_correction,
 )
 from progress_tracker import (
     ensure_artifact_flags,
@@ -283,11 +282,6 @@ def main() -> None:
     parser.add_argument("--compute-type", default="int8", help="Whisper compute type（デフォルト: int8）")
     parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAIモデル（デフォルト: gpt-4.1）")
     parser.add_argument(
-        "--openai-retry-model",
-        default="",
-        help="改善ゼロchunk再試行時のOpenAIモデル（未指定時は --openai-model と同じ）",
-    )
-    parser.add_argument(
         "--min-ai-length-ratio",
         type=float,
         default=0.6,
@@ -522,219 +516,40 @@ def main() -> None:
         detail={},
     )
 
-    api_key, key_source = resolve_openai_api_key()
-    log_line(log_path, f"openai_api_key_found={bool(api_key)} source={key_source}")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
+    # --- Step 4.3: AI correction (full-text, Claude) ---
+    log_line(log_path, "step_4_3_ai_correct: starting full_text mode (Claude)")
     with open(mechanical_path, "r", encoding="utf-8") as f:
         mechanical_text = f.read()
 
-    chunks = split_mechanical_for_ai_correction(mechanical_text)
     log_line(
         log_path,
-        f"step_4_3_ai_correct: chunk_count={len(chunks)} target_chars=5000 lookback=1500 hard_max=12000",
+        f"step_4_3_ai_correct: input_chars={len(mechanical_text)} model=claude-sonnet-4-20250514",
     )
     update_job_progress(
         input_root=args.input_root,
         job_id=args.job_id,
         phase="step_4_3_ai_correct",
         status="running",
-        detail={"chunk_count": len(chunks)},
+        detail={"chars": len(mechanical_text), "mode": "full_text_claude"},
     )
-    parts: list[str] = []
-    retry_model = (args.openai_retry_model or args.openai_model).strip() or args.openai_model
-    for idx, chunk in enumerate(chunks):
-        mech_chunk_len = len(chunk)
-        ai_chunk = ""
-        ai_meta: dict[str, object] = {}
-        placeholder_status = "unknown"
-        retry_used = False
-        try:
-            ai_chunk, ai_meta = call_openai_for_correction_detailed(
-                text=chunk,
-                model=args.openai_model,
-                api_key=api_key,
-                aggressive_structure=False,
-            )
-            placeholder_status = "OK"
-        except TimeoutError as e:
-            log_line(
-                log_path,
-                f"step_4_3_ai_correct: chunk={idx} mech_len={mech_chunk_len} timeout_fallback_to_mech error={e}",
-            )
-            ai_chunk = chunk
-            placeholder_status = "N/A"
-        except Exception as e:
-            if "placeholder_sequence_mismatch" in str(e):
-                placeholder_status = "NG"
-            else:
-                placeholder_status = "N/A"
-            log_line(
-                log_path,
-                (
-                    "step_4_3_ai_correct: chunk="
-                    f"{idx} mech_len={mech_chunk_len} error_fallback_to_mech "
-                    f"placeholder_status={placeholder_status} error={e!r}"
-                ),
-            )
-            ai_chunk = chunk
 
-        stats_before = ai_meta.get("stats_before") if isinstance(ai_meta.get("stats_before"), dict) else {}
-        stats_after = ai_meta.get("stats_after") if isinstance(ai_meta.get("stats_after"), dict) else {}
-        structure_before = ai_meta.get("structure_before") if isinstance(ai_meta.get("structure_before"), dict) else {}
-        structure_after = ai_meta.get("structure_after") if isinstance(ai_meta.get("structure_after"), dict) else {}
-        period_before = int(stats_before.get("period_count", chunk.count("。")))
-        period_after = int(stats_after.get("period_count", ai_chunk.count("。")))
-        comma_before = int(stats_before.get("comma_count", chunk.count("、")))
-        comma_after = int(stats_after.get("comma_count", ai_chunk.count("、")))
-        newline_before = int(stats_before.get("newline_count", chunk.count("\n")))
-        newline_after = int(stats_after.get("newline_count", ai_chunk.count("\n")))
-        paragraph_before = int(stats_before.get("paragraph_count", 1 if chunk.strip() else 0))
-        paragraph_after = int(stats_after.get("paragraph_count", 1 if ai_chunk.strip() else 0))
-        filler_before = int(stats_before.get("filler_count", 0))
-        filler_after = int(stats_after.get("filler_count", 0))
-        quality_before = float(structure_before.get("quality_score", 0.0))
-        quality_after = float(structure_after.get("quality_score", 0.0))
-        avg_sentence_len_before = float(structure_before.get("avg_sentence_len", 0.0))
-        avg_sentence_len_after = float(structure_after.get("avg_sentence_len", 0.0))
-        short_sentence_rate_before = float(structure_before.get("short_sentence_rate", 0.0))
-        short_sentence_rate_after = float(structure_after.get("short_sentence_rate", 0.0))
-        long_sentence_rate_before = float(structure_before.get("long_sentence_rate", 0.0))
-        long_sentence_rate_after = float(structure_after.get("long_sentence_rate", 0.0))
-        topic_break_hint_before = int(float(structure_before.get("topic_break_hint_count", 0.0)))
-        topic_break_hint_after = int(float(structure_after.get("topic_break_hint_count", 0.0)))
-        ai_eq_mech = (ai_chunk == chunk)
+    ai_text = correct_full_text(text=mechanical_text)
 
-        # Legacy readability heuristics (kept for continuity)
-        basic_improvement_zero = (
-            (period_after <= period_before)
-            and (newline_after <= newline_before)
-            and (paragraph_after <= paragraph_before)
-            and (filler_after >= filler_before)
-        )
-        # Structure quality heuristics (new primary)
-        structure_not_improved = (
-            (quality_after <= quality_before)
-            and (long_sentence_rate_after >= long_sentence_rate_before)
-            and (short_sentence_rate_after >= short_sentence_rate_before)
-            and (topic_break_hint_after <= topic_break_hint_before)
-        )
-        improvement_zero = basic_improvement_zero and structure_not_improved
-        if (placeholder_status == "OK") and improvement_zero:
-            try:
-                retry_chunk, retry_meta = call_openai_for_correction_detailed(
-                    text=chunk,
-                    model=retry_model,
-                    api_key=api_key,
-                    aggressive_structure=True,
-                )
-                retry_used = True
-                ai_chunk = retry_chunk
-                ai_meta = retry_meta
-                stats_after = ai_meta.get("stats_after") if isinstance(ai_meta.get("stats_after"), dict) else {}
-                period_after = int(stats_after.get("period_count", ai_chunk.count("。")))
-                comma_after = int(stats_after.get("comma_count", ai_chunk.count("、")))
-                newline_after = int(stats_after.get("newline_count", ai_chunk.count("\n")))
-                paragraph_after = int(stats_after.get("paragraph_count", 1 if ai_chunk.strip() else 0))
-                filler_after = int(stats_after.get("filler_count", 0))
-                structure_after = ai_meta.get("structure_after") if isinstance(ai_meta.get("structure_after"), dict) else {}
-                quality_after = float(structure_after.get("quality_score", 0.0))
-                avg_sentence_len_after = float(structure_after.get("avg_sentence_len", 0.0))
-                short_sentence_rate_after = float(structure_after.get("short_sentence_rate", 0.0))
-                long_sentence_rate_after = float(structure_after.get("long_sentence_rate", 0.0))
-                topic_break_hint_after = int(float(structure_after.get("topic_break_hint_count", 0.0)))
-                ai_eq_mech = (ai_chunk == chunk)
-                basic_improvement_zero = (
-                    (period_after <= period_before)
-                    and (newline_after <= newline_before)
-                    and (paragraph_after <= paragraph_before)
-                    and (filler_after >= filler_before)
-                )
-                structure_not_improved = (
-                    (quality_after <= quality_before)
-                    and (long_sentence_rate_after >= long_sentence_rate_before)
-                    and (short_sentence_rate_after >= short_sentence_rate_before)
-                    and (topic_break_hint_after <= topic_break_hint_before)
-                )
-                improvement_zero = basic_improvement_zero and structure_not_improved
-            except Exception as e:
-                log_line(
-                    log_path,
-                    f"step_4_3_ai_correct: chunk={idx} retry_failed keep_first_pass error={e!r}",
-                )
-
-        log_line(
-            log_path,
-            (
-                "step_4_3_ai_correct: chunk_metrics "
-                f"chunk={idx} "
-                f"period_before={period_before} period_after={period_after} "
-                f"comma_before={comma_before} comma_after={comma_after} "
-                f"newline_before={newline_before} newline_after={newline_after} "
-                f"paragraph_before={paragraph_before} paragraph_after={paragraph_after} "
-                f"filler_before={filler_before} filler_after={filler_after} "
-                f"quality_before={quality_before:.2f} quality_after={quality_after:.2f} "
-                f"avg_sentence_len_before={avg_sentence_len_before:.2f} avg_sentence_len_after={avg_sentence_len_after:.2f} "
-                f"short_sentence_rate_before={short_sentence_rate_before:.3f} short_sentence_rate_after={short_sentence_rate_after:.3f} "
-                f"long_sentence_rate_before={long_sentence_rate_before:.3f} long_sentence_rate_after={long_sentence_rate_after:.3f} "
-                f"topic_break_hint_before={topic_break_hint_before} topic_break_hint_after={topic_break_hint_after} "
-                f"ai_eq_mech={ai_eq_mech} placeholder_status={placeholder_status} "
-                f"basic_improvement_zero={basic_improvement_zero} "
-                f"structure_not_improved={structure_not_improved} "
-                f"improvement_zero={improvement_zero} retry_used={retry_used}"
-            ),
-        )
-        ai_chunk_len = len(ai_chunk)
-        if mech_chunk_len > 0:
-            chunk_ratio = ai_chunk_len / mech_chunk_len
-        else:
-            chunk_ratio = 1.0
-        if mech_chunk_len >= 200 and chunk_ratio < args.min_ai_length_ratio:
-            log_line(
-                log_path,
-                (
-                    "step_4_3_ai_correct: chunk="
-                    f"{idx} fallback_to_mech reason=short_output "
-                    f"mech_len={mech_chunk_len} ai_len={ai_chunk_len} "
-                    f"ratio={chunk_ratio:.3f} threshold={args.min_ai_length_ratio}"
-                ),
-            )
-            parts.append(chunk)
-        else:
-            log_line(
-                log_path,
-                (
-                    "step_4_3_ai_correct: chunk="
-                    f"{idx} accepted mech_len={mech_chunk_len} ai_len={ai_chunk_len} "
-                    f"ratio={chunk_ratio:.3f}"
-                ),
-            )
-            parts.append(ai_chunk)
-    ai_text = "".join(parts)
-    mechanical_len = len(mechanical_text)
-    combined_len = len(ai_text)
-    if mechanical_len > 0:
-        combined_ratio = combined_len / mechanical_len
-    else:
-        combined_ratio = 1.0
-    log_line(
-        log_path,
-        (
-            "step_4_3_ai_correct: combined "
-            f"mechanical_len={mechanical_len} ai_len={combined_len} ratio={combined_ratio:.3f} "
-            f"threshold={args.min_ai_length_ratio} "
-            "(chunk-level primary; combined ratio is informational only)"
-        ),
-    )
     with open(ai_path, "w", encoding="utf-8") as f:
         f.write(ai_text)
-    log_line(log_path, f"step_4_3_ai_correct: success saved={ai_path} chars={len(ai_text)}")
+
+    ratio = len(ai_text) / max(len(mechanical_text), 1)
+    log_line(
+        log_path,
+        f"step_4_3_ai_correct: done input_chars={len(mechanical_text)} "
+        f"output_chars={len(ai_text)} ratio={ratio:.3f}",
+    )
     update_job_progress(
         input_root=args.input_root,
         job_id=args.job_id,
         phase="step_4_3_ai_correct",
         status="success",
-        detail={"chars": len(ai_text), "ratio": combined_ratio},
+        detail={"chars": len(ai_text), "ratio": round(ratio, 3)},
     )
 
     update_job_progress(

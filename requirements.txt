@@ -5,3 +5,4 @@ faster-whisper
 fastapi
 uvicorn[standard]
 requests
+httpx

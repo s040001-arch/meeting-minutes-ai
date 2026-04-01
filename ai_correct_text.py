@@ -1,4 +1,5 @@
 import argparse
+import httpx
 import json
 import os
 import platform
@@ -202,6 +203,18 @@ def _restore_masked_text(masked_text: str, mapping: dict[str, str]) -> str:
     return _PLACEHOLDER_STRICT_RE.sub(repl, masked_text)
 
 
+def _validate_placeholder_sequence(
+    corrected_masked: str,
+    expected_placeholders: list[str],
+) -> None:
+    actual_placeholders = _extract_placeholders_strict(corrected_masked)
+    if actual_placeholders != expected_placeholders:
+        raise RuntimeError(
+            "placeholder_sequence_mismatch "
+            f"expected={expected_placeholders} actual={actual_placeholders}"
+        )
+
+
 def _count_paragraphs(text: str) -> int:
     blocks = [b for b in re.split(r"\n\s*\n+", text) if b.strip()]
     return len(blocks)
@@ -367,13 +380,7 @@ def call_openai_for_correction_detailed(
     if not corrected_masked:
         raise RuntimeError("OpenAI response did not contain output_text.")
 
-    actual_placeholders = _extract_placeholders_strict(corrected_masked)
-    placeholder_ok = (actual_placeholders == expected_placeholders)
-    if not placeholder_ok:
-        raise RuntimeError(
-            "placeholder_sequence_mismatch "
-            f"expected={expected_placeholders} actual={actual_placeholders}"
-        )
+    _validate_placeholder_sequence(corrected_masked, expected_placeholders)
 
     corrected = _restore_masked_text(corrected_masked, placeholder_mapping)
     stats_after = compute_readability_stats(corrected)
@@ -387,6 +394,75 @@ def call_openai_for_correction_detailed(
         "aggressive_structure": aggressive_structure,
     }
     return corrected, meta
+
+
+def correct_full_text(
+    text: str,
+    model: str = "claude-sonnet-4-20250514",
+    timeout_sec: int = 600,
+) -> str:
+    """
+    全文を一括でAI補正する。チャンク分割なし。
+    Anthropic Messages API を使用。
+    戻り値は補正後テキスト。失敗時は元テキストを返す。
+    """
+    if not text:
+        return text
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+
+    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+    system_prompt = _build_system_prompt(aggressive_structure=False)
+    payload = {
+        "model": model,
+        "max_tokens": 40960,
+        "system": system_prompt,
+        "messages": [
+            {"role": "user", "content": masked_text}
+        ],
+    }
+
+    try:
+        response = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=timeout_sec,
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        if result.get("stop_reason") == "max_tokens":
+            print("full_text_correction_failed='anthropic max_tokens reached'")
+            return text
+
+        content = result.get("content")
+        if not isinstance(content, list) or not content:
+            print("full_text_correction_failed='anthropic content missing'")
+            return text
+        first = content[0] if isinstance(content[0], dict) else {}
+        corrected_masked = str(first.get("text", "")).strip()
+        if not corrected_masked:
+            print("full_text_correction_failed='anthropic text missing'")
+            return text
+
+        _validate_placeholder_sequence(corrected_masked, expected_placeholders)
+        return _restore_masked_text(corrected_masked, placeholder_mapping)
+    except httpx.TimeoutException as e:
+        print(f"full_text_correction_timeout={e!r}")
+        return text
+    except httpx.HTTPError as e:
+        print(f"full_text_correction_http_error={e!r}")
+        return text
+    except Exception as e:
+        print(f"full_text_correction_failed={e!r}")
+        return text
 
 
 def call_openai_for_correction(
