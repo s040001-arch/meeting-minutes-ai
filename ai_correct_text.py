@@ -418,13 +418,16 @@ def correct_full_text(
 
     print(f"correct_full_text: input_chars={len(text)}")
     global _LAST_CORRECT_FULL_TEXT_META
+    max_tokens = min(max(int(len(text) * 1.0), 8192), 40960)
     _LAST_CORRECT_FULL_TEXT_META = {
         "input_chars": len(text),
         "output_chars": 0,
         "stop_reason": None,
         "fallback_reason": None,
         "used_fallback": False,
+        "max_tokens": max_tokens,
     }
+    print(f"correct_full_text: request_max_tokens={max_tokens}")
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
@@ -434,7 +437,7 @@ def correct_full_text(
     system_prompt = _build_system_prompt(aggressive_structure=False)
     payload = {
         "model": model,
-        "max_tokens": 40960,
+        "max_tokens": max_tokens,
         "system": system_prompt,
         "messages": [
             {"role": "user", "content": masked_text}
@@ -450,7 +453,7 @@ def correct_full_text(
                 "content-type": "application/json",
             },
             json=payload,
-            timeout=timeout_sec,
+            timeout=httpx.Timeout(timeout=timeout_sec, connect=30.0),
         )
         response.raise_for_status()
 
@@ -497,10 +500,10 @@ def correct_full_text(
         return restored
     except httpx.TimeoutException as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"timeout:{e!r}"
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"timeout:{e!r}:timeout_sec={timeout_sec}"
         print(
             f"[WARNING] correct_full_text: fallback to original. "
-            f"reason=timeout:{e!r} input_chars={len(text)}"
+            f"reason=timeout:{e!r} timeout_sec={timeout_sec} input_chars={len(text)}"
         )
         return text
     except httpx.HTTPError as e:
