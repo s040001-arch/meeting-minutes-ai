@@ -35,6 +35,20 @@ def resolve_context_text_path(job_id: str, input_root: str, explicit_path: str |
     return None
 
 
+def _load_doc_url(job_dir: str) -> str:
+    path = os.path.join(job_dir, "google_doc_hub.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return ""
+        return str(data.get("doc_url") or "").strip()
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
 RISKY_TYPE_PRIORITY = {
     "proper_noun_candidate": "固有名詞",
     "organization_candidate": "固有名詞",
@@ -55,6 +69,34 @@ def _build_unknown_points_compact(unknown_points: list[dict], limit: int = 25) -
             }
         )
     return out
+
+
+def _is_answered_unknown(item: dict) -> bool:
+    status = str(item.get("status", "")).strip().lower()
+    if status in {"answered", "done", "closed", "resolved"}:
+        return True
+    answer = item.get("answer")
+    if isinstance(answer, str) and answer.strip():
+        return True
+    return False
+
+
+def _filter_pending_unknown_points(unknown_points: list[dict]) -> tuple[list[dict], dict]:
+    pending: list[dict] = []
+    answered_count = 0
+    for item in unknown_points:
+        if not isinstance(item, dict):
+            continue
+        if _is_answered_unknown(item):
+            answered_count += 1
+            continue
+        pending.append(item)
+    meta = {
+        "unknown_points_count_before_filter": len(unknown_points),
+        "answered_unknown_points_count": answered_count,
+        "pending_unknown_points_count": len(pending),
+    }
+    return pending, meta
 
 
 def _generate_one_question_by_ai(
@@ -102,6 +144,11 @@ def _generate_one_question_by_ai(
         "目的は、全文の文脈が最も繋がるように、質問は常に1問だけ選ぶことです。"
         "細かな表記ゆれより、全体の解釈が分岐する論点を優先してください。"
         "質問の結果で本文全体がどこまで確定するかを重視してください。"
+        "question_text は LINE 送信用の自然な日本語にしてください。"
+        "question_text は1つの確認事項だけを短く聞いてください。"
+        "question_text は原則1〜2文、できれば120文字以内にしてください。"
+        "question_text に job_id や question_id のような内部IDを書かないでください。"
+        "selected_unknown.text は引用用の候補であり、question_text に長文引用をそのまま入れないでください。"
         "不確実性が低く、そのまま提出可能と判断できる場合のみ question_status=none を返してください。"
         "出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
     )
@@ -217,20 +264,24 @@ def _sync_line_pending_to_remote(payload: dict) -> None:
 
 def build_user_friendly_question(selected: dict) -> str:
     target_type = str(selected.get("type", "")).strip()
-    target_text = str(selected.get("text", "")).strip()
-    quoted = f"「{target_text}」" if target_text else "該当箇所"
 
     ask_line = {
-        "service_candidate": f"{quoted} の正式名称（正しい呼び方）を教えてください。",
-        "organization_candidate": f"{quoted} は会社・組織名として正しいですか？正しい正式名称を教えてください。",
-        "proper_noun_candidate": f"{quoted} の正しい表記（人名・固有名詞）を教えてください。",
-        "suspicious_word": f"{quoted} は誤変換の可能性があります。正しい語句を教えてください。",
-    }.get(target_type, f"{quoted} の正しい表現を教えてください。")
-
-    # ユーザー向けは1文中心にし、必要最小限の引用のみ添える
-    if target_text:
-        return f"{ask_line}\n引用: {quoted}"
+        "service_candidate": "サービス名や呼び方があいまいです。正しい名称を教えてください。",
+        "organization_candidate": "会社名・組織名があいまいです。正しい名称を教えてください。",
+        "proper_noun_candidate": "人名や固有名詞の表記があいまいです。正しい表記を教えてください。",
+        "suspicious_word": "語句の誤変換がありそうです。正しい表現を教えてください。",
+    }.get(target_type, "この部分の正しい表現を教えてください。")
     return ask_line
+
+
+def _normalize_question_text(text: str) -> str:
+    s = " ".join(str(text or "").strip().split())
+    if not s:
+        return ""
+    s = s.replace("確認したいこと:", "").replace("確認したいこと：", "").strip()
+    if len(s) > 160:
+        s = s[:159].rstrip() + "…"
+    return s
 
 
 def main() -> None:
@@ -295,10 +346,12 @@ def main() -> None:
     question_output = args.question_output or os.path.join(job_dir, "question_result.json")
     message_output = args.message_output or os.path.join(job_dir, "question_message.txt")
     os.makedirs(os.path.dirname(question_output) or ".", exist_ok=True)
+    doc_url = _load_doc_url(job_dir)
 
     if not os.path.isfile(unknowns_path):
         raise FileNotFoundError(f"unknowns file not found: {unknowns_path}")
-    unknown_points = load_unknown_points(unknowns_path)
+    unknown_points_all = load_unknown_points(unknowns_path)
+    unknown_points, pending_meta = _filter_pending_unknown_points(unknown_points_all)
 
     context_text_path = resolve_context_text_path(args.job_id, args.input_root, args.text)
     full_text = ""
@@ -310,8 +363,13 @@ def main() -> None:
         result_payload = {
             "job_id": args.job_id,
             "question_status": "none",
-            "message": "不明箇所は0件のため、質問は生成しません。",
+            "message": "未回答の不明箇所は0件のため、確認事項はありません。",
             "selected_unknown": None,
+            "doc_url": doc_url,
+            "selection_audit": {
+                "selection_mode": "none_no_pending_unknowns",
+                **pending_meta,
+            },
             "question_text": "",
         }
     else:
@@ -330,7 +388,7 @@ def main() -> None:
             selected_unknown = ai_result.get("selected_unknown")
             if not isinstance(selected_unknown, dict):
                 selected_unknown = None
-            question_text = str(ai_result.get("question_text", "")).strip()
+            question_text = _normalize_question_text(ai_result.get("question_text", ""))
             selection_audit = ai_result.get("selection_audit")
             if not isinstance(selection_audit, dict):
                 selection_audit = {"selection_mode": "ai_global_context"}
@@ -343,7 +401,8 @@ def main() -> None:
                     "question_status": "none",
                     "message": message or "全文文脈は提出可能水準のため、追加質問は行いません。",
                     "selected_unknown": selected_unknown,
-                    "selection_audit": selection_audit,
+                    "doc_url": doc_url,
+                    "selection_audit": {**pending_meta, **selection_audit},
                     "question_text": "",
                 }
             else:
@@ -354,7 +413,8 @@ def main() -> None:
                     "question_status": "generated",
                     "message": "",
                     "selected_unknown": selected_unknown,
-                    "selection_audit": selection_audit,
+                    "doc_url": doc_url,
+                    "selection_audit": {**pending_meta, **selection_audit},
                     "question_text": question_text,
                 }
                 write_line_pending_context(
@@ -382,12 +442,13 @@ def main() -> None:
                         f"（top_value={value}, threshold={args.min_question_value}）"
                     ),
                     "selected_unknown": selected,
-                    "selection_audit": selection_audit,
+                    "doc_url": doc_url,
+                    "selection_audit": {**pending_meta, **selection_audit},
                     "question_text": "",
                 }
             else:
                 pop_value_fields(selected)
-                question_text = build_user_friendly_question(selected)
+                question_text = _normalize_question_text(build_user_friendly_question(selected))
                 question_id = str(uuid.uuid4())
                 result_payload = {
                     "job_id": args.job_id,
@@ -395,7 +456,8 @@ def main() -> None:
                     "question_status": "generated",
                     "message": "",
                     "selected_unknown": selected,
-                    "selection_audit": selection_audit,
+                    "doc_url": doc_url,
+                    "selection_audit": {**pending_meta, **selection_audit},
                     "question_text": question_text,
                 }
                 write_line_pending_context(
@@ -415,21 +477,21 @@ def main() -> None:
 
     line_push = "skipped"
     if args.send_line:
-        if result_payload.get("question_status") != "generated":
-            line_push = "skipped_no_question"
+        line_user_id = os.getenv("LINE_USER_ID")
+        line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+        if not line_user_id:
+            raise RuntimeError("LINE_USER_ID is not set.")
+        if not line_token:
+            raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN is not set.")
+        push_line_message(
+            channel_access_token=line_token,
+            user_id=line_user_id,
+            text=message_text,
+        )
+        if result_payload.get("question_status") == "generated":
+            line_push = "sent_question"
         else:
-            line_user_id = os.getenv("LINE_USER_ID")
-            line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-            if not line_user_id:
-                raise RuntimeError("LINE_USER_ID is not set.")
-            if not line_token:
-                raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN is not set.")
-            push_line_message(
-                channel_access_token=line_token,
-                user_id=line_user_id,
-                text=message_text,
-            )
-            line_push = "sent"
+            line_push = "sent_completion"
 
     print(f"job_id={args.job_id}")
     print(f"unknowns={unknowns_path}")

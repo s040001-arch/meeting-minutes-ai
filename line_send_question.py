@@ -18,17 +18,42 @@ def load_question_result(path: str) -> dict:
     return data
 
 
+def _trim_preview(text: str, limit: int = 120) -> str:
+    s = " ".join(str(text or "").strip().split())
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1].rstrip() + "…"
+
+
 def build_line_message(result: dict) -> str:
-    job_id = str(result.get("job_id", ""))
     status = str(result.get("question_status", "none"))
+    doc_url = str(result.get("doc_url", "")).strip()
     if status == "generated":
         question_text = str(result.get("question_text", "")).strip()
-        qid = str(result.get("question_id", "")).strip()
-        head = f"[質問あり]\njob_id={job_id}\n"
-        if qid:
-            head += f"question_id={qid}\n"
-        return f"{head}{question_text}"
-    return f"[質問なし]\njob_id={job_id}\n不明箇所は0件のため確認事項はありません。"
+        selected = result.get("selected_unknown")
+        if not isinstance(selected, dict):
+            selected = {}
+        selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=140)
+        why = ""
+        audit = result.get("selection_audit")
+        if isinstance(audit, dict):
+            why = _trim_preview(str(audit.get("why_this_question", "")).strip(), limit=100)
+
+        parts = ["[確認したいこと]"]
+        if question_text:
+            parts.append(question_text)
+        if why:
+            parts.append(f"背景: {why}")
+        if selected_text:
+            parts.append(f"該当箇所: 「{selected_text}」")
+        if doc_url:
+            parts.append(f"議事録: {doc_url}")
+        return "\n".join(parts)
+    message = str(result.get("message", "")).strip() or "未回答の不明箇所は0件のため確認事項はありません。"
+    parts = ["[完了]", message]
+    if doc_url:
+        parts.append(f"議事録: {doc_url}")
+    return "\n".join(parts)
 
 
 def push_line_message(channel_access_token: str, user_id: str, text: str) -> None:
