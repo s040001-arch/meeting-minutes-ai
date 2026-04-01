@@ -329,6 +329,32 @@ def _build_detection_system_prompt(filename_hints: list[str] | None = None) -> s
     )
 
 
+_STREAM_MAX_RETRIES = 2
+_STREAM_CHUNK_PREVIEW_CHARS = 80
+_STREAM_LOG_EVERY_CHARS = 500
+_STREAM_LOG_EVERY_SEC = 10.0
+_STREAM_RETRY_BACKOFF_SEC = (5.0, 10.0)
+
+
+def _is_retryable_stream_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int) and (status_code in {408, 409, 429} or status_code >= 500):
+            return True
+    return False
+
+
+def _stream_chunk_preview(text: str) -> str:
+    preview = text.replace("\r", "\\r").replace("\n", "\\n")
+    if len(preview) > _STREAM_CHUNK_PREVIEW_CHARS:
+        preview = preview[:_STREAM_CHUNK_PREVIEW_CHARS] + "..."
+    return preview
+
+
 def _stream_anthropic_text(
     *,
     api_key: str,
@@ -339,27 +365,69 @@ def _stream_anthropic_text(
     timeout_sec: int,
     log_label: str,
 ) -> tuple[str, object | None]:
-    client = anthropic.Anthropic(
-        api_key=api_key,
-        timeout=httpx.Timeout(timeout=float(timeout_sec), connect=30.0),
-    )
-    started_at = time.monotonic()
-    logger.info(f"{log_label} started: input_len={len(user_message)}")
-    full_response = ""
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    ) as stream:
-        for text_chunk in stream.text_stream:
-            full_response += text_chunk
-        final_message = stream.get_final_message()
-    elapsed = time.monotonic() - started_at
-    logger.info(
-        f"{log_label} completed: output_len={len(full_response)} elapsed={elapsed:.1f}s"
-    )
-    return full_response, getattr(final_message, "stop_reason", None)
+    max_attempts = _STREAM_MAX_RETRIES + 1
+    for attempt in range(1, max_attempts + 1):
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(timeout=float(timeout_sec), connect=30.0),
+        )
+        started_at = time.monotonic()
+        logger.info(
+            f"{log_label} started: attempt={attempt}/{max_attempts} "
+            f"input_len={len(user_message)} timeout_sec={timeout_sec}"
+        )
+        full_response = ""
+        chunk_count = 0
+        next_log_len = _STREAM_LOG_EVERY_CHARS
+        last_progress_log_at = started_at
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            ) as stream:
+                for text_chunk in stream.text_stream:
+                    chunk_count += 1
+                    full_response += text_chunk
+                    now = time.monotonic()
+                    should_log = len(full_response) >= next_log_len
+                    if not should_log and (now - last_progress_log_at) >= _STREAM_LOG_EVERY_SEC:
+                        should_log = True
+                    if should_log:
+                        logger.info(
+                            f"{log_label} progress: attempt={attempt}/{max_attempts} "
+                            f"chunks={chunk_count} chunk_len={len(text_chunk)} "
+                            f"total_len={len(full_response)} "
+                            f"preview={_stream_chunk_preview(text_chunk)!r}"
+                        )
+                        while next_log_len <= len(full_response):
+                            next_log_len += _STREAM_LOG_EVERY_CHARS
+                        last_progress_log_at = now
+                final_message = stream.get_final_message()
+            elapsed = time.monotonic() - started_at
+            logger.info(
+                f"{log_label} completed: attempt={attempt}/{max_attempts} "
+                f"output_len={len(full_response)} chunks={chunk_count} elapsed={elapsed:.1f}s"
+            )
+            return full_response, getattr(final_message, "stop_reason", None)
+        except Exception as e:
+            elapsed = time.monotonic() - started_at
+            logger.warning(
+                f"{log_label} failed: attempt={attempt}/{max_attempts} "
+                f"partial_len={len(full_response)} chunks={chunk_count} "
+                f"elapsed={elapsed:.1f}s error={e!r}"
+            )
+            if attempt >= max_attempts or not _is_retryable_stream_error(e):
+                raise
+            backoff_idx = min(attempt - 1, len(_STREAM_RETRY_BACKOFF_SEC) - 1)
+            backoff_sec = _STREAM_RETRY_BACKOFF_SEC[backoff_idx]
+            logger.info(
+                f"{log_label} retrying: next_attempt={attempt + 1}/{max_attempts} "
+                f"backoff_sec={backoff_sec:.1f}"
+            )
+            time.sleep(backoff_sec)
+    raise RuntimeError(f"{log_label} exhausted retries")
 
 
 def _parse_detection_response(raw_text: str) -> list[dict[str, object]]:
