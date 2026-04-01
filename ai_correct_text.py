@@ -301,6 +301,169 @@ def _build_system_prompt(*, aggressive_structure: bool) -> str:
     )
 
 
+def _build_detection_system_prompt() -> str:
+    return (
+        "あなたは議事録補正の分析アシスタントです。"
+        "入力はマスク済みの日本語テキストです。"
+        "文脈が通らない箇所、明らかな脱字・崩れ・誤変換・接続不良だけを検出してください。"
+        "各箇所について、修正にどれだけ推測が必要かを guess_level で 0 から 100 の整数で評価してください。"
+        "0 はほぼ確実、100 はほぼ推測です。"
+        "固有名詞・人名・会社名・日付・時刻・数値・金額・社数・スケジュールの推測補正は禁止です。"
+        "不明語は意味推測で置換しないでください。"
+        "保護トークン <TYPE_0001> 形式は1文字も変更・削除・追加・並べ替えしてはいけません。"
+        "出力は JSON 配列のみとし、説明文・前置き・コードフェンスを付けないでください。"
+        "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
+        "location は該当箇所の前後10文字程度の短い抜粋、original は元の問題箇所そのもの、"
+        "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
+    )
+
+
+def _stream_anthropic_text(
+    *,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int,
+    timeout_sec: int,
+    log_label: str,
+) -> tuple[str, object | None]:
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=httpx.Timeout(timeout=float(timeout_sec), connect=30.0),
+    )
+    started_at = time.monotonic()
+    logger.info(f"{log_label} started: input_len={len(user_message)}")
+    full_response = ""
+    with client.messages.stream(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    ) as stream:
+        for text_chunk in stream.text_stream:
+            full_response += text_chunk
+        final_message = stream.get_final_message()
+    elapsed = time.monotonic() - started_at
+    logger.info(
+        f"{log_label} completed: output_len={len(full_response)} elapsed={elapsed:.1f}s"
+    )
+    return full_response, getattr(final_message, "stop_reason", None)
+
+
+def _parse_detection_response(raw_text: str) -> list[dict[str, object]]:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise RuntimeError("detection_response_not_list")
+    parsed: list[dict[str, object]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        original = str(item.get("original", "")).strip()
+        suggestion = str(item.get("suggestion", "")).strip()
+        issue = str(item.get("issue", "")).strip()
+        location = str(item.get("location", "")).strip()
+        guess_raw = item.get("guess_level", 100)
+        try:
+            guess_level = int(guess_raw)
+        except (TypeError, ValueError):
+            guess_level = 100
+        guess_level = max(0, min(100, guess_level))
+        if not original:
+            continue
+        parsed.append(
+            {
+                "location": location,
+                "original": original,
+                "issue": issue,
+                "suggestion": suggestion,
+                "guess_level": guess_level,
+            }
+        )
+    return parsed
+
+
+def _apply_low_guess_replacements(
+    masked_text: str,
+    detections: list[dict[str, object]],
+) -> tuple[str, int, int]:
+    updated = masked_text
+    auto_applied = 0
+    skipped = 0
+    for item in detections:
+        original = str(item.get("original", ""))
+        suggestion = str(item.get("suggestion", ""))
+        guess_level = int(item.get("guess_level", 100))
+        if guess_level >= 10:
+            skipped += 1
+            continue
+        if not original or not suggestion or original == suggestion:
+            skipped += 1
+            continue
+        pos = updated.find(original)
+        if pos < 0:
+            skipped += 1
+            continue
+        updated = updated[:pos] + suggestion + updated[pos + len(original):]
+        auto_applied += 1
+    return updated, auto_applied, skipped
+
+
+def _correct_full_text_legacy(
+    *,
+    text: str,
+    api_key: str,
+    model: str,
+    timeout_sec: int,
+    max_tokens: int,
+) -> str:
+    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+    system_prompt = _build_system_prompt(aggressive_structure=False)
+    full_response, stop_reason = _stream_anthropic_text(
+        api_key=api_key,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=masked_text,
+        max_tokens=max_tokens,
+        timeout_sec=timeout_sec,
+        log_label="AI correction streaming",
+    )
+    _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
+    if stop_reason == "max_tokens":
+        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
+        print(
+            f"[WARNING] correct_full_text: fallback to original. "
+            f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
+        )
+        return text
+
+    corrected_masked = full_response.strip()
+    _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
+    print(
+        f"correct_full_text: output_chars={len(corrected_masked)} "
+        f"stop_reason={stop_reason}"
+    )
+    if not corrected_masked:
+        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
+        print(
+            f"[WARNING] correct_full_text: fallback to original. "
+            f"reason=anthropic_text_missing input_chars={len(text)}"
+        )
+        return text
+
+    _validate_placeholder_sequence(corrected_masked, expected_placeholders)
+    restored = _restore_masked_text(corrected_masked, placeholder_mapping)
+    _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
+    print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
+    return restored
+
+
 def call_openai_for_correction_detailed(
     text: str,
     model: str,
@@ -438,63 +601,99 @@ def correct_full_text(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
-    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
-    user_message = masked_text
-    system_prompt = _build_system_prompt(aggressive_structure=False)
-
     try:
-        client = anthropic.Anthropic(
+        masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+        detection_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
-            timeout=httpx.Timeout(timeout=900.0, connect=30.0),
-        )
-        started_at = time.monotonic()
-        logger.info(f"AI correction streaming started: input_len={len(user_message)}")
-        full_response = ""
-        with client.messages.stream(
             model=model,
+            system_prompt=_build_detection_system_prompt(),
+            user_message=masked_text,
             max_tokens=max_tokens,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            for text_chunk in stream.text_stream:
-                full_response += text_chunk
-            final_message = stream.get_final_message()
-        elapsed = time.monotonic() - started_at
-        logger.info(
-            f"AI correction streaming completed: output_len={len(full_response)} elapsed={elapsed:.1f}s"
+            timeout_sec=timeout_sec,
+            log_label="AI correction detection streaming",
         )
-
-        stop_reason = getattr(final_message, "stop_reason", None)
         _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
         if stop_reason == "max_tokens":
-            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
             print(
-                f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
+                f"[WARNING] correct_full_text: detection hit max_tokens. "
+                "falling back to legacy full-text correction."
             )
-            return text
+            return _correct_full_text_legacy(
+                text=text,
+                api_key=api_key,
+                model=model,
+                timeout_sec=timeout_sec,
+                max_tokens=max_tokens,
+            )
 
-        corrected_masked = full_response.strip()
-        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
+        detections = _parse_detection_response(detection_response)
+        detection_count = len(detections)
+        auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 10)
+        skipped_candidates = detection_count - auto_candidates
         print(
-            f"correct_full_text: output_chars={len(corrected_masked)} "
-            f"stop_reason={stop_reason}"
+            f"correct_full_text: detection_count={detection_count} "
+            f"auto_candidates={auto_candidates} skipped_candidates={skipped_candidates}"
         )
-        if not corrected_masked:
-            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
-            print(
-                f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=anthropic_text_missing input_chars={len(text)}"
-            )
-            return text
+
+        corrected_masked, auto_applied, skipped_total = _apply_low_guess_replacements(
+            masked_text,
+            detections,
+        )
+        print(
+            f"correct_full_text: auto_applied={auto_applied} "
+            f"skipped_for_phase_b={skipped_total}"
+        )
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
 
         _validate_placeholder_sequence(corrected_masked, expected_placeholders)
         restored = _restore_masked_text(corrected_masked, placeholder_mapping)
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
         print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
         return restored
+    except json.JSONDecodeError as e:
+        print(
+            f"[WARNING] correct_full_text: detection JSON parse failed. "
+            f"falling back to legacy full-text correction. error={e!r}"
+        )
+        try:
+            return _correct_full_text_legacy(
+                text=text,
+                api_key=api_key,
+                model=model,
+                timeout_sec=timeout_sec,
+                max_tokens=max_tokens,
+            )
+        except Exception as legacy_e:
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"legacy_exception:{legacy_e!r}"
+            print(
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=legacy_exception:{legacy_e!r} input_chars={len(text)}"
+            )
+            return text
+    except RuntimeError as e:
+        if str(e) == "detection_response_not_list":
+            print(
+                "[WARNING] correct_full_text: detection response was not JSON array. "
+                "falling back to legacy full-text correction."
+            )
+            try:
+                return _correct_full_text_legacy(
+                    text=text,
+                    api_key=api_key,
+                    model=model,
+                    timeout_sec=timeout_sec,
+                    max_tokens=max_tokens,
+                )
+            except Exception as legacy_e:
+                _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+                _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"legacy_exception:{legacy_e!r}"
+                print(
+                    f"[WARNING] correct_full_text: fallback to original. "
+                    f"reason=legacy_exception:{legacy_e!r} input_chars={len(text)}"
+                )
+                return text
+        raise
     except httpx.TimeoutException as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
         _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"timeout:{e!r}:timeout_sec={timeout_sec}"
