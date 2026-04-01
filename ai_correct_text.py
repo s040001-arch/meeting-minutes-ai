@@ -305,11 +305,12 @@ def _build_detection_system_prompt() -> str:
     return (
         "あなたは議事録補正の分析アシスタントです。"
         "入力はマスク済みの日本語テキストです。"
-        "文脈が通らない箇所、明らかな脱字・崩れ・誤変換・接続不良だけを検出してください。"
+        "音声認識由来の誤変換・脱字・崩れ・接続不良を検出してください。"
+        "特に、音が似ているが漢字が違う誤変換（例：「ショート力」→「しごとりょく」）を重点的に検出してください。"
         "各箇所について、修正にどれだけ推測が必要かを guess_level で 0 から 100 の整数で評価してください。"
         "0 はほぼ確実、100 はほぼ推測です。"
-        "固有名詞・人名・会社名・日付・時刻・数値・金額・社数・スケジュールの推測補正は禁止です。"
-        "不明語は意味推測で置換しないでください。"
+        "音声認識の明らかな誤変換は guess_level を低く（0-20）評価してください。"
+        "日付・時刻・数値・金額は変更禁止です。"
         "保護トークン <TYPE_0001> 形式は1文字も変更・削除・追加・並べ替えしてはいけません。"
         "出力は JSON 配列のみとし、説明文・前置き・コードフェンスを付けないでください。"
         "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
@@ -398,7 +399,7 @@ def _apply_low_guess_replacements(
         original = str(item.get("original", ""))
         suggestion = str(item.get("suggestion", ""))
         guess_level = int(item.get("guess_level", 100))
-        if guess_level >= 10:
+        if guess_level >= 40:
             skipped += 1
             continue
         if not original or not suggestion or original == suggestion:
@@ -628,7 +629,7 @@ def correct_full_text(
 
         detections = _parse_detection_response(detection_response)
         detection_count = len(detections)
-        auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 10)
+        auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 40)
         skipped_candidates = detection_count - auto_candidates
         print(
             f"correct_full_text: detection_count={detection_count} "
