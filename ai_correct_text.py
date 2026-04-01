@@ -1,11 +1,16 @@
 import argparse
+import anthropic
 import httpx
 import json
+import logging
 import os
 import platform
 import re
+import time
 import urllib.error
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> str:
@@ -406,7 +411,7 @@ def get_last_correct_full_text_meta() -> dict[str, object]:
 def correct_full_text(
     text: str,
     model: str = "claude-sonnet-4-20250514",
-    timeout_sec: int = 600,
+    timeout_sec: int = 900,
 ) -> str:
     """
     全文を一括でAI補正する。チャンク分割なし。
@@ -434,32 +439,34 @@ def correct_full_text(
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+    user_message = masked_text
     system_prompt = _build_system_prompt(aggressive_structure=False)
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system_prompt,
-        "messages": [
-            {"role": "user", "content": masked_text}
-        ],
-    }
 
     try:
-        response = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=payload,
-            timeout=httpx.Timeout(timeout=timeout_sec, connect=30.0),
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(timeout=900.0, connect=30.0),
         )
-        response.raise_for_status()
+        started_at = time.monotonic()
+        logger.info(f"AI correction streaming started: input_len={len(user_message)}")
+        full_response = ""
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        ) as stream:
+            for text_chunk in stream.text_stream:
+                full_response += text_chunk
+            final_message = stream.get_final_message()
+        elapsed = time.monotonic() - started_at
+        logger.info(
+            f"AI correction streaming completed: output_len={len(full_response)} elapsed={elapsed:.1f}s"
+        )
 
-        result = response.json()
-        _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = result.get("stop_reason")
-        if result.get("stop_reason") == "max_tokens":
+        stop_reason = getattr(final_message, "stop_reason", None)
+        _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
+        if stop_reason == "max_tokens":
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
             _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
             print(
@@ -468,21 +475,11 @@ def correct_full_text(
             )
             return text
 
-        content = result.get("content")
-        if not isinstance(content, list) or not content:
-            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_content_missing"
-            print(
-                f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=anthropic_content_missing input_chars={len(text)}"
-            )
-            return text
-        first = content[0] if isinstance(content[0], dict) else {}
-        corrected_masked = str(first.get("text", "")).strip()
+        corrected_masked = full_response.strip()
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
         print(
             f"correct_full_text: output_chars={len(corrected_masked)} "
-            f"stop_reason={result.get('stop_reason')}"
+            f"stop_reason={stop_reason}"
         )
         if not corrected_masked:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
