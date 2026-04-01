@@ -9,6 +9,7 @@
 
 - [x] AI補正を Claude 3.5 Sonnet 全文一括に移行 (`ad7aafb`)
 - [x] 旧チャンク分割AI補正を廃止（overlap・ratio問題を根本解消）
+- [x] チャンク分割方式の検討 → 不採用（ストリーミング方式を採用）
 - [x] `.gitignore` で秘密情報保護 (`639767b`)
 - [x] 旧v1パイプラインコード削除 (`ed926c3`)
 - [x] Railway デプロイ正常動作確認
@@ -49,6 +50,15 @@
 - [ ] 旧ロジック残存の整理
   - 本番は `run_question_cycle_once.py` に移行済み
   - deprecated 明示 or 削除
+
+### ai_correct_text.py / Step 4.3
+
+- [ ] `ai_correct_text.py`: Claude API呼び出しをストリーミング方式に変更
+- [ ] `httpx` のインポート追加、Anthropicクライアントのtimeout設定変更（900秒）
+- [ ] デプロイ後、同一ファイル（24,728文字）で再テスト
+- [ ] テスト観点: ReadTimeoutが解消されること、補正品質が変わらないこと
+- [ ] ReadTimeout対策
+  - 方針確定: ストリーミング方式
 
 ---
 
