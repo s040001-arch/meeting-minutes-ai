@@ -754,7 +754,21 @@ def main() -> None:
         update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{stem}", log_path)
         append_log_to_drive(args.job_id, f"Step 4.3: AI補正開始 input={len(mechanical_text)}")
 
-        ai_text = correct_full_text(text=mechanical_text)
+        PHASE_LABELS = {
+            "masking": "マスキング",
+            "ai_detect": "AI検出",
+            "auto_apply": "自動置換",
+            "unmask": "復元",
+            "verify": "検証",
+        }
+
+        def _on_ai_phase(phase: str):
+            label = PHASE_LABELS.get(phase, phase)
+            title = f"【AI補正中：{label}】{stem}"
+            update_doc_title_from_hub(hub_meta_path, title, log_path)
+            append_log_to_drive(args.job_id, f"Step 4.3: {label}開始")
+
+        ai_text = correct_full_text(text=mechanical_text, on_phase=_on_ai_phase)
 
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)

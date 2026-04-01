@@ -9,6 +9,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -421,7 +422,6 @@ def _apply_low_guess_replacements(
             continue
         updated = updated[:pos] + suggestion + updated[pos + len(original):]
         auto_applied += 1
-    logger.info(f"auto_apply: applied={auto_applied} skipped={skipped}")
     return updated, auto_applied, skipped
 
 
@@ -587,6 +587,7 @@ def correct_full_text(
     text: str,
     model: str = "claude-sonnet-4-20250514",
     timeout_sec: int = 900,
+    on_phase: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
     全文を一括でAI補正する。チャンク分割なし。
@@ -614,7 +615,14 @@ def correct_full_text(
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
     try:
+        if on_phase:
+            on_phase("masking")
         masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
+        logger.info(f"Step 4.3a: マスキング完了 placeholders={len(placeholder_mapping)}")
+
+        if on_phase:
+            on_phase("ai_detect")
+        api_started_at = time.time()
         detection_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
             model=model,
@@ -624,6 +632,7 @@ def correct_full_text(
             timeout_sec=timeout_sec,
             log_label="AI correction detection streaming",
         )
+        api_elapsed_sec = time.time() - api_started_at
         _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
         if stop_reason == "max_tokens":
             print(
@@ -642,14 +651,23 @@ def correct_full_text(
         detection_count = len(detections)
         auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 40)
         skipped_candidates = detection_count - auto_candidates
+        logger.info(
+            f"Step 4.3b: AI検出完了 detections={detection_count} "
+            f"(API応答時間={api_elapsed_sec:.1f}s)"
+        )
         print(
             f"correct_full_text: detection_count={detection_count} "
             f"auto_candidates={auto_candidates} skipped_candidates={skipped_candidates}"
         )
 
+        if on_phase:
+            on_phase("auto_apply")
         corrected_masked, auto_applied, skipped_total = _apply_low_guess_replacements(
             masked_text,
             detections,
+        )
+        logger.info(
+            f"Step 4.3c: 自動置換完了 applied={auto_applied} skipped={skipped_total}"
         )
         print(
             f"correct_full_text: auto_applied={auto_applied} "
@@ -657,8 +675,18 @@ def correct_full_text(
         )
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
 
-        _validate_placeholder_sequence(corrected_masked, expected_placeholders)
+        if on_phase:
+            on_phase("unmask")
         restored = _restore_masked_text(corrected_masked, placeholder_mapping)
+        logger.info("Step 4.3d: アンマスキング完了")
+        try:
+            _validate_placeholder_sequence(corrected_masked, expected_placeholders)
+        except Exception as e:
+            logger.warning(f"Step 4.3e: プレースホルダー検証NG detail={e!r}")
+            raise
+        if on_phase:
+            on_phase("verify")
+        logger.info("Step 4.3e: プレースホルダー検証OK")
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
         print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
         return restored
