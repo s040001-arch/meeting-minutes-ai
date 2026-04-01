@@ -14,6 +14,9 @@
 - [x] `httpx` のインポート追加、および Anthropic クライアントの timeout 設定を 900 秒に調整
 - [x] Claude ストリーミングの再試行制御を追加（最大2回、5秒→10秒バックオフ）
 - [x] Claude ストリーミングの進捗ログを間引き付きで追加（500文字ごと または 10秒ごと）
+- [x] Step⑨ AI不明点検出を実装し、Claude 検出結果を `unknown_points.json` に保存
+- [x] Step⑩ で Regex 検出結果と Claude 検出結果をマージするよう更新
+- [x] Step⑪ 議事録生成を Claude ベースに更新し、spec の 7 セクション構成へ整形
 - [x] `filename_hints.py` を追加し、ファイル名由来の固有名詞ヒントを AI 補正へ注入
 - [x] `.gitignore` で秘密情報保護 (`639767b`)
 - [x] 旧v1パイプラインコード削除 (`ed926c3`)
@@ -111,5 +114,7 @@
 - **2025-01-23:** 3フェーズ計画（Whisper API移行→状態管理→Webhook整備）に全面再構成。review_risky_terms.py 削除完了を反映。spec.md 更新完了を反映。
 - **2026-04-01:** `review_risky_terms.py` と `docs/status_2025-04-01.md` の削除、および spec.md の hub 保存場所・タイトル遷移・進捗管理責務の整理を反映。
 - **2026-04-01:** Claude ストリーミング移行の実装完了を反映。`ai_correct_text.py` に 900 秒 timeout、再試行バックオフ、間引き進捗ログを追加。
+- **2026-04-01:** Step⑨ AI不明点検出を実装。Claude の high-guess 検出結果を `unknown_points.json` に保存し、Step⑩ Regex 検出とマージするよう更新。
+- **2026-04-01:** Step⑪ 議事録生成を Claude ベースへ移行。`generate_minutes_other_sections.py` で要約セクションを生成し、7 セクション構成の Markdown を出力するよう更新。
 - **2026-04-01:** `filename_hints.py` を完了済みに反映。新パイプライン基準で全面書き直し。
 - **2026-04-01:** 新パイプライン基準で全面書き直し。旧v1タスク・進捗を削除し、監査結果ベースの改善リストに整理。

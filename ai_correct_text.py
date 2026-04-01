@@ -334,6 +334,11 @@ _STREAM_CHUNK_PREVIEW_CHARS = 80
 _STREAM_LOG_EVERY_CHARS = 500
 _STREAM_LOG_EVERY_SEC = 10.0
 _STREAM_RETRY_BACKOFF_SEC = (5.0, 10.0)
+_UNKNOWN_NUMBER_HINT_RE = re.compile(
+    r"(?:\d|[0-9０-９]+|円|万円|億円|時|分|日|月|年|件|人|名|社|金額|数値|期限|役職|担当)"
+)
+_UNKNOWN_ORG_HINT_RE = re.compile(r"(?:株式会社|有限会社|会社|企業|法人|部門|部署|グループ|ホールディングス)")
+_UNKNOWN_SERVICE_HINT_RE = re.compile(r"(?:サービス|製品|商品|プラン|研修|サーベイ|プロジェクト)")
 
 
 def _is_retryable_stream_error(exc: Exception) -> bool:
@@ -353,6 +358,62 @@ def _stream_chunk_preview(text: str) -> str:
     if len(preview) > _STREAM_CHUNK_PREVIEW_CHARS:
         preview = preview[:_STREAM_CHUNK_PREVIEW_CHARS] + "..."
     return preview
+
+
+def _classify_unknown_candidate_type(original: str, suggestion: str, issue: str, location: str) -> str:
+    combined = "\n".join([original, suggestion, issue, location])
+    if _UNKNOWN_NUMBER_HINT_RE.search(combined):
+        return "suspicious_number_or_role"
+    if _UNKNOWN_ORG_HINT_RE.search(combined):
+        return "organization_candidate"
+    if _UNKNOWN_SERVICE_HINT_RE.search(combined):
+        return "service_candidate"
+    return "suspicious_word"
+
+
+def _build_ai_unknown_points(
+    detections: list[dict[str, object]],
+    placeholder_mapping: dict[str, str],
+    *,
+    min_guess_level: int = 40,
+) -> list[dict[str, object]]:
+    unknowns: list[dict[str, object]] = []
+    for item in detections:
+        guess_level = int(item.get("guess_level", 100))
+        if guess_level < min_guess_level:
+            continue
+        original = _restore_masked_text(str(item.get("original", "")).strip(), placeholder_mapping).strip()
+        suggestion = _restore_masked_text(
+            str(item.get("suggestion", "")).strip(),
+            placeholder_mapping,
+        ).strip()
+        issue = _restore_masked_text(str(item.get("issue", "")).strip(), placeholder_mapping).strip()
+        location = _restore_masked_text(
+            str(item.get("location", "")).strip(),
+            placeholder_mapping,
+        ).strip()
+        if not original:
+            continue
+        type_raw = _classify_unknown_candidate_type(original, suggestion, issue, location)
+        reason_parts = ["Claude が文脈上不確実と判断しました。"]
+        if issue:
+            reason_parts.append(issue)
+        if suggestion:
+            reason_parts.append(f"候補: {suggestion}")
+        reason_parts.append(f"guess_level={guess_level}")
+        unknown: dict[str, object] = {
+            "type": type_raw,
+            "text": original,
+            "reason": " ".join(reason_parts).strip(),
+            "source": "claude_step9",
+            "guess_level": guess_level,
+        }
+        if suggestion:
+            unknown["hypothesis"] = suggestion
+        if location:
+            unknown["context"] = location
+        unknowns.append(unknown)
+    return unknowns
 
 
 def _stream_anthropic_text(
@@ -689,6 +750,8 @@ def correct_full_text(
         "fallback_reason": None,
         "used_fallback": False,
         "max_tokens": max_tokens,
+        "ai_unknown_points": [],
+        "ai_unknown_points_count": 0,
     }
     print(f"correct_full_text: request_max_tokens={max_tokens}")
 
@@ -734,6 +797,13 @@ def correct_full_text(
         detection_count = len(detections)
         auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 40)
         skipped_candidates = detection_count - auto_candidates
+        ai_unknown_points = _build_ai_unknown_points(
+            detections,
+            placeholder_mapping,
+            min_guess_level=40,
+        )
+        _LAST_CORRECT_FULL_TEXT_META["ai_unknown_points"] = ai_unknown_points
+        _LAST_CORRECT_FULL_TEXT_META["ai_unknown_points_count"] = len(ai_unknown_points)
         logger.info(
             f"Step 4.3b: AI検出完了 detections={detection_count} "
             f"(API応答時間={api_elapsed_sec:.1f}s)"
@@ -741,6 +811,10 @@ def correct_full_text(
         print(
             f"correct_full_text: detection_count={detection_count} "
             f"auto_candidates={auto_candidates} skipped_candidates={skipped_candidates}"
+        )
+        print(
+            f"correct_full_text: ai_unknown_points_count={len(ai_unknown_points)} "
+            "threshold_guess_level>=40"
         )
 
         if on_phase:

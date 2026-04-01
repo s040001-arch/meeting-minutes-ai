@@ -116,7 +116,6 @@ Step⑩  ハイブリッド不明点検出
         Regex ベースの検出を実行し、Claude の検出結果とマージ
         → unknown_points.json を更新
         → タイトルを「【不明点検出完了】{stem}」に変更
-        ※ 現行実装では Step⑩ の Regex 検出が先行稼働し、`unknown_points.json` の主な生成元となる
 
 Step⑪  議事録生成（Claude 3.5 Sonnet）
         Google Doc を全面上書きし、セクション4のフォーマットで議事録を生成

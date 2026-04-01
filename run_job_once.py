@@ -440,6 +440,32 @@ def append_log_to_drive(job_id: str, message: str) -> None:
         print(f"append_log_to_drive: failed error={e!r}")
 
 
+def _load_unknown_points_file(path: str) -> list[dict]:
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+
+def _save_unknown_points_file(path: str, unknown_points: list[dict]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(unknown_points, f, ensure_ascii=False, indent=2)
+
+
+def merge_unknown_points(
+    *,
+    ai_unknowns: list[dict],
+    regex_unknowns: list[dict],
+) -> list[dict]:
+    merged: list[dict] = []
+    for item in list(ai_unknowns) + list(regex_unknowns):
+        if isinstance(item, dict):
+            merged.append(item)
+    return merged
+
+
 def main() -> None:
     load_dotenv_local()
     parser = argparse.ArgumentParser(
@@ -570,6 +596,7 @@ def main() -> None:
     mechanical_path = os.path.join(job_dir, "merged_transcript_mechanical.txt")
     ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
     unknowns_path = os.path.join(job_dir, "unknown_points.json")
+    regex_unknowns_path = os.path.join(job_dir, "unknown_points_regex.json")
 
     py = sys.executable
     repo = os.getcwd()
@@ -776,16 +803,49 @@ def main() -> None:
         stop_reason = correction_meta.get("stop_reason")
         fallback_reason = correction_meta.get("fallback_reason")
         stop_label = fallback_reason or stop_reason or "unknown"
+        ai_unknown_points_raw = correction_meta.get("ai_unknown_points")
+        ai_unknown_points = (
+            [item for item in ai_unknown_points_raw if isinstance(item, dict)]
+            if isinstance(ai_unknown_points_raw, list)
+            else []
+        )
         append_log_to_drive(
             args.job_id,
             f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
         )
+        _save_unknown_points_file(unknowns_path, ai_unknown_points)
+        log_line(
+            log_path,
+            f"step_4_35_ai_unknowns: saved path={unknowns_path} count={len(ai_unknown_points)}",
+        )
+        append_log_to_drive(
+            args.job_id,
+            f"Step 4.35: AI不明点検出完了 count={len(ai_unknown_points)}",
+        )
+        update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
 
         run_cmd(
             log_path,
-            [py, os.path.join(repo, "extract_unknown_points.py"), "--input", ai_path, "--output", unknowns_path],
+            [py, os.path.join(repo, "extract_unknown_points.py"), "--input", ai_path, "--output", regex_unknowns_path],
             "step_4_4_extract_unknowns",
         )
+        regex_unknown_points = _load_unknown_points_file(regex_unknowns_path)
+        merged_unknown_points = merge_unknown_points(
+            ai_unknowns=ai_unknown_points,
+            regex_unknowns=regex_unknown_points,
+        )
+        _save_unknown_points_file(unknowns_path, merged_unknown_points)
+        log_line(
+            log_path,
+            "step_4_4_extract_unknowns: merged "
+            f"ai_unknowns={len(ai_unknown_points)} regex_unknowns={len(regex_unknown_points)} "
+            f"total={len(merged_unknown_points)} saved={unknowns_path}",
+        )
+        append_log_to_drive(
+            args.job_id,
+            f"Step 4.4: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
+        )
+        update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
         qcycle_cmd = [
             py,
             os.path.join(repo, "run_question_cycle_once.py"),
