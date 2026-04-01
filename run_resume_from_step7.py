@@ -48,6 +48,11 @@ def main() -> None:
     parser.add_argument("--push", action="store_true", help="Docs を更新する")
     parser.add_argument("--send-line", action="store_true", help="次質問を LINE 送信する")
     parser.add_argument("--min-question-value", type=int, default=8)
+    parser.add_argument(
+        "--incorporate-latest-answer",
+        action="store_true",
+        help="最新回答もあわせて本文へ反映してから再開する",
+    )
     args = parser.parse_args()
 
     job_dir = os.path.join(args.input_root, args.job_id)
@@ -239,6 +244,74 @@ def main() -> None:
             message=f"Step 10: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
         )
         update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
+
+        if args.incorporate_latest_answer and os.path.isfile(args.answers_json):
+            current_phase = "step_16_17_apply_latest_answer"
+            current_step_label = "Step 16-17: 回答内容反映"
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase=current_phase,
+                status="running",
+                detail={},
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 16: 最新回答の本文反映開始",
+            )
+            _run_cmd(
+                log_path,
+                [
+                    py,
+                    os.path.join(repo_root, "recorrect_from_line_answer.py"),
+                    "--job-id",
+                    args.job_id,
+                    "--input-root",
+                    args.input_root,
+                    "--answers-json",
+                    args.answers_json,
+                    "--input",
+                    ai_path,
+                    "--output",
+                    after_qa_path,
+                ],
+                "step_16_apply_latest_answer",
+            )
+            _run_cmd(
+                log_path,
+                [
+                    py,
+                    os.path.join(repo_root, "refresh_unknown_points_after_answer.py"),
+                    "--job-id",
+                    args.job_id,
+                    "--input-root",
+                    args.input_root,
+                    "--answers-json",
+                    args.answers_json,
+                    "--input",
+                    after_qa_path,
+                    "--unknowns",
+                    unknowns_path,
+                    "--output",
+                    unknowns_path,
+                ],
+                "step_17_refresh_unknowns_after_answer",
+            )
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase=current_phase,
+                status="success",
+                detail={},
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 17: 回答内容反映と不明点再評価完了",
+            )
 
         current_phase = "step_12_13_question_cycle"
         current_step_label = "Step 12-13: 質問選定/LINE通知"

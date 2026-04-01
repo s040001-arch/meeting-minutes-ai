@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -46,7 +47,7 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _RUN_DOCS_HUB_E2E = os.path.join(_REPO_ROOT, "run_docs_hub_e2e.py")
 _RUN_RESUME_FROM_STEP7 = os.path.join(_REPO_ROOT, "run_resume_from_step7.py")
 CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
-LINE_CLASSIFIER_MODEL = "claude-sonnet-4-20250514"
+LINE_EXTRACTOR_MODEL = "claude-sonnet-4-20250514"
 
 state = {
     # 質問送信は行わず、回答受付だけ行う前提のため
@@ -165,31 +166,68 @@ def _heuristic_extract_correction_pairs(text: str) -> list[dict[str, str]]:
     return pairs
 
 
-def _classify_line_message_heuristic(text: str, pending_context: dict | None) -> dict:
+def _normalize_correction_pairs(raw_pairs: object) -> list[dict[str, str]]:
+    pairs: list[dict[str, str]] = []
+    if not isinstance(raw_pairs, list):
+        return pairs
+    for item in raw_pairs:
+        if not isinstance(item, dict):
+            continue
+        wrong = str(item.get("wrong") or "").strip()
+        correct = str(item.get("correct") or "").strip()
+        if wrong and correct and wrong != correct:
+            pairs.append({"wrong": wrong, "correct": correct})
+    return pairs
+
+
+def _looks_noninformative_message(text: str) -> bool:
+    s = re.sub(r"\s+", "", str(text or "").strip()).lower()
+    if not s:
+        return True
+    bland = {
+        "了解",
+        "りょうかい",
+        "ok",
+        "okay",
+        "yes",
+        "ありがとうございます",
+        "ありがとう",
+        "承知しました",
+        "承知です",
+        "確認します",
+        "確認します。",
+    }
+    return s in {x.lower() for x in bland}
+
+
+def _extract_line_message_actions_heuristic(text: str, pending_context: dict | None) -> dict:
     pairs = _heuristic_extract_correction_pairs(text)
-    if pairs:
-        return {
-            "category": "correction",
-            "reason": "heuristic_correction_pattern",
-            "correction_pairs": pairs,
-        }
-    if pending_context and str((pending_context or {}).get("question_text") or "").strip():
-        return {
-            "category": "answer",
-            "reason": "pending_question_exists",
-            "correction_pairs": [],
-        }
+    has_pending_question = bool(
+        pending_context and str((pending_context or {}).get("question_text") or "").strip()
+    )
+    informative = not _looks_noninformative_message(text)
+    has_answer = has_pending_question and informative
     return {
-        "category": "irrelevant",
-        "reason": "no_pending_question_and_no_correction_pattern",
-        "correction_pairs": [],
+        "is_irrelevant": (not has_answer and not pairs),
+        "has_answer": has_answer,
+        "answer_text": str(text or "").strip() if has_answer else "",
+        "correction_pairs": pairs,
+        "reason": (
+            "heuristic_answer_and_correction"
+            if has_answer and pairs
+            else "heuristic_answer"
+            if has_answer
+            else "heuristic_correction"
+            if pairs
+            else "heuristic_irrelevant"
+        ),
     }
 
 
-def _classify_line_message_with_claude(text: str, pending_context: dict | None) -> dict:
+def _extract_line_message_actions_with_claude(text: str, pending_context: dict | None) -> dict:
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        return _classify_line_message_heuristic(text, pending_context)
+        return _extract_line_message_actions_heuristic(text, pending_context)
     client = anthropic.Anthropic(api_key=api_key)
     compact_ctx = {
         "has_pending_question": bool(
@@ -202,19 +240,20 @@ def _classify_line_message_with_claude(text: str, pending_context: dict | None) 
         "message_text": text,
     }
     system_prompt = (
-        "あなたは議事録補正システムのLINEメッセージ分類器です。"
-        "受信メッセージを answer / correction / irrelevant の3種類に必ず分類してください。"
-        "answer は直前の質問に対する返答です。"
-        "correction は『XではなくY』『Xの間違い』のような手動修正指示です。"
-        "irrelevant は議事録補正と無関係な雑談・挨拶です。"
+        "あなたは議事録補正システムのLINEメッセージ情報抽出器です。"
+        "目的は、受信メッセージから議事録補正に使える情報をできるだけ回収することです。"
+        "『回答か修正依頼か』を1つに決めるのではなく、両方あれば両方を返してください。"
+        "has_answer は、直前の質問に対する答えとして本文へ反映できる情報があるかを表します。"
+        "answer_text には、本文反映に使う部分だけを自然な日本語で短く入れてください。"
+        "correction_pairs には、『XではなくY』『Xの間違い』のような置換ペアを入れてください。"
+        "雑談や挨拶だけで、議事録補正に使える情報がない場合のみ is_irrelevant=true にしてください。"
         "出力は必ずJSONオブジェクトのみ。"
-        '形式は {"category":"answer|correction|irrelevant","reason":"...","correction_pairs":[{"wrong":"...","correct":"..."}]} としてください。'
-        "correction_pairs は correction のときだけ必要です。"
+        '形式は {"is_irrelevant":true|false,"has_answer":true|false,"answer_text":"string","correction_pairs":[{"wrong":"...","correct":"..."}],"reason":"string"} としてください。'
     )
     try:
         resp = client.messages.create(
-            model=LINE_CLASSIFIER_MODEL,
-            max_tokens=600,
+            model=LINE_EXTRACTOR_MODEL,
+            max_tokens=800,
             temperature=0,
             system=system_prompt,
             messages=[
@@ -225,25 +264,26 @@ def _classify_line_message_with_claude(text: str, pending_context: dict | None) 
             ],
         )
         parsed = _extract_json_object(_extract_output_text_from_anthropic(resp))
-        category = str(parsed.get("category") or "").strip().lower()
-        if category not in {"answer", "correction", "irrelevant"}:
-            raise ValueError(f"invalid category: {category!r}")
-        raw_pairs = parsed.get("correction_pairs")
-        pairs: list[dict[str, str]] = []
-        if isinstance(raw_pairs, list):
-            for item in raw_pairs:
-                if not isinstance(item, dict):
-                    continue
-                wrong = str(item.get("wrong") or "").strip()
-                correct = str(item.get("correct") or "").strip()
-                if wrong and correct and wrong != correct:
-                    pairs.append({"wrong": wrong, "correct": correct})
-        parsed["category"] = category
-        parsed["correction_pairs"] = pairs
-        return parsed
+        has_answer = bool(parsed.get("has_answer"))
+        answer_text = str(parsed.get("answer_text") or "").strip()
+        pairs = _normalize_correction_pairs(parsed.get("correction_pairs"))
+        is_irrelevant = bool(parsed.get("is_irrelevant"))
+        if has_answer and not answer_text:
+            answer_text = str(text or "").strip()
+        if has_answer:
+            is_irrelevant = False
+        if pairs:
+            is_irrelevant = False
+        return {
+            "is_irrelevant": is_irrelevant,
+            "has_answer": has_answer,
+            "answer_text": answer_text,
+            "correction_pairs": pairs,
+            "reason": str(parsed.get("reason") or "").strip(),
+        }
     except Exception as e:
-        print(f"line_message_classification_fallback={e!r}")
-        fallback = _classify_line_message_heuristic(text, pending_context)
+        print(f"line_message_extraction_fallback={e!r}")
+        fallback = _extract_line_message_actions_heuristic(text, pending_context)
         fallback["reason"] = f"heuristic_fallback:{fallback.get('reason')}"
         return fallback
 
@@ -460,7 +500,12 @@ def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
     )
 
 
-def maybe_launch_auto_after_correction(job_id: str | None, save_ok: bool) -> None:
+def maybe_launch_auto_after_correction(
+    job_id: str | None,
+    save_ok: bool,
+    *,
+    incorporate_latest_answer: bool = False,
+) -> None:
     jid = str(job_id).strip() if job_id else ""
     cmd = [
         sys.executable,
@@ -469,6 +514,8 @@ def maybe_launch_auto_after_correction(job_id: str | None, save_ok: bool) -> Non
         jid,
         "--push",
     ]
+    if incorporate_latest_answer:
+        cmd.append("--incorporate-latest-answer")
     line_user_id = os.getenv("LINE_USER_ID", "").strip()
     line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if line_user_id and line_token:
@@ -723,7 +770,7 @@ def _mark_unknown_points_answered(
 
 
 def handle_user_input(text: str, user_id: str | None = None) -> str:
-    """LINEからのユーザー入力を answer / correction / irrelevant に分類して処理する。"""
+    """LINE メッセージから使える情報を抽出し、回答反映と辞書更新を必要に応じて両方行う。"""
     global state
 
     if "answers" not in state or not isinstance(state.get("answers"), dict):
@@ -744,18 +791,19 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         detail={"message_preview": text[:120]},
     )
     if job_id_for_save:
-        _record_job_visible_log(job_id_for_save, "Step 16: LINEメッセージ分類開始")
-    classification = _classify_line_message_with_claude(text, context)
-    category = str(classification.get("category") or "irrelevant").strip().lower()
-    reason = str(classification.get("reason") or "").strip()
-    pairs = classification.get("correction_pairs")
-    if not isinstance(pairs, list):
-        pairs = []
-    print("line_message_classification=")
+        _record_job_visible_log(job_id_for_save, "Step 16: LINEメッセージ情報抽出開始")
+    extraction = _extract_line_message_actions_with_claude(text, context)
+    reason = str(extraction.get("reason") or "").strip()
+    has_answer = bool(extraction.get("has_answer"))
+    answer_text = str(extraction.get("answer_text") or "").strip()
+    pairs = _normalize_correction_pairs(extraction.get("correction_pairs"))
+    is_irrelevant = bool(extraction.get("is_irrelevant"))
+    print("line_message_extraction=")
     print(
         {
-            "category": category,
+            "has_answer": has_answer,
             "reason": reason,
+            "is_irrelevant": is_irrelevant,
             "job_id": job_id_for_save,
             "question_id": question_id,
             "pair_count": len(pairs),
@@ -765,25 +813,40 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         job_id=job_id_for_save,
         phase="step_16_line_message_classify",
         status="success",
-        detail={"category": category, "reason": reason, "pair_count": len(pairs)},
+        detail={
+            "has_answer": has_answer,
+            "is_irrelevant": is_irrelevant,
+            "reason": reason,
+            "pair_count": len(pairs),
+        },
     )
     if job_id_for_save:
         _record_job_visible_log(
             job_id_for_save,
-            f"Step 16: LINEメッセージ分類完了 category={category} reason={reason or '-'}",
+            "Step 16: LINEメッセージ情報抽出完了 "
+            f"has_answer={has_answer} pair_count={len(pairs)} "
+            f"irrelevant={is_irrelevant} reason={reason or '-'}",
         )
 
-    if category == "answer":
-        if not qtext_for_save:
-            return "現在、回答待ちの質問はありません。"
-
-        # 要件：少なくとも question_id と answer_text が確認できるログ
+    if has_answer and not qtext_for_save:
+        has_answer = False
+        answer_text = ""
+    effective_answer_text = answer_text or str(text or "").strip()
+    answer_save_ok = False
+    answered_updates = 0
+    if has_answer and qtext_for_save:
         state["answers"][question_id] = text
         print("unknown_answer_received=")
-        print({"question_id": question_id, "answer_text": text, "job_id": job_id_for_save})
-        save_ok = persist_answer(
+        print(
+            {
+                "question_id": question_id,
+                "answer_text": effective_answer_text,
+                "job_id": job_id_for_save,
+            }
+        )
+        answer_save_ok = persist_answer(
             question_id=question_id,
-            answer_text=text,
+            answer_text=effective_answer_text,
             question_text=qtext_for_save,
             user_id=user_id,
             job_id=job_id_for_save,
@@ -791,90 +854,94 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         answered_updates = _mark_unknown_points_answered(
             job_id=job_id_for_save,
             selected_unknown=selected_unknown,
-            answer_text=text,
+            answer_text=effective_answer_text,
             question_id=question_id,
         )
         print(
             "unknown_points_answered_update="
             f"job_id={job_id_for_save!r} updated_count={answered_updates}"
         )
-        _update_job_phase(
-            job_id=job_id_for_save,
-            phase="step_17_resume_trigger",
-            status="running",
-            detail={"trigger": "answer", "answered_updates": answered_updates},
-        )
         if job_id_for_save:
             _record_job_visible_log(
                 job_id_for_save,
                 f"Step 17: 回答受信済みとして記録 answered_updates={answered_updates}",
             )
-        try:
-            maybe_launch_auto_after_answer(job_id_for_save, save_ok)
-        except Exception as e:
-            print(f"auto_after_answer_exception={e!r}")
-        _update_job_phase(
-            job_id=job_id_for_save,
-            phase="step_17_resume_trigger",
-            status="success",
-            detail={"trigger": "answer"},
-        )
-        state["pending_question"] = None
-        state["remote_pending"] = None
-        return "回答ありがとうございます。議事録への反映を再開します。"
 
-    if category == "correction":
-        normalized_pairs: list[dict[str, str]] = []
-        for item in pairs:
-            if not isinstance(item, dict):
-                continue
-            wrong = str(item.get("wrong") or "").strip()
-            correct = str(item.get("correct") or "").strip()
-            if wrong and correct and wrong != correct:
-                normalized_pairs.append({"wrong": wrong, "correct": correct})
-        if not normalized_pairs:
-            normalized_pairs = _heuristic_extract_correction_pairs(text)
-        if not normalized_pairs:
-            return "修正依頼として受け取りましたが、置き換え内容を読み取れませんでした。『AではなくB』の形で送ってください。"
-
-        added, updated = _merge_correction_pairs(normalized_pairs)
+    correction_save_ok = False
+    added = 0
+    updated = 0
+    if pairs:
+        added, updated = _merge_correction_pairs(pairs)
+        correction_save_ok = True
         print("correction_dict_update=")
         print(
             {
                 "job_id": job_id_for_save,
                 "added": added,
                 "updated": updated,
-                "pairs": normalized_pairs,
+                "pairs": pairs,
             }
+        )
+        if job_id_for_save:
+            _record_job_visible_log(
+                job_id_for_save,
+                f"Step 16: 修正依頼反映 correction_pairs={len(pairs)} added={added} updated={updated}",
+            )
+
+    if has_answer or pairs:
+        trigger = (
+            "answer_and_correction"
+            if has_answer and pairs
+            else "answer"
+            if has_answer
+            else "correction"
         )
         _update_job_phase(
             job_id=job_id_for_save,
             phase="step_17_resume_trigger",
             status="running",
-            detail={"trigger": "correction", "added": added, "updated": updated},
+            detail={
+                "trigger": trigger,
+                "answered_updates": answered_updates,
+                "correction_pairs": len(pairs),
+            },
         )
         if job_id_for_save:
-            _record_job_visible_log(
-                job_id_for_save,
-                f"Step 16: 修正依頼反映 correction_pairs={len(normalized_pairs)} added={added} updated={updated}",
-            )
-            _record_job_visible_log(job_id_for_save, "Step 17: Step⑦から再開します")
+            if has_answer and pairs:
+                _record_job_visible_log(job_id_for_save, "Step 17: 回答反映と修正辞書更新をあわせて再開します")
+            elif has_answer:
+                _record_job_visible_log(job_id_for_save, "Step 17: 回答反映を再開します")
+            else:
+                _record_job_visible_log(job_id_for_save, "Step 17: 修正辞書更新を反映して Step⑦ から再開します")
         try:
-            maybe_launch_auto_after_correction(job_id_for_save, save_ok=True)
+            if has_answer and pairs:
+                maybe_launch_auto_after_correction(
+                    job_id_for_save,
+                    save_ok=(answer_save_ok and correction_save_ok),
+                    incorporate_latest_answer=True,
+                )
+            elif has_answer:
+                maybe_launch_auto_after_answer(job_id_for_save, answer_save_ok)
+            else:
+                maybe_launch_auto_after_correction(job_id_for_save, save_ok=correction_save_ok)
         except Exception as e:
-            print(f"auto_after_correction_exception={e!r}")
+            print(f"auto_resume_after_message_exception={e!r}")
         _update_job_phase(
             job_id=job_id_for_save,
             phase="step_17_resume_trigger",
             status="success",
-            detail={"trigger": "correction"},
+            detail={"trigger": trigger},
         )
         state["pending_question"] = None
         state["remote_pending"] = None
+        if has_answer and pairs:
+            return "回答と修正依頼の両方を受け付けました。議事録への反映と再処理を開始します。"
+        if has_answer:
+            return "回答ありがとうございます。議事録への反映を再開します。"
         return "修正依頼を受け付けました。補正辞書へ反映し、再処理を開始します。"
 
     if job_id_for_save:
-        _record_job_visible_log(job_id_for_save, "Step 16: 無関係メッセージとして扱いました")
+        _record_job_visible_log(job_id_for_save, "Step 16: 補正に使える情報を抽出できませんでした")
         _update_job_phase(
             job_id=job_id_for_save,
             phase="step_14_suspend",
