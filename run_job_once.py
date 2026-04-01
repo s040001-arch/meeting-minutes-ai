@@ -37,6 +37,28 @@ def log_line(log_path: str, message: str) -> None:
         f.write(line + "\n")
 
 
+def append_visible_step_log(visible_log_path: str, message: str) -> None:
+    line = f"[{now_iso()}] {message}"
+    with open(visible_log_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def record_visible_progress(
+    *,
+    log_path: str,
+    visible_log_path: str,
+    job_id: str,
+    message: str,
+) -> None:
+    """
+    Railway stdout とローカル簡易ログ、Drive 上の処理ログを同時に更新する。
+    ユーザーが「今どこで止まっているか」をステップ単位で見やすくする用途。
+    """
+    log_line(log_path, f"visible_step: {message}")
+    append_visible_step_log(visible_log_path, message)
+    append_log_to_drive(job_id, message)
+
+
 def run_cmd(log_path: str, args: list[str], step: str) -> None:
     cmd_text = " ".join(args)
     log_line(log_path, f"{step}: start cmd={cmd_text}")
@@ -566,8 +588,11 @@ def main() -> None:
     job_dir = os.path.join(args.input_root, args.job_id)
     os.makedirs(job_dir, exist_ok=True)
     log_path = os.path.join(job_dir, "e2e_run_log.txt")
+    visible_log_path = os.path.join(job_dir, "processing_visible_log.txt")
     log_line(log_path, f"job_id={args.job_id}")
     init_job_progress(input_root=args.input_root, job_id=args.job_id)
+    current_phase = "start"
+    current_step_label = "初期化"
     if not args.no_relocate_input_subfolder:
         before = os.path.abspath(args.input_audio)
         try:
@@ -620,10 +645,24 @@ def main() -> None:
             log_line(log_path, f"seed_transcript_path={merged_path} chars={len(src_text)}")
         elif input_ext in AUDIO_EXTENSIONS:
             log_line(log_path, f"input_type=audio ext={input_ext}")
+            current_phase = "step_2_1_convert_wav"
+            current_step_label = "Step 2.1: WAV変換"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 2.1: WAV変換開始",
+            )
             run_cmd(
                 log_path,
                 [py, os.path.join(repo, "ffmpeg_convert_to_wav.py"), "--input", args.input_audio, "--output", wav_path],
                 "step_2_1_convert_wav",
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 2.1: WAV変換完了",
             )
             split_cmd = [
                 py,
@@ -637,13 +676,35 @@ def main() -> None:
             ]
             if args.max_chunks is not None:
                 split_cmd.extend(["--max-chunks", str(args.max_chunks)])
+            current_phase = "step_2_2_split_chunks"
+            current_step_label = "Step 2.2: チャンク分割"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 2.2: チャンク分割開始 chunk_seconds={args.chunk_seconds}",
+            )
             run_cmd(log_path, split_cmd, "step_2_2_split_chunks")
 
             chunk_files = sorted(Path(chunks_dir).glob("chunk_*.wav"))
             if not chunk_files:
                 raise RuntimeError(f"no chunk files generated: {chunks_dir}")
             log_line(log_path, f"chunk_count={len(chunk_files)}")
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 2.2: チャンク分割完了 count={len(chunk_files)}",
+            )
 
+            current_phase = "step_3_transcribe"
+            current_step_label = "Step 3: 文字起こし"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 3: 文字起こし開始 chunks={len(chunk_files)}",
+            )
             for i, chunk_path in enumerate(chunk_files):
                 chunk_id = chunk_path.stem
                 start_sec = i * args.chunk_seconds
@@ -676,11 +737,31 @@ def main() -> None:
                     ],
                     f"step_3_transcribe_{chunk_id}",
                 )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 3: 文字起こし完了 chunks={len(chunk_files)}",
+            )
 
+            current_phase = "step_4_1_merge_chunks"
+            current_step_label = "Step 4.1: 文字起こし結合"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 4.1: 文字起こし結合開始",
+            )
             run_cmd(
                 log_path,
                 [py, os.path.join(repo, "transcription_merge_chunks.py"), "--job-id", args.job_id, "--input-root", args.input_root, "--output", merged_path],
                 "step_4_1_merge_chunks",
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 4.1: 文字起こし結合完了",
             )
         else:
             raise ValueError(f"unsupported input extension: {input_ext}")
@@ -701,11 +782,18 @@ def main() -> None:
             skip_export_docs=args.skip_export_docs,
         )
         save_hub_folder_ids_from_doc(hub_meta_path, log_path)
-        append_log_to_drive(
-            args.job_id,
-            f"Step 4.0: 処理開始 file={Path(args.input_audio).name} mode={'txt' if input_ext in TEXT_EXTENSIONS else 'audio'}",
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=(
+                f"Step 4.0: 処理開始 file={Path(args.input_audio).name} "
+                f"mode={'txt' if input_ext in TEXT_EXTENSIONS else 'audio'}"
+            ),
         )
 
+        current_phase = "step_4_2_mechanical_correct"
+        current_step_label = "Step 4.2: 機械補正"
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
@@ -714,6 +802,12 @@ def main() -> None:
             detail={"input_ext": input_ext},
         )
         update_doc_title_from_hub(hub_meta_path, f"【機械補正中】{stem}", log_path)
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 4.2: 機械補正開始",
+        )
         run_cmd(
             log_path,
             [py, os.path.join(repo, "mechanical_correct_text.py"), "--input", merged_path, "--output", mechanical_path],
@@ -739,9 +833,11 @@ def main() -> None:
             raw_text = f.read()
         with open(mechanical_path, "r", encoding="utf-8") as f:
             corrected_text = f.read()
-        append_log_to_drive(
-            args.job_id,
-            f"Step 4.2: 機械補正完了 input={len(raw_text)} → output={len(corrected_text)}",
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 4.2: 機械補正完了 input={len(raw_text)} → output={len(corrected_text)}",
         )
 
         # --- Step 4.3: AI correction (full-text, Claude) ---
@@ -760,8 +856,15 @@ def main() -> None:
             status="running",
             detail={"chars": len(mechanical_text), "mode": "full_text_claude"},
         )
+        current_phase = "step_4_3_ai_correct"
+        current_step_label = "Step 4.3: AI補正"
         update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{stem}", log_path)
-        append_log_to_drive(args.job_id, f"Step 4.3: AI補正開始 input={len(mechanical_text)}")
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 4.3: AI補正開始 input={len(mechanical_text)}",
+        )
 
         PHASE_LABELS = {
             "masking": "マスキング",
@@ -809,21 +912,33 @@ def main() -> None:
             if isinstance(ai_unknown_points_raw, list)
             else []
         )
-        append_log_to_drive(
-            args.job_id,
-            f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
         )
         _save_unknown_points_file(unknowns_path, ai_unknown_points)
         log_line(
             log_path,
             f"step_4_35_ai_unknowns: saved path={unknowns_path} count={len(ai_unknown_points)}",
         )
-        append_log_to_drive(
-            args.job_id,
-            f"Step 4.35: AI不明点検出完了 count={len(ai_unknown_points)}",
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 4.35: AI不明点検出完了 count={len(ai_unknown_points)}",
         )
         update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
 
+        current_phase = "step_4_4_extract_unknowns"
+        current_step_label = "Step 4.4: ハイブリッド不明点検出"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 4.4: ハイブリッド不明点検出開始",
+        )
         run_cmd(
             log_path,
             [py, os.path.join(repo, "extract_unknown_points.py"), "--input", ai_path, "--output", regex_unknowns_path],
@@ -841,9 +956,11 @@ def main() -> None:
             f"ai_unknowns={len(ai_unknown_points)} regex_unknowns={len(regex_unknown_points)} "
             f"total={len(merged_unknown_points)} saved={unknowns_path}",
         )
-        append_log_to_drive(
-            args.job_id,
-            f"Step 4.4: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 4.4: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
         )
         update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
         qcycle_cmd = [
@@ -875,6 +992,14 @@ def main() -> None:
             status="running",
             detail={"send_line": ("--send-line" in qcycle_cmd)},
         )
+        current_phase = "step_5_question_cycle_prepare"
+        current_step_label = "Step 5: 質問選定"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 5: 質問選定開始",
+        )
         run_cmd(log_path, qcycle_cmd, "step_5_question_cycle_prepare")
         update_job_progress(
             input_root=args.input_root,
@@ -883,6 +1008,12 @@ def main() -> None:
             status="success",
             detail={"question_sent": bool(qcycle_cmd and "--send-line" in qcycle_cmd)},
         )
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 5: 質問選定完了",
+        )
 
         line_answers = os.path.join("data", "line_answers.json")
         if os.path.isfile(line_answers):
@@ -890,12 +1021,26 @@ def main() -> None:
                 with open(line_answers, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
+                    current_phase = "step_5_4_recorrect_from_line_answer"
+                    current_step_label = "Step 5.4: 回答反映"
+                    record_visible_progress(
+                        log_path=log_path,
+                        visible_log_path=visible_log_path,
+                        job_id=args.job_id,
+                        message="Step 5.4: 回答反映開始",
+                    )
                     run_cmd_with_timeout_retry(
                         log_path,
                         [py, os.path.join(repo, "recorrect_from_line_answer.py"), "--job-id", args.job_id],
                         "step_5_4_recorrect_from_line_answer",
                         timeout_sec=args.step_5_4_timeout_sec,
                         retry_count=args.step_5_4_retry_count,
+                    )
+                    record_visible_progress(
+                        log_path=log_path,
+                        visible_log_path=visible_log_path,
+                        job_id=args.job_id,
+                        message="Step 5.4: 回答反映完了",
                     )
                 else:
                     ensure_after_qa_exists(job_dir, log_path)
@@ -918,7 +1063,15 @@ def main() -> None:
             status="running",
             detail={},
         )
+        current_phase = "step_6_1_generate_minutes_transcript"
+        current_step_label = "Step 6.1: 議事録生成"
         update_doc_title_from_hub(hub_meta_path, f"【議事録生成中】{stem}", log_path)
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 6.1: 議事録生成開始",
+        )
         run_cmd(
             log_path,
             [py, os.path.join(repo, "generate_minutes_transcript.py"), "--job-id", args.job_id, "--input-root", args.input_root],
@@ -931,13 +1084,26 @@ def main() -> None:
             status="success",
             detail={},
         )
-        append_log_to_drive(args.job_id, "Step 6.1: 議事録生成完了")
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 6.1: 議事録生成完了",
+        )
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
             phase="step_6_2_generate_other_sections",
             status="running",
             detail={},
+        )
+        current_phase = "step_6_2_generate_other_sections"
+        current_step_label = "Step 6.2: 議事録整形"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 6.2: 議事録整形開始",
         )
         run_cmd(
             log_path,
@@ -951,8 +1117,16 @@ def main() -> None:
             status="success",
             detail={},
         )
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 6.2: 議事録整形完了",
+        )
 
         if args.skip_export_docs:
+            current_phase = "step_6_3_export_docs"
+            current_step_label = "Step 6.3: Googleドキュメント出力"
             log_line(log_path, "step_6_3_export_docs: skipped (--skip-export-docs)")
             update_job_progress(
                 input_root=args.input_root,
@@ -961,6 +1135,12 @@ def main() -> None:
                 status="skipped",
                 detail={"reason": "flag --skip-export-docs"},
             )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 6.3: Googleドキュメント出力スキップ",
+            )
         else:
             update_job_progress(
                 input_root=args.input_root,
@@ -968,6 +1148,14 @@ def main() -> None:
                 phase="step_6_3_export_docs",
                 status="running",
                 detail={"docs_push": bool(args.docs_push)},
+            )
+            current_phase = "step_6_3_export_docs"
+            current_step_label = "Step 6.3: Googleドキュメント出力"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 6.3: Googleドキュメント出力開始",
             )
             docs_cmd = [
                 py,
@@ -1012,16 +1200,42 @@ def main() -> None:
                 status="success",
                 detail={"docs_cmd": " ".join(docs_cmd[:6]) + " ..."},
             )
-            append_log_to_drive(args.job_id, "Step 6.3: Googleドキュメント出力完了")
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="Step 6.3: Googleドキュメント出力完了",
+            )
 
         log_line(log_path, "pipeline_status=success")
-        append_log_to_drive(args.job_id, "処理完了")
+        current_phase = "done"
+        current_step_label = "処理完了"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="処理完了",
+        )
         print(f"job_id={args.job_id}")
         print(f"log={log_path}")
+        print(f"visible_log={visible_log_path}")
         print("status=success")
         finalize_job_progress(input_root=args.input_root, job_id=args.job_id, overall_status="success")
     except Exception as e:
-        append_log_to_drive(args.job_id, f"エラー発生: {str(e)}")
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase=current_phase,
+            status="error",
+            detail={"step_label": current_step_label, "error": str(e)},
+            overall_status="error",
+        )
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"{current_step_label}でエラー: {str(e)}",
+        )
         raise
 
 

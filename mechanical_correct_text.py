@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 
@@ -11,6 +12,7 @@ import re
 # - REMOVE targets: えー / あー / うーん / お疲れ様です / なんか / ええ
 # - NEVER remove: はい / ま
 FILLERS_TO_REMOVE = ["えー", "あー", "うーん", "お疲れ様です", "なんか", "ええ"]
+DEFAULT_CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
 
 
 def normalize_punctuation(text: str) -> str:
@@ -139,9 +141,40 @@ def remove_fillers(text: str) -> str:
     return s
 
 
-def apply_mechanical_corrections(text: str) -> str:
+def load_correction_dict(path: str) -> dict[str, str]:
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, str] = {}
+        for k, v in data.items():
+            kk = str(k).strip()
+            vv = str(v).strip()
+            if kk and vv:
+                out[kk] = vv
+        return out
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def apply_dictionary_replacements(text: str, replacements: dict[str, str]) -> str:
+    s = text
+    for wrong, correct in replacements.items():
+        s = s.replace(wrong, correct)
+    return s
+
+
+def apply_mechanical_corrections(
+    text: str,
+    correction_dict_path: str = DEFAULT_CORRECTION_DICT_PATH,
+) -> str:
+    replacements = load_correction_dict(correction_dict_path)
+    s = apply_dictionary_replacements(text, replacements)
     # Filler rules first (need line/sentence-start visibility)
-    s = remove_fillers(text)
+    s = remove_fillers(s)
     # Newline normalization last (user-specified output format)
     s = normalize_spaces_and_newlines(s)
     return s
@@ -163,6 +196,11 @@ def main() -> None:
         default="utf-8",
         help="出力文字コード（デフォルト: utf-8、utf-8-sigはBOM付き）",
     )
+    parser.add_argument(
+        "--correction-dict",
+        default=DEFAULT_CORRECTION_DICT_PATH,
+        help="補正辞書JSON（デフォルト: data/correction_dict.json）",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -171,7 +209,8 @@ def main() -> None:
     with open(args.input, "r", encoding="utf-8") as f:
         original = f.read()
 
-    corrected = apply_mechanical_corrections(original)
+    replacements = load_correction_dict(args.correction_dict)
+    corrected = apply_mechanical_corrections(original, correction_dict_path=args.correction_dict)
 
     output_path = args.output
     if not output_path:
@@ -187,6 +226,8 @@ def main() -> None:
     print(f"output_encoding={args.output_encoding}")
     print(f"before_length={len(original)}")
     print(f"after_length={len(corrected)}")
+    print(f"correction_dict={args.correction_dict}")
+    print(f"correction_dict_entries={len(replacements)}")
     print("rules=normalize_spaces_and_newlines,normalize_punctuation,remove_fillers")
 
 

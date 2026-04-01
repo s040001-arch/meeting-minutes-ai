@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime
 
+import anthropic
 import requests
 
 from repo_env import load_dotenv_local
@@ -22,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Request
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 
-from progress_tracker import read_job_progress, read_last_job_progress
+from progress_tracker import read_job_progress, read_last_job_progress, update_job_progress
 
 app = FastAPI()
 
@@ -43,6 +44,9 @@ _AUTO_AFTER_ANSWER_STARTING_STALE_SEC = 120.0
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _RUN_DOCS_HUB_E2E = os.path.join(_REPO_ROOT, "run_docs_hub_e2e.py")
+_RUN_RESUME_FROM_STEP7 = os.path.join(_REPO_ROOT, "run_resume_from_step7.py")
+CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
+LINE_CLASSIFIER_MODEL = "claude-sonnet-4-20250514"
 
 state = {
     # 質問送信は行わず、回答受付だけ行う前提のため
@@ -57,6 +61,233 @@ state = {
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
+
+def _job_visible_log_path(job_id: str | None) -> str | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    return os.path.join("data", "transcriptions", jid, "processing_visible_log.txt")
+
+
+def _record_job_visible_log(job_id: str | None, message: str) -> None:
+    ts = now_iso()
+    line = f"[{ts}] {message}"
+    print(line)
+    path = _job_visible_log_path(job_id)
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as e:
+            print(f"job_visible_log_write_failed={e!r}")
+    if job_id:
+        try:
+            from run_job_once import append_log_to_drive
+
+            append_log_to_drive(str(job_id), message)
+        except Exception as e:
+            print(f"job_visible_log_drive_append_failed={e!r}")
+
+
+def _update_job_phase(
+    *,
+    job_id: str | None,
+    phase: str,
+    status: str,
+    detail: dict | None = None,
+    overall_status: str | None = None,
+) -> None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return
+    try:
+        update_job_progress(
+            input_root="data/transcriptions",
+            job_id=jid,
+            phase=phase,
+            status=status,
+            detail=detail or {},
+            overall_status=overall_status,
+        )
+    except Exception as e:
+        print(f"update_job_phase_failed={e!r}")
+
+
+def _extract_json_object(text: str) -> dict:
+    s = (text or "").strip()
+    start = s.find("{")
+    end = s.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("json object not found in text")
+    payload = json.loads(s[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("parsed JSON is not an object")
+    return payload
+
+
+def _extract_output_text_from_anthropic(resp) -> str:
+    texts: list[str] = []
+    for block in getattr(resp, "content", []) or []:
+        if getattr(block, "type", "") == "text":
+            texts.append(str(getattr(block, "text", "") or ""))
+    return "\n".join(t for t in texts if t).strip()
+
+
+def _resolve_active_job_id_fallback() -> str | None:
+    ctx = get_pending_context_from_pipeline()
+    jid = str(ctx.get("job_id") or "").strip()
+    if jid:
+        return jid
+    latest = read_last_job_progress() or {}
+    jid = str(latest.get("job_id") or "").strip()
+    return jid or None
+
+
+def _heuristic_extract_correction_pairs(text: str) -> list[dict[str, str]]:
+    patterns = [
+        r"(?P<wrong>.+?)じゃなくて(?P<correct>.+)",
+        r"(?P<wrong>.+?)ではなく(?P<correct>.+)",
+        r"(?P<wrong>.+?)の間違いで(?P<correct>.+)",
+        r"(?P<wrong>.+?)(?:→|->|=>)(?P<correct>.+)",
+        r"(?P<wrong>.+?)は(?P<correct>.+?)です",
+    ]
+    pairs: list[dict[str, str]] = []
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        wrong = str(m.group("wrong") or "").strip(" 「」\"'。.,、")
+        correct = str(m.group("correct") or "").strip(" 「」\"'。.,、")
+        if wrong and correct and wrong != correct:
+            pairs.append({"wrong": wrong, "correct": correct})
+            break
+    return pairs
+
+
+def _classify_line_message_heuristic(text: str, pending_context: dict | None) -> dict:
+    pairs = _heuristic_extract_correction_pairs(text)
+    if pairs:
+        return {
+            "category": "correction",
+            "reason": "heuristic_correction_pattern",
+            "correction_pairs": pairs,
+        }
+    if pending_context and str((pending_context or {}).get("question_text") or "").strip():
+        return {
+            "category": "answer",
+            "reason": "pending_question_exists",
+            "correction_pairs": [],
+        }
+    return {
+        "category": "irrelevant",
+        "reason": "no_pending_question_and_no_correction_pattern",
+        "correction_pairs": [],
+    }
+
+
+def _classify_line_message_with_claude(text: str, pending_context: dict | None) -> dict:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return _classify_line_message_heuristic(text, pending_context)
+    client = anthropic.Anthropic(api_key=api_key)
+    compact_ctx = {
+        "has_pending_question": bool(
+            pending_context and str((pending_context or {}).get("question_text") or "").strip()
+        ),
+        "job_id": str((pending_context or {}).get("job_id") or "").strip(),
+        "question_id": str((pending_context or {}).get("question_id") or "").strip(),
+        "question_text": str((pending_context or {}).get("question_text") or "").strip(),
+        "selected_unknown": (pending_context or {}).get("selected_unknown"),
+        "message_text": text,
+    }
+    system_prompt = (
+        "あなたは議事録補正システムのLINEメッセージ分類器です。"
+        "受信メッセージを answer / correction / irrelevant の3種類に必ず分類してください。"
+        "answer は直前の質問に対する返答です。"
+        "correction は『XではなくY』『Xの間違い』のような手動修正指示です。"
+        "irrelevant は議事録補正と無関係な雑談・挨拶です。"
+        "出力は必ずJSONオブジェクトのみ。"
+        '形式は {"category":"answer|correction|irrelevant","reason":"...","correction_pairs":[{"wrong":"...","correct":"..."}]} としてください。'
+        "correction_pairs は correction のときだけ必要です。"
+    )
+    try:
+        resp = client.messages.create(
+            model=LINE_CLASSIFIER_MODEL,
+            max_tokens=600,
+            temperature=0,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": json.dumps(compact_ctx, ensure_ascii=False),
+                }
+            ],
+        )
+        parsed = _extract_json_object(_extract_output_text_from_anthropic(resp))
+        category = str(parsed.get("category") or "").strip().lower()
+        if category not in {"answer", "correction", "irrelevant"}:
+            raise ValueError(f"invalid category: {category!r}")
+        raw_pairs = parsed.get("correction_pairs")
+        pairs: list[dict[str, str]] = []
+        if isinstance(raw_pairs, list):
+            for item in raw_pairs:
+                if not isinstance(item, dict):
+                    continue
+                wrong = str(item.get("wrong") or "").strip()
+                correct = str(item.get("correct") or "").strip()
+                if wrong and correct and wrong != correct:
+                    pairs.append({"wrong": wrong, "correct": correct})
+        parsed["category"] = category
+        parsed["correction_pairs"] = pairs
+        return parsed
+    except Exception as e:
+        print(f"line_message_classification_fallback={e!r}")
+        fallback = _classify_line_message_heuristic(text, pending_context)
+        fallback["reason"] = f"heuristic_fallback:{fallback.get('reason')}"
+        return fallback
+
+
+def _load_correction_dict() -> dict[str, str]:
+    if not os.path.isfile(CORRECTION_DICT_PATH):
+        return {}
+    try:
+        with open(CORRECTION_DICT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(k).strip(): str(v).strip()
+            for k, v in data.items()
+            if str(k).strip() and str(v).strip()
+        }
+    except Exception as e:
+        print(f"load_correction_dict_failed={e!r}")
+        return {}
+
+
+def _save_correction_dict(data: dict[str, str]) -> None:
+    os.makedirs(os.path.dirname(CORRECTION_DICT_PATH) or ".", exist_ok=True)
+    with open(CORRECTION_DICT_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _merge_correction_pairs(pairs: list[dict[str, str]]) -> tuple[int, int]:
+    current = _load_correction_dict()
+    added = 0
+    updated = 0
+    for item in pairs:
+        wrong = str(item.get("wrong") or "").strip()
+        correct = str(item.get("correct") or "").strip()
+        if not wrong or not correct or wrong == correct:
+            continue
+        if wrong not in current:
+            added += 1
+        elif current[wrong] != correct:
+            updated += 1
+        current[wrong] = correct
+    _save_correction_dict(current)
+    return added, updated
 
 def _env_auto_after_answer_enabled() -> bool:
     v = os.getenv(AUTO_AFTER_ANSWER_ENV, "").strip().lower()
@@ -155,27 +386,60 @@ def _wait_child_and_release_lock(proc: subprocess.Popen, lock_path: str) -> None
         _release_lock_path(lock_path)
 
 
-def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
+def _launch_resume_subprocess(
+    *,
+    job_id: str | None,
+    save_ok: bool,
+    cmd: list[str],
+    launch_label: str,
+) -> None:
     enabled = _env_auto_after_answer_enabled()
     jid = str(job_id).strip() if job_id else ""
     print(
-        f"auto_after_answer_enabled={enabled} job_id={jid!r} save_ok={save_ok}"
+        f"{launch_label}_enabled={enabled} job_id={jid!r} save_ok={save_ok}"
     )
     if not enabled:
-        print("auto_after_answer_skipped reason=flag_off")
+        print(f"{launch_label}_skipped reason=flag_off")
         return
     if not save_ok:
-        print("auto_after_answer_skipped reason=save_failed")
+        print(f"{launch_label}_skipped reason=save_failed")
         return
     if not jid:
-        print("auto_after_answer_skipped reason=job_id_missing")
+        print(f"{launch_label}_skipped reason=job_id_missing")
         return
 
     lock_path = _try_acquire_auto_after_answer_lock(jid)
     if lock_path is None:
-        print(f"auto_after_answer_skipped reason=lock_exists job_id={jid!r}")
+        print(f"{launch_label}_skipped reason=lock_exists job_id={jid!r}")
         return
 
+    print(
+        f"{launch_label}_cmd="
+        f"{' '.join(cmd)} cwd={_REPO_ROOT!r}"
+    )
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=_REPO_ROOT,
+            close_fds=True,
+        )
+    except Exception as e:
+        print(f"{launch_label}_skipped reason=launch_error err={e!r}")
+        _release_lock_path(lock_path)
+        return
+
+    _write_lock_child_pid(lock_path, proc.pid, jid)
+    threading.Thread(
+        target=_wait_child_and_release_lock,
+        args=(proc, lock_path),
+        daemon=True,
+    ).start()
+    print(f"{launch_label}_launched job_id={jid!r} pid={proc.pid}")
+
+
+def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
+    jid = str(job_id).strip() if job_id else ""
     cmd = [
         sys.executable,
         _RUN_DOCS_HUB_E2E,
@@ -188,31 +452,33 @@ def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
     line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if line_user_id and line_token:
         cmd.append("--send-line")
-    print(
-        "auto_after_answer_cmd="
-        f"{sys.executable} run_docs_hub_e2e.py "
-        f"--job-id {jid!r} --after-answer --push "
-        f"{'--send-line ' if ('--send-line' in cmd) else ''}cwd={_REPO_ROOT!r}"
+    _launch_resume_subprocess(
+        job_id=jid,
+        save_ok=save_ok,
+        cmd=cmd,
+        launch_label="auto_after_answer",
     )
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=_REPO_ROOT,
-            close_fds=True,
-        )
-    except Exception as e:
-        print(f"auto_after_answer_skipped reason=launch_error err={e!r}")
-        _release_lock_path(lock_path)
-        return
 
-    _write_lock_child_pid(lock_path, proc.pid, jid)
-    threading.Thread(
-        target=_wait_child_and_release_lock,
-        args=(proc, lock_path),
-        daemon=True,
-    ).start()
-    print(f"auto_after_answer_launched job_id={jid!r} pid={proc.pid}")
+def maybe_launch_auto_after_correction(job_id: str | None, save_ok: bool) -> None:
+    jid = str(job_id).strip() if job_id else ""
+    cmd = [
+        sys.executable,
+        _RUN_RESUME_FROM_STEP7,
+        "--job-id",
+        jid,
+        "--push",
+    ]
+    line_user_id = os.getenv("LINE_USER_ID", "").strip()
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if line_user_id and line_token:
+        cmd.append("--send-line")
+    _launch_resume_subprocess(
+        job_id=jid,
+        save_ok=save_ok,
+        cmd=cmd,
+        launch_label="auto_after_correction",
+    )
 
 
 def save_answer_to_json(
@@ -351,6 +617,44 @@ def persist_answer(
     return ok
 
 
+def _resolve_line_context() -> dict:
+    ctx = get_pending_context_from_pipeline()
+    pending = state.get("pending_question")
+    if isinstance(ctx, dict) and str(ctx.get("job_id") or "").strip():
+        selected_unknown = ctx.get("selected_unknown")
+        return {
+            "source": "pipeline_context",
+            "question_id": str(ctx.get("question_id") or "unknown"),
+            "question_text": str(ctx.get("question_text") or "").strip(),
+            "job_id": str(ctx.get("job_id") or "").strip() or None,
+            "selected_unknown": selected_unknown if isinstance(selected_unknown, dict) else None,
+        }
+    if pending is not None:
+        pending_dict = pending if isinstance(pending, dict) else {}
+        pending_file = load_line_pending_context()
+        question_id = str(pending_dict.get("question_id") or "unknown")
+        if pending_file.get("question_id"):
+            question_id = str(pending_file.get("question_id"))
+        question_text = pending_dict.get("question_text")
+        if isinstance(pending_file.get("question_text"), str) and pending_file["question_text"].strip():
+            question_text = pending_file["question_text"].strip()
+        selected_unknown = pending_file.get("selected_unknown")
+        return {
+            "source": "local_pending_state",
+            "question_id": question_id,
+            "question_text": str(question_text or "").strip(),
+            "job_id": str(pending_file.get("job_id") or "").strip() or None,
+            "selected_unknown": selected_unknown if isinstance(selected_unknown, dict) else None,
+        }
+    return {
+        "source": "fallback_active_job",
+        "question_id": "unknown",
+        "question_text": "",
+        "job_id": _resolve_active_job_id_fallback(),
+        "selected_unknown": None,
+    }
+
+
 def _unknown_points_path(job_id: str | None) -> str | None:
     jid = str(job_id or "").strip()
     if not jid:
@@ -419,67 +723,165 @@ def _mark_unknown_points_answered(
 
 
 def handle_user_input(text: str, user_id: str | None = None) -> str:
-    """LINEからのユーザー入力の入口。pending question 1件に対する回答受付だけ行う。"""
+    """LINEからのユーザー入力を answer / correction / irrelevant に分類して処理する。"""
     global state
 
     if "answers" not in state or not isinstance(state.get("answers"), dict):
         state["answers"] = {}
 
-    ctx = get_pending_context_from_pipeline()
-    pending = state.get("pending_question")
+    context = _resolve_line_context()
+    question_id = str(context.get("question_id") or "unknown")
+    qtext_for_save = str(context.get("question_text") or "").strip()
+    job_id_for_save = str(context.get("job_id") or "").strip() or None
+    selected_unknown = context.get("selected_unknown")
+    if not isinstance(selected_unknown, dict):
+        selected_unknown = None
 
-    if ctx.get("job_id"):
-        question_id = str(ctx.get("question_id") or "unknown")
-        qtext_for_save = str(ctx.get("question_text") or "").strip()
-        job_id_for_save = str(ctx.get("job_id") or "").strip() or None
-        selected_unknown = ctx.get("selected_unknown")
-        if not isinstance(selected_unknown, dict):
-            selected_unknown = None
-    elif pending is not None:
-        pending_dict = pending if isinstance(pending, dict) else {}
-        question_id = str(pending_dict.get("question_id") or "unknown")
-        pending_file = load_line_pending_context()
-        if pending_file.get("question_id"):
-            question_id = str(pending_file.get("question_id"))
-        qtext_for_save = pending_dict.get("question_text")
-        if isinstance(pending_file.get("question_text"), str) and pending_file["question_text"].strip():
-            qtext_for_save = pending_file["question_text"].strip()
-        job_id_for_save = str(pending_file.get("job_id") or "").strip() or None
-        selected_unknown = pending_file.get("selected_unknown")
-        if not isinstance(selected_unknown, dict):
-            selected_unknown = None
-    else:
-        return "現在、回答待ちの質問はありません。"
-
-    # 要件：少なくとも question_id と answer_text が確認できるログ
-    state["answers"][question_id] = text
-    print("unknown_answer_received=")
-    print({"question_id": question_id, "answer_text": text, "job_id": job_id_for_save})
-    save_ok = persist_answer(
-        question_id=question_id,
-        answer_text=text,
-        question_text=qtext_for_save,
-        user_id=user_id,
+    _update_job_phase(
         job_id=job_id_for_save,
+        phase="step_16_line_message_classify",
+        status="running",
+        detail={"message_preview": text[:120]},
     )
-    answered_updates = _mark_unknown_points_answered(
-        job_id=job_id_for_save,
-        selected_unknown=selected_unknown,
-        answer_text=text,
-        question_id=question_id,
-    )
+    if job_id_for_save:
+        _record_job_visible_log(job_id_for_save, "Step 16: LINEメッセージ分類開始")
+    classification = _classify_line_message_with_claude(text, context)
+    category = str(classification.get("category") or "irrelevant").strip().lower()
+    reason = str(classification.get("reason") or "").strip()
+    pairs = classification.get("correction_pairs")
+    if not isinstance(pairs, list):
+        pairs = []
+    print("line_message_classification=")
     print(
-        "unknown_points_answered_update="
-        f"job_id={job_id_for_save!r} updated_count={answered_updates}"
+        {
+            "category": category,
+            "reason": reason,
+            "job_id": job_id_for_save,
+            "question_id": question_id,
+            "pair_count": len(pairs),
+        }
     )
-    try:
-        maybe_launch_auto_after_answer(job_id_for_save, save_ok)
-    except Exception as e:
-        print(f"auto_after_answer_exception={e!r}")
-    state["pending_question"] = None
-    state["remote_pending"] = None
+    _update_job_phase(
+        job_id=job_id_for_save,
+        phase="step_16_line_message_classify",
+        status="success",
+        detail={"category": category, "reason": reason, "pair_count": len(pairs)},
+    )
+    if job_id_for_save:
+        _record_job_visible_log(
+            job_id_for_save,
+            f"Step 16: LINEメッセージ分類完了 category={category} reason={reason or '-'}",
+        )
 
-    return "ありがとうございます"
+    if category == "answer":
+        if not qtext_for_save:
+            return "現在、回答待ちの質問はありません。"
+
+        # 要件：少なくとも question_id と answer_text が確認できるログ
+        state["answers"][question_id] = text
+        print("unknown_answer_received=")
+        print({"question_id": question_id, "answer_text": text, "job_id": job_id_for_save})
+        save_ok = persist_answer(
+            question_id=question_id,
+            answer_text=text,
+            question_text=qtext_for_save,
+            user_id=user_id,
+            job_id=job_id_for_save,
+        )
+        answered_updates = _mark_unknown_points_answered(
+            job_id=job_id_for_save,
+            selected_unknown=selected_unknown,
+            answer_text=text,
+            question_id=question_id,
+        )
+        print(
+            "unknown_points_answered_update="
+            f"job_id={job_id_for_save!r} updated_count={answered_updates}"
+        )
+        _update_job_phase(
+            job_id=job_id_for_save,
+            phase="step_17_resume_trigger",
+            status="running",
+            detail={"trigger": "answer", "answered_updates": answered_updates},
+        )
+        if job_id_for_save:
+            _record_job_visible_log(
+                job_id_for_save,
+                f"Step 17: 回答受信済みとして記録 answered_updates={answered_updates}",
+            )
+        try:
+            maybe_launch_auto_after_answer(job_id_for_save, save_ok)
+        except Exception as e:
+            print(f"auto_after_answer_exception={e!r}")
+        _update_job_phase(
+            job_id=job_id_for_save,
+            phase="step_17_resume_trigger",
+            status="success",
+            detail={"trigger": "answer"},
+        )
+        state["pending_question"] = None
+        state["remote_pending"] = None
+        return "回答ありがとうございます。議事録への反映を再開します。"
+
+    if category == "correction":
+        normalized_pairs: list[dict[str, str]] = []
+        for item in pairs:
+            if not isinstance(item, dict):
+                continue
+            wrong = str(item.get("wrong") or "").strip()
+            correct = str(item.get("correct") or "").strip()
+            if wrong and correct and wrong != correct:
+                normalized_pairs.append({"wrong": wrong, "correct": correct})
+        if not normalized_pairs:
+            normalized_pairs = _heuristic_extract_correction_pairs(text)
+        if not normalized_pairs:
+            return "修正依頼として受け取りましたが、置き換え内容を読み取れませんでした。『AではなくB』の形で送ってください。"
+
+        added, updated = _merge_correction_pairs(normalized_pairs)
+        print("correction_dict_update=")
+        print(
+            {
+                "job_id": job_id_for_save,
+                "added": added,
+                "updated": updated,
+                "pairs": normalized_pairs,
+            }
+        )
+        _update_job_phase(
+            job_id=job_id_for_save,
+            phase="step_17_resume_trigger",
+            status="running",
+            detail={"trigger": "correction", "added": added, "updated": updated},
+        )
+        if job_id_for_save:
+            _record_job_visible_log(
+                job_id_for_save,
+                f"Step 16: 修正依頼反映 correction_pairs={len(normalized_pairs)} added={added} updated={updated}",
+            )
+            _record_job_visible_log(job_id_for_save, "Step 17: Step⑦から再開します")
+        try:
+            maybe_launch_auto_after_correction(job_id_for_save, save_ok=True)
+        except Exception as e:
+            print(f"auto_after_correction_exception={e!r}")
+        _update_job_phase(
+            job_id=job_id_for_save,
+            phase="step_17_resume_trigger",
+            status="success",
+            detail={"trigger": "correction"},
+        )
+        state["pending_question"] = None
+        state["remote_pending"] = None
+        return "修正依頼を受け付けました。補正辞書へ反映し、再処理を開始します。"
+
+    if job_id_for_save:
+        _record_job_visible_log(job_id_for_save, "Step 16: 無関係メッセージとして扱いました")
+        _update_job_phase(
+            job_id=job_id_for_save,
+            phase="step_14_suspend",
+            status="running",
+            detail={"last_ignored_message_preview": text[:120]},
+        )
+    return "今回は議事録補正とは関係ないメッセージとして扱いました。直前の質問への回答か、修正依頼を送ってください。"
 
 
 def _maybe_launch_drive_worker_from_app_startup() -> None:
