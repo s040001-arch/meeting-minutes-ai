@@ -2,23 +2,13 @@ import argparse
 import os
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
-
-
-def resolve_transcript_path(job_id: str, input_path: str | None, input_root: str) -> str:
-    if input_path:
-        return input_path
-    job_dir = os.path.join(input_root, job_id)
-    for name in ("merged_transcript_ai.txt", "merged_transcript.txt"):
-        p = os.path.join(job_dir, name)
-        if os.path.isfile(p):
-            return p
-    return os.path.join(job_dir, "merged_transcript_ai.txt")
+from transcript_paths import resolve_transcript_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Task 5-4（第一スライス）: 補正済み発言録に、LINE等で得た質問・回答を反映して再補正しファイルへ保存"
+            "手動用: 質問・回答を明示指定して再補正（本番フローは recorrect_from_line_answer.py）"
         )
     )
     parser.add_argument("--job-id", required=True, help="対象ジョブID")
@@ -49,8 +39,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="OpenAIモデル名（デフォルト: gpt-4o-mini）",
+        default="gpt-4.1",
+        help="OpenAIモデル名（デフォルト: gpt-4.1）",
     )
     args = parser.parse_args()
 

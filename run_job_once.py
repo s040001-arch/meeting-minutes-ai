@@ -318,13 +318,13 @@ def main() -> None:
         "--step-5-4-timeout-sec",
         type=int,
         default=120,
-        help="step_5_4_recorrect_with_answer の1回あたりタイムアウト秒（デフォルト: 120）",
+        help="step_5_4_recorrect_from_line_answer の1回あたりタイムアウト秒（デフォルト: 120）",
     )
     parser.add_argument(
         "--step-5-4-retry-count",
         type=int,
         default=1,
-        help="step_5_4_recorrect_with_answer の timeout時リトライ回数（デフォルト: 1）",
+        help="step_5_4_recorrect_from_line_answer の timeout時リトライ回数（デフォルト: 1）",
     )
     parser.add_argument(
         "--no-send-line",
@@ -835,7 +835,7 @@ def main() -> None:
                 run_cmd_with_timeout_retry(
                     log_path,
                     [py, os.path.join(repo, "recorrect_from_line_answer.py"), "--job-id", args.job_id],
-                    "step_5_4_recorrect_with_answer",
+                    "step_5_4_recorrect_from_line_answer",
                     timeout_sec=args.step_5_4_timeout_sec,
                     retry_count=args.step_5_4_retry_count,
                 )
@@ -845,7 +845,7 @@ def main() -> None:
             log_line(
                 log_path,
                 (
-                    "step_5_4_recorrect_with_answer: skipped "
+                    "step_5_4_recorrect_from_line_answer: skipped "
                     f"error={e} fallback=merged_transcript_ai_to_after_qa"
                 ),
             )

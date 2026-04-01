@@ -4,7 +4,7 @@ import os
 import re
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
-from recorrect_with_answer import resolve_transcript_path
+from transcript_paths import resolve_transcript_path
 
 
 def _load_question_result_for_job(job_id: str, input_root: str) -> dict | None:
