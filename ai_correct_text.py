@@ -405,12 +405,23 @@ def _apply_low_guess_replacements(
         if not original or not suggestion or original == suggestion:
             skipped += 1
             continue
+        orig_placeholders = _PLACEHOLDER_STRICT_RE.findall(original)
+        sugg_placeholders = _PLACEHOLDER_STRICT_RE.findall(suggestion)
+        if sorted(orig_placeholders) != sorted(sugg_placeholders):
+            logger.warning(
+                "skipped: placeholder mismatch in suggestion | "
+                f"original={original!r} suggestion={suggestion!r} "
+                f"orig_ph={orig_placeholders} sugg_ph={sugg_placeholders}"
+            )
+            skipped += 1
+            continue
         pos = updated.find(original)
         if pos < 0:
             skipped += 1
             continue
         updated = updated[:pos] + suggestion + updated[pos + len(original):]
         auto_applied += 1
+    logger.info(f"auto_apply: applied={auto_applied} skipped={skipped}")
     return updated, auto_applied, skipped
 
 
