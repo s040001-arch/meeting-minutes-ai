@@ -1,1 +1,40 @@
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# パイプライン中間生成（再実行で復元可能）
+data/chunks/*.wav
+data/chunks_test_2/*.wav
+data/google_docs_export/
+
+# 実行ログ（必要なら再生成）
+logs/
+
+# 秘密情報
+credentials.json
+token.json
+token_drive.json
+
+# データ・ログ（実行時生成物）
+data/incoming_audio/
+data/transcriptions/
+data/qa_sessions/
+data/sample_audio*.wav
+data/test_input_mechanical.txt
+data/last_job_progress.json
+data/line_answers_import_once.json
+data/line_pending_context.json
+data/whisper_split_checkpoint_*.json
+data/latest_meeting.json
+data/latest_minutes_state.json
+audio/*.m4a
+processed_audio.log
+gcm-diagnose.log
+__pycache__/
+
+# 一時スクリプト
+tmp_*.py
+_export_*.txt
