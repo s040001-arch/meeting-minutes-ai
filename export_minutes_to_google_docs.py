@@ -509,19 +509,6 @@ def main() -> None:
             fields="id,name",
         ).execute()
 
-    if args.write_doc_meta_json:
-        meta_path = args.write_doc_meta_json
-        os.makedirs(os.path.dirname(meta_path) or ".", exist_ok=True)
-        meta_payload = {
-            "job_id": args.job_id,
-            "doc_id": doc_id,
-            "doc_url": doc_url,
-            "title": title,
-            "mode": "update" if args.update_doc_id else "create",
-        }
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta_payload, f, ensure_ascii=False, indent=2)
-
     write_log_path = os.path.join(out_dir, "docs_write_log.txt")
     with open(write_log_path, "w", encoding="utf-8") as f:
         f.write(f"job_id={args.job_id}\n")
@@ -580,6 +567,34 @@ def main() -> None:
                 with open(write_log_path, "a", encoding="utf-8") as f:
                     f.write(f"upload_local_file_error={e}\n")
                 raise
+
+    if args.write_doc_meta_json:
+        meta_path = args.write_doc_meta_json
+        os.makedirs(os.path.dirname(meta_path) or ".", exist_ok=True)
+        existing_meta = {}
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing_meta = loaded
+            except Exception:
+                existing_meta = {}
+        meta_payload = {
+            "job_id": args.job_id,
+            "doc_id": doc_id,
+            "doc_url": doc_url,
+            "title": title,
+            "mode": "update" if args.update_doc_id else "create",
+        }
+        folder_id = args.drive_parent_folder_id or existing_meta.get("folder_id")
+        subfolder_id = target_folder_id or existing_meta.get("subfolder_id")
+        if folder_id:
+            meta_payload["folder_id"] = folder_id
+        if subfolder_id:
+            meta_payload["subfolder_id"] = subfolder_id
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_payload, f, ensure_ascii=False, indent=2)
 
     print(f"job_id={args.job_id}")
     print(f"dry_run=0")

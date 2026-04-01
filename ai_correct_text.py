@@ -396,6 +396,13 @@ def call_openai_for_correction_detailed(
     return corrected, meta
 
 
+_LAST_CORRECT_FULL_TEXT_META: dict[str, object] = {}
+
+
+def get_last_correct_full_text_meta() -> dict[str, object]:
+    return dict(_LAST_CORRECT_FULL_TEXT_META)
+
+
 def correct_full_text(
     text: str,
     model: str = "claude-sonnet-4-20250514",
@@ -408,6 +415,16 @@ def correct_full_text(
     """
     if not text:
         return text
+
+    print(f"correct_full_text: input_chars={len(text)}")
+    global _LAST_CORRECT_FULL_TEXT_META
+    _LAST_CORRECT_FULL_TEXT_META = {
+        "input_chars": len(text),
+        "output_chars": 0,
+        "stop_reason": None,
+        "fallback_reason": None,
+        "used_fallback": False,
+    }
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
@@ -438,30 +455,69 @@ def correct_full_text(
         response.raise_for_status()
 
         result = response.json()
+        _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = result.get("stop_reason")
         if result.get("stop_reason") == "max_tokens":
-            print("full_text_correction_failed='anthropic max_tokens reached'")
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
+            print(
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
+            )
             return text
 
         content = result.get("content")
         if not isinstance(content, list) or not content:
-            print("full_text_correction_failed='anthropic content missing'")
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_content_missing"
+            print(
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=anthropic_content_missing input_chars={len(text)}"
+            )
             return text
         first = content[0] if isinstance(content[0], dict) else {}
         corrected_masked = str(first.get("text", "")).strip()
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
+        print(
+            f"correct_full_text: output_chars={len(corrected_masked)} "
+            f"stop_reason={result.get('stop_reason')}"
+        )
         if not corrected_masked:
-            print("full_text_correction_failed='anthropic text missing'")
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
+            print(
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=anthropic_text_missing input_chars={len(text)}"
+            )
             return text
 
         _validate_placeholder_sequence(corrected_masked, expected_placeholders)
-        return _restore_masked_text(corrected_masked, placeholder_mapping)
+        restored = _restore_masked_text(corrected_masked, placeholder_mapping)
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
+        print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
+        return restored
     except httpx.TimeoutException as e:
-        print(f"full_text_correction_timeout={e!r}")
+        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"timeout:{e!r}"
+        print(
+            f"[WARNING] correct_full_text: fallback to original. "
+            f"reason=timeout:{e!r} input_chars={len(text)}"
+        )
         return text
     except httpx.HTTPError as e:
-        print(f"full_text_correction_http_error={e!r}")
+        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"http_error:{e!r}"
+        print(
+            f"[WARNING] correct_full_text: fallback to original. "
+            f"reason=http_error:{e!r} input_chars={len(text)}"
+        )
         return text
     except Exception as e:
-        print(f"full_text_correction_failed={e!r}")
+        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"exception:{e!r}"
+        print(
+            f"[WARNING] correct_full_text: fallback to original. "
+            f"reason=exception:{e!r} input_chars={len(text)}"
+        )
         return text
 
 
