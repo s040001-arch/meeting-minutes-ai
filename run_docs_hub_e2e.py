@@ -148,7 +148,7 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.input_root,
         ]
     )
-    # 回答反映後の全文から未知点を再抽出し、必要なら「次の1問」を生成する。
+    # 回答反映後の全文から unknown_points を再評価し、必要なら「次の1問」を生成する。
     after_qa_path = os.path.join(
         args.input_root,
         args.job_id,
@@ -158,11 +158,15 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     _run(
         [
             _py(),
-            os.path.join(REPO_ROOT, "extract_unknown_points.py"),
+            os.path.join(REPO_ROOT, "refresh_unknown_points_after_answer.py"),
+            "--job-id",
+            args.job_id,
+            "--input-root",
+            args.input_root,
+            "--answers-json",
+            args.answers_json,
             "--input",
             after_qa_path,
-            "--output",
-            unknowns_path,
         ]
     )
     qcycle_cmd = [

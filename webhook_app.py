@@ -351,6 +351,73 @@ def persist_answer(
     return ok
 
 
+def _unknown_points_path(job_id: str | None) -> str | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    return os.path.join("data", "transcriptions", jid, "unknown_points.json")
+
+
+def _load_unknown_points_for_job(job_id: str | None) -> list[dict]:
+    path = _unknown_points_path(job_id)
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+    except Exception as e:
+        print(f"load_unknown_points_for_job_failed={e}")
+        return []
+
+
+def _save_unknown_points_for_job(job_id: str | None, unknown_points: list[dict]) -> None:
+    path = _unknown_points_path(job_id)
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(unknown_points, f, ensure_ascii=False, indent=2)
+
+
+def _mark_unknown_points_answered(
+    *,
+    job_id: str | None,
+    selected_unknown: dict | None,
+    answer_text: str,
+    question_id: str,
+) -> int:
+    if not job_id or not isinstance(selected_unknown, dict):
+        return 0
+    target_text = str(selected_unknown.get("text") or "").strip()
+    target_type = str(selected_unknown.get("type") or "").strip()
+    if not target_text:
+        return 0
+    unknown_points = _load_unknown_points_for_job(job_id)
+    if not unknown_points:
+        return 0
+
+    updated_count = 0
+    for item in unknown_points:
+        if str(item.get("status", "")).strip().lower() == "answered":
+            continue
+        item_text = str(item.get("text") or "").strip()
+        item_type = str(item.get("type") or "").strip()
+        if item_text != target_text:
+            continue
+        if target_type and item_type and item_type != target_type:
+            continue
+        item["status"] = "answered"
+        item["answer"] = answer_text
+        item["answered_by_question_id"] = question_id
+        item["answered_at"] = now_iso()
+        updated_count += 1
+
+    if updated_count > 0:
+        _save_unknown_points_for_job(job_id, unknown_points)
+    return updated_count
+
+
 def handle_user_input(text: str, user_id: str | None = None) -> str:
     """LINEからのユーザー入力の入口。pending question 1件に対する回答受付だけ行う。"""
     global state
@@ -365,6 +432,9 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         question_id = str(ctx.get("question_id") or "unknown")
         qtext_for_save = str(ctx.get("question_text") or "").strip()
         job_id_for_save = str(ctx.get("job_id") or "").strip() or None
+        selected_unknown = ctx.get("selected_unknown")
+        if not isinstance(selected_unknown, dict):
+            selected_unknown = None
     elif pending is not None:
         pending_dict = pending if isinstance(pending, dict) else {}
         question_id = str(pending_dict.get("question_id") or "unknown")
@@ -375,6 +445,9 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         if isinstance(pending_file.get("question_text"), str) and pending_file["question_text"].strip():
             qtext_for_save = pending_file["question_text"].strip()
         job_id_for_save = str(pending_file.get("job_id") or "").strip() or None
+        selected_unknown = pending_file.get("selected_unknown")
+        if not isinstance(selected_unknown, dict):
+            selected_unknown = None
     else:
         return "現在、回答待ちの質問はありません。"
 
@@ -388,6 +461,16 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         question_text=qtext_for_save,
         user_id=user_id,
         job_id=job_id_for_save,
+    )
+    answered_updates = _mark_unknown_points_answered(
+        job_id=job_id_for_save,
+        selected_unknown=selected_unknown,
+        answer_text=text,
+        question_id=question_id,
+    )
+    print(
+        "unknown_points_answered_update="
+        f"job_id={job_id_for_save!r} updated_count={answered_updates}"
     )
     try:
         maybe_launch_auto_after_answer(job_id_for_save, save_ok)
