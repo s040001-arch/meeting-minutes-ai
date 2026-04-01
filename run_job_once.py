@@ -440,30 +440,6 @@ def append_log_to_drive(job_id: str, message: str) -> None:
         print(f"append_log_to_drive: failed error={e!r}")
 
 
-def merge_unknown_points_with_risky_terms(
-    unknowns_path: str, risky_terms_path: str, log_path: str
-) -> None:
-    if not os.path.isfile(unknowns_path):
-        log_line(log_path, f"step_4_35_merge: skip unknowns_not_found path={unknowns_path}")
-        return
-    if not os.path.isfile(risky_terms_path):
-        log_line(log_path, f"step_4_35_merge: skip risky_terms_not_found path={risky_terms_path}")
-        return
-    with open(unknowns_path, "r", encoding="utf-8") as f:
-        unknowns_data = json.load(f)
-    with open(risky_terms_path, "r", encoding="utf-8") as f:
-        risky_data = json.load(f)
-    unknowns = unknowns_data if isinstance(unknowns_data, list) else []
-    risky_terms = risky_data if isinstance(risky_data, list) else []
-    merged = list(unknowns) + list(risky_terms)
-    with open(unknowns_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-    log_line(
-        log_path,
-        f"step_4_35_merge: merged unknowns={len(unknowns)} risky_terms={len(risky_terms)} total={len(merged)}",
-    )
-
-
 def main() -> None:
     load_dotenv_local()
     parser = argparse.ArgumentParser(
@@ -594,7 +570,6 @@ def main() -> None:
     mechanical_path = os.path.join(job_dir, "merged_transcript_mechanical.txt")
     ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
     unknowns_path = os.path.join(job_dir, "unknown_points.json")
-    risky_terms_path = os.path.join(job_dir, "risky_terms.json")
 
     py = sys.executable
     repo = os.getcwd()
@@ -806,57 +781,11 @@ def main() -> None:
             f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
         )
 
-        update_job_progress(
-            input_root=args.input_root,
-            job_id=args.job_id,
-            phase="step_4_35_review_risky_terms",
-            status="running",
-            detail={},
-        )
-        try:
-            run_cmd(
-                log_path,
-                [
-                    py,
-                    os.path.join(repo, "review_risky_terms.py"),
-                    "--job-id",
-                    args.job_id,
-                    "--input-root",
-                    args.input_root,
-                ],
-                "step_4_35_review_risky_terms",
-            )
-        except Exception as e:
-            log_line(log_path, f"step_4_35_review_risky_terms: skipped error={e}")
-            update_job_progress(
-                input_root=args.input_root,
-                job_id=args.job_id,
-                phase="step_4_35_review_risky_terms",
-                status="skipped",
-                detail={"error": str(e)},
-            )
-        else:
-            update_job_progress(
-                input_root=args.input_root,
-                job_id=args.job_id,
-                phase="step_4_35_review_risky_terms",
-                status="success",
-                detail={},
-            )
-
         run_cmd(
             log_path,
             [py, os.path.join(repo, "extract_unknown_points.py"), "--input", ai_path, "--output", unknowns_path],
             "step_4_4_extract_unknowns",
         )
-        try:
-            merge_unknown_points_with_risky_terms(
-                unknowns_path=unknowns_path,
-                risky_terms_path=risky_terms_path,
-                log_path=log_path,
-            )
-        except Exception as e:
-            log_line(log_path, f"step_4_35_merge: skipped error={e}")
         qcycle_cmd = [
             py,
             os.path.join(repo, "run_question_cycle_once.py"),

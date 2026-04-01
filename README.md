@@ -18,7 +18,6 @@ run_job_once.py  ── 16-step pipeline
   ├─ 4.0  Google Docs 作成 (【文字起こし】)
   ├─ 4.2  mechanical_correct_text.py
   ├─ 4.3  ai_correct_text.py  (Claude 3.5 Sonnet)
-  ├─ 4.35 review_risky_terms.py  (GPT-4o)
   ├─ 4.4  extract_unknown_points.py
   ├─ 5.0  run_question_cycle_once.py  (GPT → LINE)
   ├─ 5.4  recorrect_from_line_answer.py
@@ -32,7 +31,7 @@ run_job_once.py  ── 16-step pipeline
 | 変数名 | 用途 |
 |--------|------|
 | `ANTHROPIC_API_KEY` | AI補正 (Claude 3.5 Sonnet) |
-| `OPENAI_API_KEY` | リスク語レビュー・質問生成・議事録生成 |
+| `OPENAI_API_KEY` | 質問生成・議事録生成 |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE push通知 |
 | `LINE_USER_ID` | 質問の送信先 |
 | `DRIVE_FOLDER_ID` | 監視対象のGoogle Driveフォルダ |

@@ -8,10 +8,10 @@
 
 ### 1.1 入力
 
-- **選定の直接入力**: `unknown_points.json`（JSON 配列。各要素は少なくとも `type`・`text`・`reason` を持つ dict。`review_risky_terms` 由来は OpenAI の指示どおり `type` / `text` / `reason`）。
-- **配列の生成順**（`run_job_once.py`）:
-  1. `extract_unknown_points.py` が `merged_transcript_ai.txt` を文単位ルールで走査し、ヒット文を **先頭から** 配列に追加。
-  2. `merge_unknown_points_with_risky_terms` が `risky_terms.json` の配列を **末尾に連結** して `unknown_points.json` を上書き。
+- **選定の直接入力**: `unknown_points.json`（JSON 配列。各要素は少なくとも `type`・`text`・`reason` を持つ dict）。
+- **配列の生成**（`run_job_once.py`）:
+  1. `extract_unknown_points.py` が `merged_transcript_ai.txt` を文単位ルールで走査し、ヒット文を **先頭から** 配列に追加する。
+  2. 生成された `unknown_points.json` をそのまま step 5 の入力に渡す。
 
 ### 1.2 処理フロー（E2E step 5）
 
@@ -27,11 +27,11 @@
 - `enumerate(unknown_points)` に対し **`min(..., key=key_func)`** で1件を選ぶ。
 - キーは **`(risky_band, base_priority, idx)`**（タプル辞書順で最小）。
   - **`risky_band`**: `item["type"]` が `RISKY_TYPE_PRIORITY`（`proper_noun_candidate` / `organization_candidate` / `service_candidate` / `suspicious_word` / `suspicious_number_or_role`）のキーに一致すれば **0**、それ以外（例: `extract_unknown_points` 由来の `固有名詞` / `数値` / `主語`）は **1**。  
-    → **危険語レビュー由来の行が、ルール抽出行より常に優先**。
+    → 現行パイプラインでは主に `extract_unknown_points` 由来の候補が入るため、通常は **1** 側で比較される。`risky_band` は旧拡張との互換のためロジック上は残っている。
   - **`base_priority`**: `RISKY_TYPE_PRIORITY` で `固有名詞` または `数値` にマップしたあと、`TYPE_PRIORITY`（`generate_one_question.py`）で数値化。**固有名詞=0、数値=1、主語=2、マップなし=999**。
   - **`idx`**: 配列インデックス。**上記2つが同じなら小さい方**（先に出現した要素）。
 
-**LLM は「1件を選ぶ」判断には使われない**（`review_risky_terms` は候補列挙にのみ関与）。
+**LLM は「1件を選ぶ」判断には使われない**。現行では候補列挙も `extract_unknown_points.py` のルール処理が中心である。
 
 ### 1.4 別経路（事実）
 
@@ -41,7 +41,7 @@
 
 - **意味内容・質問価値**: 候補間で比較する指標が **ない**（`type` の粗い段階と出現順のみ）。
 - **全文との関係**: 選定時に `merged_transcript_ai.txt` を読んでも **`find_context` は呼ばれない**（`resolve_context_text_path` で読む `full_text` は後続で未使用）。
-- **配列順依存**: `merge` の **ルール先・risky 後** と、各抽出処理の **出力順** がそのまま **タイブレーク** に効く。
+- **配列順依存**: `extract_unknown_points.py` の **出力順** がそのまま **タイブレーク** に効く。
 - **二重の選定実装**: `choose_one_unknown` と `select_one_unknown_prioritized` で **優先ルールが一致しない**（単体スクリプト利用時にズレうる）。
 
 ---
@@ -87,7 +87,7 @@
 | 項目 | 内容 |
 |------|------|
 | **定義** | **AI が推測で補うと危険**か（ハルシネーション・誤固有名の固定化）。 |
-| **計算** | **未実装案**: `review_risky_terms` の `reason` や `type` が既に「低確信」を示す場合は高め、等。LLM で「推測禁止領域か」をフラグ化。 |
+| **計算** | **未実装案**: 候補の `reason` や `type` が既に「低確信」を示す場合は高め、等。LLM で「推測禁止領域か」をフラグ化。 |
 | **必要な入力** | 候補 dict 全文、既存の `type` / `reason`、ポリシー（spec の禁止事項）。 |
 
 ### 2.6 統合（案）
@@ -103,7 +103,7 @@
 | **選定キー** | `(risky_band, base_priority, idx)` のみ | impact / coverage / centrality / recoverability / non-recoverability（またはその合成スコア） |
 | **データ構造** | `unknown_points.json` は配列 of dict（`type`/`text`/`reason`）。監査は `question_result.selection_audit` に **現行キー** | 各候補に **スコア列** または別スキーマ `candidate_scores.json` 等（案） |
 | **処理フロー** | マージ済み配列 → 即 `min` | 全文読込 →（任意）特徴抽出 → スコアリング → 最大1件 |
-| **LLMの関与** | 候補抽出（`review_risky_terms` のみ） | **案**: 選定段階でもスコアリング or ランキングに利用可能 |
+| **LLMの関与** | 現行の選定段階では未使用 | **案**: 選定段階でもスコアリング or ランキングに利用可能 |
 
 ---
 
@@ -112,7 +112,7 @@
 - **`run_question_cycle_once.py`**: `select_one_unknown_prioritized` を **置換**するか、**前段でスコア付与**した配列を渡すか。
 - **`generate_one_question.py`**: 単体 CLI 利用時に `choose_one_unknown` と **同じ選定**に揃えるなら、共通モジュールへ **抽出**。
 - **新規モジュール案**: `score_question_candidates.py` 等 — 入力 `unknown_points.json` + 全文パス、出力 **スコア付きリスト** または **選ばれた1件**。
-- **スコア計算の挿入位置**: `merge_unknown_points_with_risky_terms` の **後**、`run_question_cycle_once` の **選定直前**（`run_job_once` のフローは変えず、関数差し替えで済ませやすい）。
+- **スコア計算の挿入位置**: `unknown_points.json` 生成の **後**、`run_question_cycle_once` の **選定直前**（`run_job_once` のフローは変えず、関数差し替えで済ませやすい）。
 - **設定**: 重み・閾値は `repo_env` / 新yaml / argparse 等（未決）。
 
 ---
@@ -126,7 +126,7 @@
 
 ### 5.1 現行でどうなるか（事実に基づく一般論）
 
-- 両方とも `review_risky_terms` に出ていれば **同じ `risky_band`** と **`TYPE_PRIORITY` 上は同格（固有名詞系）** になりうる。
+- 両方とも `run_question_cycle_once.py` 上で固有名詞系タイプとして扱われれば **同じ `risky_band`** と **`TYPE_PRIORITY` 上は同格（固有名詞系）** になりうる。
 - その場合 **先に `unknown_points.json` に並んでいる方**（`idx` が小さい方）が選ばれる。
 - **「隣刑」と「THR」のどちらが重要か」は比較されない**。
 

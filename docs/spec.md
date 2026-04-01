@@ -1,4 +1,4 @@
-﻿# Meeting Minutes AI — spec.md (v2026-04)
+# Meeting Minutes AI — spec.md (v2026-04)
 
 ---
 
@@ -27,7 +27,7 @@ YYYY_MMDD_顧客名_会議種別.{拡張子}
 ## 2. Google Drive フォルダ構成
 
 ```
-固定フォルダ (MEETING_FOLDER_ID)/
+固定フォルダ (DRIVE_FOLDER_ID)/
 ├── 2025_0610_ABC商事_定例会議.m4a   ← 新規アップロード（ルート直置き）
 ├── 2025_0610_ABC商事_定例会議/       ← 処理開始後に自動作成されるサブフォルダ
 │   ├── 2025_0610_ABC商事_定例会議.m4a（移動済み元ファイル）
@@ -44,13 +44,18 @@ YYYY_MMDD_顧客名_会議種別.{拡張子}
 
 処理の進行に応じて Google Doc のタイトルを変更する。
 
-| ステップ | Doc タイトル | 意味 |
+| タイミング | Doc タイトル | 意味 |
 |---------|-------------|------|
-| Step⑥ 初回作成 | `【文字起こし】2025_0610_ABC商事_定例会議` | 生の文字起こし完了 |
+| 転写直後・Doc初期作成 | `【文字起こし】2025_0610_ABC商事_定例会議` | 生の文字起こしを確認できる初期状態 |
 | Step⑦ 機械補正完了 | `【機械補正完了】2025_0610_ABC商事_定例会議` | 辞書ベース置換完了 |
-| Step⑧⑨ AI補正完了 | `【AI補正完了】2025_0610_ABC商事_定例会議` | Claude による推論補正完了 |
-| Step⑩ 不明点検出完了 | `【不明点検出完了】2025_0610_ABC商事_定例会議` | 不明点検出完了 |
-| Step⑪ 議事録生成 | `2025_0610_ABC商事_定例会議` | 確定可能状態（プレフィックスなし） |
+| Step⑧⑨ AI補正＋不明点検出完了 | `【AI補正完了】2025_0610_ABC商事_定例会議` | Claude による補正フェーズ完了 |
+| Step⑩ ハイブリッド検出完了 | `【不明点検出完了】2025_0610_ABC商事_定例会議` | 不明点候補の抽出完了 |
+| Step⑪ 議事録生成・Doc上書き完了 | `2025_0610_ABC商事_定例会議` | Fix 可能状態（プレフィックスなし） |
+| LINE質問送信（Step⑫⑬） | `2025_0610_ABC商事_定例会議` | ユーザー確認待ちでもタイトルは維持 |
+| LINE回答でループ再開 | `【機械補正完了】2025_0610_ABC商事_定例会議` | 再処理ループの再開点 |
+| 次ファイル投入 | 前ジョブはその時点のタイトルのまま確定 | 新ジョブ開始に伴い前ジョブを終了 |
+
+実装上は進捗可視化のため、`【AI補正中：マスキング】` や `【AI補正中：AI検出】` のような細粒度タイトルを一時的なサブステータスとして使用してよい。
 
 ---
 
@@ -83,6 +88,8 @@ Step② サブフォルダを作成（ファイル名の拡張子なし）
 Step③ ファイルをサブフォルダに移動
 Step④ 音声ファイルの場合 → Whisper で文字起こし（チャンク分割対応）
        テキストファイルの場合 → そのまま使用
+       ※ filename_hints.py により、ファイル名から顧客名・会議種別を抽出し、
+         Whisper の initial_prompt および後続 AI 処理のコンテキストとして使用する
 Step⑤ merged_transcript.txt をサブフォルダに保存
 Step⑥ Google Doc を作成、タイトル「【文字起こし】{stem}」、
        merged_transcript.txt の内容を書き込み
@@ -109,6 +116,7 @@ Step⑩  ハイブリッド不明点検出
         Regex ベースの検出を実行し、Claude の検出結果とマージ
         → unknown_points.json を更新
         → タイトルを「【不明点検出完了】{stem}」に変更
+        ※ 現行実装では Step⑩ の Regex 検出が先行稼働し、`unknown_points.json` の主な生成元となる
 
 Step⑪  議事録生成（Claude 3.5 Sonnet）
         Google Doc を全面上書きし、セクション4のフォーマットで議事録を生成
@@ -289,6 +297,22 @@ https://docs.google.com/document/d/xxxxx
 - メインのポーリングループ（Google Drive 監視）は継続稼働
 - LINE Webhook 受信時に Resume をトリガー
 
+### 状態管理（progress_tracker.py）
+
+`progress_tracker.py` は進捗表示専用のモジュールとし、ログ出力・可視化のための状態を扱う。
+
+管理対象の例:
+- 現在のステップ番号
+- ステップごとの進行状況
+- ジョブの開始時刻
+
+状態制御そのものは `job_state.py` に分離する方針とする。`job_state.py` は Phase 2 で新設予定であり、Suspend / Resume や再開制御の責務を持つ。
+
+### デバッグログ（Drive visible logs）
+
+処理の進行状況を Google Drive のサブフォルダ内にテキストファイルとして出力する。
+Railway のログが流れた後でも、Drive 上で処理状況を確認できるようにする目的。
+
 ---
 
 ## 10. 永続化（Railway Volume）
@@ -337,6 +361,18 @@ https://docs.google.com/document/d/xxxxx
 ]
 ```
 
+### google_doc_hub.json
+
+同一 `job_id` のジョブディレクトリに紐づく Google Doc の ID や関連メタデータを記録する。ジョブ実行中に同じ `job_id` で再出力が発生した場合、新規作成せず既存 Doc を上書き再利用する。
+
+```json
+{
+  "2025_0610_ABC商事_定例会議": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ"
+}
+```
+
+保存先: `data/transcriptions/<job_id>/google_doc_hub.json`
+
 ---
 
 ## 11. 技術スタック
@@ -357,13 +393,15 @@ https://docs.google.com/document/d/xxxxx
 ## 12. 環境変数
 
 ```
-GOOGLE_CREDENTIALS_JSON       ← サービスアカウントまたは OAuth クレデンシャル JSON
-GOOGLE_TOKEN_JSON              ← OAuth トークン JSON
-MEETING_FOLDER_ID              ← Google Drive の固定フォルダ ID
+GOOGLE_OAUTH_CLIENT_JSON       ← OAuth クライアント JSON（環境変数から復元）
+GOOGLE_OAUTH_TOKEN_JSON        ← OAuth トークン JSON（環境変数から復元）
+GOOGLE_OAUTH_TOKEN_DRIVE_JSON  ← Google Drive 用 OAuth トークン JSON（環境変数から復元）
+GOOGLE_DRIVE_CREDENTIALS_PATH  ← 復元済み OAuth クレデンシャルファイルのパス
+GOOGLE_DRIVE_TOKEN_PATH        ← 復元済み OAuth トークンファイルのパス
+DRIVE_FOLDER_ID                ← Google Drive の監視対象フォルダ ID
 ANTHROPIC_API_KEY              ← Claude API キー
-OPENAI_API_KEY                 ← Whisper API キー
+OPENAI_API_KEY                 ← OpenAI API キー（Whisper + その他 OpenAI 系機能で共用）
 LINE_CHANNEL_ACCESS_TOKEN      ← LINE Messaging API アクセストークン
-LINE_CHANNEL_SECRET            ← LINE Messaging API チャネルシークレット
 LINE_USER_ID                   ← 通知先の LINE ユーザー ID
 ```
 
