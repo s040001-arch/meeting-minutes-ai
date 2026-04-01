@@ -1,284 +1,400 @@
-# Meeting Minutes AI — 仕様書（最新版・2026-03）
-
-本文書は、リポジトリ上の実装と運用上の前提を **指示役（新規チャット）向け** にまとめたものである。実装の唯一のソースはコードだが、全体像の把握に使う。
+﻿# Meeting Minutes AI — spec.md (v2026-04)
 
 ---
 
-## 0. スクリプト・データの地図（要点）
+## 0. Overview
 
-| 領域 | 主なスクリプト | 主なデータ |
-|------|----------------|------------|
-| Drive 自動 1 件 | `drive_auto_run_once.py`（`drive_auto_run_forever.py` が定期起動。**本番は Railway 上で常駐**可） | 監視: `--folder-id` または **`DRIVE_FOLDER_ID`**。DL 先: `--download-dir` 既定 `data/incoming_audio`。状態: `data/last_seen_file_ids.json` |
-| Railway 本番入口 | `scripts/railway_entry.sh` → Uvicorn + バックグラウンドで `drive_auto_run_forever`（起動経路が噛まない場合の保険として `webhook_app.py` 起動時にも起動試行） | 環境変数から `railway_bootstrap.py` が OAuth ファイルを生成 |
-| 単発 E2E | `run_job_once.py` | `data/transcriptions/<job_id>/` 配下に中間生成物・`e2e_run_log.txt` |
-| LINE Webhook | `webhook_app.py` | `data/line_answers.json`、`data/line_pending_context.json`（任意） |
-| 回答後 Docs 一括 | `run_docs_hub_e2e.py` → `compose_docs_hub_markdown.py` + `export_minutes_to_google_docs.py` | `credentials.json` / `token.json`、各 job の `google_doc_hub.json` |
-| AI 補正（単体） | `ai_correct_text.py` | `call_openai_for_correction_detailed` / `call_openai_for_correction`、`split_mechanical_for_ai_correction`（分割） |
-| ファイル名ヒント抽出 | `filename_hints.py` | 入力ファイル名から固有名詞・キーワード候補を抽出し、Step 4.3 の AI 補正プロンプトへ追加する補助テキストを生成 |
+Google Drive の固定フォルダに音声ファイルまたはテキストファイルをアップロードすると、自動で文字起こし・AI補正・不明点検出・議事録生成を行い、LINEを通じてユーザーと対話しながら議事録を完成させるシステム。
 
-**重要:** ローカル `data/incoming_audio` を **ファイルシステム監視しているわけではない**。自動投入は **Google Drive 上の指定フォルダ** を API で一覧し、新規ファイルをダウンロードしてから `run_job_once` を起動する。
-
-### Railway 上での常時処理（PC 不要）
-
-- **目的:** 自宅 PC を起動していなくても、**監視フォルダへの投入〜パイプライン**を実行する。
-- **方式:** 同一コンテナで **HTTP Webhook**（`webhook_app` / Uvicorn）と **Drive ポーリング**（`drive_auto_run_forever.py`）を **並行起動**する。エントリポイントは `scripts/railway_entry.sh`（`Dockerfile` の `CMD`）。
-- **保険（重要）:** まれに Railway 側の起動経路（Procfile/Nixpacks 等）が想定と異なり `railway_entry.sh` が効かないケースがある。このため `webhook_app.py` の FastAPI `startup` でも **`DRIVE_FOLDER_ID` が設定されている場合に `drive_auto_run_forever.py` をバックグラウンド起動**し、Drive 常駐が開始されない事態を回避する。
-- **必須の環境変数（例）**
-  - **`DRIVE_FOLDER_ID`**: 監視対象の Google Drive フォルダ ID（`--folder-id` と同等）。未設定なら Drive ワーカーは起動しない（Webhook のみ）。
-  - **`GOOGLE_OAUTH_CLIENT_JSON`**: OAuth クライアント JSON（`credentials.json` の全文）。
-  - **`GOOGLE_OAUTH_TOKEN_DRIVE_JSON`**: Drive API 用の `token_drive.json` 相当の全文（リフレッシュトークンを含む）。
-  - **`GOOGLE_OAUTH_TOKEN_JSON`**: Google Docs 書き込み用の `token.json` 相当の全文（**推奨**。未設定だと Docs エクスポートが初回ブラウザ認証を要求し、サーバでは失敗しうる）。
-  - **`OPENAI_API_KEY`**: AI 補正等（`run_job_once` 内で使用）。
-  - その他 LINE・`AUTO_AFTER_ANSWER` 等は従来どおり。
-- **起動時:** `railway_bootstrap.py` が上記 JSON 環境変数から `credentials.json` / `token_drive.json` / `token.json` を **ファイルが無いときだけ**生成する。
-- **任意:** `DRIVE_POLL_INTERVAL_SEC`（既定 `120`）、`PORT`（Railway が注入）。
-- **永続化:** デプロイのたびにコンテナ FS は初期化されうるため、`data/last_seen_file_ids.json`・`data/transcriptions/`・OAuth トークン更新後のファイルを保持するには **Railway の Volume を `/app/data` 等にマウント**することを推奨。
-- **リソース:** 文字起こし・AI 補正は **メモリ・CPU を消費**する。常時ポーリングと合わせ **常時稼働プラン**を推奨。
+Railway 上で稼働し、Google Drive / Google Docs / LINE Messaging API / Claude 3.5 Sonnet / OpenAI Whisper を利用する。
 
 ---
 
-## ① 入力・データ取得
+## 1. ファイル命名規則
 
-### 入力形式
-- **音声:** m4a / mp3 / wav（内部で wav に変換しチャンク分割 → Whisper）
-- **テキスト:** txt（文字起こしフェーズをスキップし、内容を `merged_transcript.txt` 相当として渡す）
+```
+YYYY_MMDD_顧客名_会議種別.{拡張子}
+```
 
-### Google Drive（投入〜整理の確定仕様）
+例: `2025_0610_ABC商事_定例会議.m4a`
 
-- ユーザーは **監視対象フォルダの直下** にのみ、音声またはテキストファイルを置く（`--folder-id` で指定）。**サブフォルダ内に置いたファイルは新規検知の対象にしない**（Drive API では当該フォルダを親とする **直下アイテム** だけを列挙するため、移動後のファイルは一覧に出ない）。
-- **新規検知の対象:** 直下にある **ファイル** のみ。直下の **フォルダ** エントリはスキップする。
-- **整理（パターン1・Drive 上）:** 処理の最初に、ファイル名から **stem**（拡張子を除いた名前）を決め、監視フォルダ直下に **その stem と同一の名前のサブフォルダ** を用意し、**元ファイルをそのサブフォルダへ移動**する（`drive_auto_run_once.py` の `ensure_drive_subfolder` / `move_drive_file_to_folder`）。**移動はローカルではなく Google Drive 上**で行う。
-- 続けて **同一 file_id** でローカルへダウンロードし、`run_job_once` を実行する。Docs エクスポートの親・サブフォルダ指定には、この stem を使う。
-- **監視対象のフォルダ ID:** `drive_auto_run_once.py` / `drive_auto_run_forever.py` の **`--folder-id`**、または **未指定時は環境変数 `DRIVE_FOLDER_ID`**（本番・Railway ではこちらが主）。
-- 対応拡張子・mime は `drive_auto_run_once.py` の `SUPPORTED_EXTENSIONS` および `select_one_new_file` を参照（txt・音声・text/plain 等）。
-
-### job_id
-- 例: `job_<YYYYMMDD_HHMMSS>_<サニタイズ済みstem>`（Drive 自動時は `build_job_id`）。
-
-### ローカル入力の整理（`run_job_once`・手動実行時）
-- **既定:** `relocate_input_into_stem_subfolder` が、入力の親ディレクトリ直下に **`<stem>` フォルダ** を作り、`…/<stem>/<元ファイル名>` へ移動する。**これはローカル作業用**であり、Drive 自動経路では **Drive 上の整理（上記）が正本**。
-- **オフ:** `--no-relocate-input-subfolder`
-- **既知の衝突:** 移動先に **同名ファイルが既に存在**する／**stem と同名のパスが「フォルダ」ではなく「ファイル」として存在**する／等で `RuntimeError` や `FileExistsError` になり得る。運用では **別名で再投入**、**残骸の退避**、または **relocate オフ** を検討する。
+対応拡張子:
+- 音声: `.m4a`, `.mp3`, `.wav`, `.ogg`, `.webm`
+- テキスト: `.txt`
 
 ---
 
-## ② 文字起こし（音声時）
+## 2. Google Drive フォルダ構成
 
-- ffmpeg で wav、チャンク分割、`transcribe_one_chunk.py`、結合 → `merged_transcript.txt`
-- txt 入力時はこのブロックをスキップ（`run_job_once` 内分岐）。
-
-### 転写直後の Google Docs（確定仕様・2026-03-31）
-
-**ユーザーのイメージ:** 所定の監視フォルダに音声／txt を置く → stem 名サブフォルダができ、元ファイルが **Drive 上で**そこへ移動 → **続けて**（ローカルでマージ完了後）**同一サブフォルダに**、Drive 上のファイル名が **`【文字起こし】` + stem** の Google ドキュメントが作成される。
-
-- **実行タイミング:** `merged_transcript.txt` ができた直後、**機械補正（step_4_2）より前**（`run_job_once` 内 `step_4_0_transcription_docs`）。
-- **前提条件:** `--docs-push` かつ `--docs-parent-folder-id` が指定されていること、かつ `--skip-export-docs` でないこと。`drive_auto_run_once.run_pipeline` は `--docs-push` と親フォルダ（監視フォルダ ID）を渡すため、通常は本ステップが走る。
-- **題名（Drive ファイル名）:** `【文字起こし】{stem}`（`stem` は入力ファイルの拡張子を除いた名前）。
-- **本文:** マージ直後の全文（Markdown 経由で Docs に投入。ジョブ内 `transcript_stage_docs.md`）。
-- **同一ドキュメントの再利用:** `data/transcriptions/<job_id>/google_doc_hub.json` に `doc_id` を保存。再実行時は新規作成ではなく **既存 doc の本文更新**。
-- **仕様の固定（運用合意）:** **監視フォルダへの投入 → stem サブフォルダ作成 → 元ファイルの Drive 移動 → 本ステップによる【文字起こし】Docs 作成** という流れは、**ユーザーから別途の具体的な指示がない限り変更しない**（誤って上書きしないための確定範囲）。
-- **最終 export（step_6_3）との関係:** パイプライン後半で **同じ `doc_id`** に議事録用本文を差し替え。このとき **Drive 上のファイル名を stem のみ**に更新する（`--update-doc-id` 指定時に `export_minutes_to_google_docs.py` が `files.update` で名前変更）。**将来案（未定）:** 「【文字起こし】を消す」のではなく、**次のステータス表記へ付け替える**見せ方は後段機能として検討予定（本仕様では深く定義しない）。
+```
+固定フォルダ (MEETING_FOLDER_ID)/
+├── 2025_0610_ABC商事_定例会議.m4a   ← 新規アップロード（ルート直置き）
+├── 2025_0610_ABC商事_定例会議/       ← 処理開始後に自動作成されるサブフォルダ
+│   ├── 2025_0610_ABC商事_定例会議.m4a（移動済み元ファイル）
+│   ├── merged_transcript.txt
+│   ├── correction_dict.json
+│   ├── unknown_points.json
+│   └── Google Doc（議事録）
+└── 2025_0605_XYZ工業_キックオフ/     ← 過去ジョブ
+```
 
 ---
 
-## ③ 補正パイプライン（`run_job_once` 中心）
+## 3. Google Doc 命名規則（ステータスベース）
 
-### 実行ステップ一覧（`run_job_once.py` を正本とする）
+処理の進行に応じて Google Doc のタイトルを変更する。
 
-| Step | 主スクリプト / 処理 | 主入力 | 主出力 / 副作用 |
-|------|----------------------|--------|------------------|
-| 2.1 | `ffmpeg_convert_to_wav.py` | 元入力音声 | `data/transcriptions/<job_id>/input_16k_mono.wav` |
-| 2.2 | `audio_split_chunks.py` | `input_16k_mono.wav` | `data/transcriptions/<job_id>/chunks/chunk_*.wav` |
-| 3.0 | `transcribe_one_chunk.py`（チャンクごと） | `chunks/chunk_*.wav` | `data/transcriptions/<job_id>/chunk_*.json` |
-| 4.0 | `run_transcription_stage_docs_export` | `merged_transcript.txt` | `data/transcriptions/<job_id>/transcript_stage_docs.md`、`data/transcriptions/<job_id>/google_doc_hub.json`、Google Docs 上の暫定 Doc `【文字起こし】{stem}` |
-| 4.1 | `transcription_merge_chunks.py` | `chunk_*.json` | `data/transcriptions/<job_id>/merged_transcript.txt` |
-| 4.2 | `mechanical_correct_text.py` | `merged_transcript.txt` | `data/transcriptions/<job_id>/merged_transcript_mechanical.txt` |
-| 4.3 | `correct_full_text`（Claude 全文一括補正） | `merged_transcript_mechanical.txt` | `data/transcriptions/<job_id>/merged_transcript_ai.txt` |
-| 4.35 | `review_risky_terms.py` | `merged_transcript_ai.txt` | `data/transcriptions/<job_id>/risky_terms.json` |
-| 4.4 | `extract_unknown_points.py` | `merged_transcript_ai.txt` | `data/transcriptions/<job_id>/unknown_points.json`（直後に `risky_terms.json` をマージし、下流では混在リストを利用） |
-| 5.0 | 質問候補 1 件選定 | `unknown_points.json`、文脈テキスト（優先順: `merged_transcript_after_qa.txt` → `merged_transcript_ai.txt` → `merged_transcript.txt`） | 選定済み候補と `selection_audit`（`run_question_cycle_once.py` 内部） |
-| 5.1 | `run_question_cycle_once.py` 質問生成 | 上記候補 / 文脈 | `data/transcriptions/<job_id>/question_result.json` |
-| 5.2 | pending context 書き出し | `question_result.json` | `data/line_pending_context.json` |
-| 5.3 | LINE 用メッセージ生成 / 任意 push | `question_result.json` | `data/transcriptions/<job_id>/question_message.txt`、必要時は LINE push |
-| 5.4 | `recorrect_from_line_answer.py` またはフォールバックコピー | `data/line_answers.json`、`question_result.json`、補正済み transcript | `data/transcriptions/<job_id>/merged_transcript_after_qa.txt` |
-| 6.1 | `generate_minutes_transcript.py` | `merged_transcript_after_qa.txt` を優先（無ければ `merged_transcript.txt`） | `data/transcriptions/<job_id>/minutes_draft.md` |
-| 6.2 | `generate_minutes_other_sections.py` | `minutes_draft.md` | `data/transcriptions/<job_id>/minutes_structured.md` |
-| 6.3 | `export_minutes_to_google_docs.py` | 構造化済み議事録（+ `google_doc_hub.json`） | 同一 `doc_id` の最終更新、必要時 `google_doc_hub.json` 更新 |
+| ステップ | Doc タイトル | 意味 |
+|---------|-------------|------|
+| Step⑥ 初回作成 | `【文字起こし】2025_0610_ABC商事_定例会議` | 生の文字起こし完了 |
+| Step⑦ 機械補正完了 | `【機械補正完了】2025_0610_ABC商事_定例会議` | 辞書ベース置換完了 |
+| Step⑧⑨ AI補正完了 | `【AI補正完了】2025_0610_ABC商事_定例会議` | Claude による推論補正完了 |
+| Step⑩ 不明点検出完了 | `【不明点検出完了】2025_0610_ABC商事_定例会議` | 不明点検出完了 |
+| Step⑪ 議事録生成 | `2025_0610_ABC商事_定例会議` | 確定可能状態（プレフィックスなし） |
 
-### Progressive Enhancement（Google Docs）
+---
 
-- **Step 4.0:** `merged_transcript.txt` ができた時点で、**暫定の Google Doc** を `【文字起こし】{stem}` として作成または更新する。
-- **Step 6.3:** 議事録生成完了後、**同じ `doc_id`** を最終本文で更新する。つまり「転写を早く見せる」→「後で完成版に差し替える」という Progressive Enhancement を採る。
-- **txt 入力時:** Step 2.1 / 2.2 / 3.0 / 4.1 はスキップし、元 txt を `merged_transcript.txt` として扱う。
+## 4. Google Doc フォーマット仕様
 
-### 合流点
-- 音声・txt いずれも、機械補正の入力として **`merged_transcript.txt`** を単一合流点とする（txt は入力をコピーして生成）。
+- **フォント**: Arial 11pt（全体）
+- **見出し**: Google Docs の Heading 1 / Heading 2 を使用（サイドバー目次に自動表示される）
 
-### 第1段階：機械補正
-- `mechanical_correct_text.py` → `merged_transcript_mechanical.txt`
+### セクション構成
 
-### 4.3 AIテキスト補正
+| # | セクション名 | スタイル | 内容 |
+|---|------------|---------|------|
+| 1 | {タイトル} | Heading 1 | ファイル名から推定した会議タイトル |
+| 2 | 参加者 | Heading 2 | 発言者から推定、箇条書き |
+| 3 | 議題 | Heading 2 | 話されたトピック名のみ、箇条書き |
+| 4 | 決定事項 | Heading 2 | 箇条書き |
+| 5 | 残論点 | Heading 2 | 箇条書き |
+| 6 | Next Action | Heading 2 | 箇条書き |
+| 7 | 発言録（逐語） | Heading 2 | 話者ラベルなし、意味の区切りで改行 |
 
-#### 設計思想
-音声認識テキストの補正を「考える工程」と「作業する工程」に分離する。
-一括で「全部直して」と投げるのではなく、段階的に処理することで
-精度・速度・コストのバランスを最適化する。
+---
 
-#### アーキテクチャ
+## 5. ワークフロー
 
-##### フェーズA：自動補正
+### Phase A: 初期処理（Step①〜⑥）
 
-| ステップ | 処理内容 | モデル | 理由 |
-|----------|---------|--------|------|
-| ①異常箇所の検出 | 文脈が通らない箇所をリスト化 | Claude 3.5 Sonnet | 読解力・網羅性が必要 |
-| ②推測度の判定 | 各箇所の修正にどれだけ推測が必要かを0-100%で数値化 | Claude 3.5 Sonnet（①と一括実行） | 分析・判断力が必要 |
-| ③自動修正の適用 | 推測度に基づきテキストを修正 | Claude 3.5 Haiku または GPT-4o-mini | 指示通りの置換作業のみ |
+```
+Step① ポーリングで Google Drive ルート直下の新規ファイルを検出
+Step② サブフォルダを作成（ファイル名の拡張子なし）
+Step③ ファイルをサブフォルダに移動
+Step④ 音声ファイルの場合 → Whisper で文字起こし（チャンク分割対応）
+       テキストファイルの場合 → そのまま使用
+Step⑤ merged_transcript.txt をサブフォルダに保存
+Step⑥ Google Doc を作成、タイトル「【文字起こし】{stem}」、
+       merged_transcript.txt の内容を書き込み
+```
 
-##### ①②の出力フォーマット（JSON）
+### Phase B: 補正ループ（Step⑦〜⑰）
+
+```
+Step⑦  機械補正
+        correction_dict.json の全エントリを merged_transcript.txt に適用
+        → Google Doc を上書き
+        → タイトルを「【機械補正完了】{stem}」に変更
+
+Step⑧  AI 補正（Claude 3.5 Sonnet）
+        機械補正済みテキストに対し、推論ベースの誤変換・誤認識修正を実行
+        → Google Doc を上書き
+
+Step⑨  AI 不明点検出（Claude 3.5 Sonnet）
+        Step⑧と同時または直後に実行
+        Claude が検出した不明箇所を unknown_points.json に出力
+        → タイトルを「【AI補正完了】{stem}」に変更
+
+Step⑩  ハイブリッド不明点検出
+        Regex ベースの検出を実行し、Claude の検出結果とマージ
+        → unknown_points.json を更新
+        → タイトルを「【不明点検出完了】{stem}」に変更
+
+Step⑪  議事録生成（Claude 3.5 Sonnet）
+        Google Doc を全面上書きし、セクション4のフォーマットで議事録を生成
+        → タイトルを「{stem}」に変更（プレフィックスなし＝確定可能状態）
+
+Step⑫  質問選定
+        unknown_points.json から未回答の不明点を1つ選定
+        選定基準: 議事録の正確性に最もインパクトが大きいもの
+        不明点がゼロの場合 → Step⑬へ（完了通知）
+
+Step⑬  LINE 通知
+        不明点あり → 質問を送信（後述のフォーマット）
+        不明点なし → 完了通知を送信
+        → Step⑭へ
+
+Step⑭  Suspend（非ブロッキング待機）
+        LINE 応答またはポーリングでの新規ファイル検出を待つ
+        ブロッキングしない（ポーリングループは継続）
+
+Step⑮  Resume トリガー
+        パターンA: LINE メッセージ受信 → Step⑯へ
+        パターンB: 新規ファイル検出 → 現ジョブを確定終了、新ジョブの Step① へ
+
+Step⑯  LINE メッセージ分類（Claude 3.5 Sonnet）
+        受信メッセージを AI で3分類:
+        1. 質問への回答 → unknown_points.json の該当エントリを更新 → Step⑦へ
+        2. 修正依頼 → AI で辞書エントリを生成、correction_dict.json に追記 → Step⑦へ
+        3. 無関係 → 無視、Step⑭に戻る
+
+Step⑰  ループ継続
+        Step⑦に戻り、補正済み merged_transcript.txt から再処理
+        ただし回答済みの不明点は除外
+```
+
+---
+
+## 6. Regex パターン（Step⑩ ハイブリッド検出）
+
+7種類のパターンでテキストをスキャンし、不明点候補を抽出する。
+
+### Pattern 1: 固有名詞の表記揺れ
+
+同一の固有名詞が複数の表記で出現するケースを検出。
+
+```
+例: 「TOKIO」と「高尾」が混在
+例: 「thr」「dhr」「phr」の混在
+例: 「秋元」と「秋本」の混在
+```
+
+実装: 音が近い文字列のクラスタリング（編集距離 or 読み仮名ベース）
+
+### Pattern 2: 漢字変換エラー
+
+文脈上ありえない漢字の組み合わせを検出。
+
+```
+例: 「人的尊敬」→「人的資本経営」
+例: 「三菱鑑賞会社」→「三菱商事会社」
+例: 「既存の改革」→「既存の概念」
+```
+
+実装: 既知の誤変換パターン辞書 + 共起頻度の低い漢字列の検出
+
+### Pattern 3: 数値の矛盾・異常
+
+文脈に対して桁や単位が不自然な数値を検出。
+
+```
+例: 「52.5万」→ 文脈から「5万2500」の可能性
+例: 「23年前」→ 文脈から「2〜3年前」の可能性
+例: 同一の数値が異なる表記で出現
+```
+
+実装: 数値抽出 + 前後文脈との整合性チェック
+
+### Pattern 4: 短い無意味語（2〜4文字）
+
+文脈に合わない短い単語を検出。
+
+```
+例: 「ネギ目」「ポキャブ」「メヒモ」
+```
+
+実装: 形態素解析で未知語判定 + 文字数フィルタ
+
+### Pattern 5: Whisper 特有マーカー
+
+Whisper が出力する特徴的なアーティファクトを検出。
+
+```
+例: 「ご視聴ありがとうございました」（音声末尾の幻聴）
+例: 同一フレーズの連続繰り返し
+例: 「♪」「...」の異常な連続
+```
+
+### Pattern 6: フィラー・言い淀みの塊
+
+発言として意味をなさないフィラーの塊を検出。
+
+```
+例: 「えーっと、あの、その、えー、まあ」が連続
+```
+
+### Pattern 7: 括弧・記号の不整合
+
+閉じ括弧の欠落や記号の異常使用を検出。
+
+```
+例: 開き括弧に対応する閉じ括弧がない
+例: 「？」「！」の文脈に合わない出現
+```
+
+---
+
+## 7. LINE 通知フォーマット
+
+### 質問通知（不明点あり）
+
+```
+📝 2025_0610_ABC商事_定例会議
+https://docs.google.com/document/d/xxxxx
+
+「52.5万」という記載がありますが、文脈から「5万2500」のことだと思われます。合っていますか？
+```
+
+- Google Doc の URL を必ず含める
+- 質問は端的に自然語で記述
+- 仮説を提示し「合っていますか？」形式にする（Yes で済むようにする）
+
+### 完了通知（不明点なし）
+
+```
+✅ 2025_0610_ABC商事_定例会議
+https://docs.google.com/document/d/xxxxx
+
+不明点の確認がすべて完了しました。議事録が確定状態です。
+```
+
+---
+
+## 8. LINE メッセージ分類（Step⑯）
+
+受信した LINE メッセージを Claude 3.5 Sonnet で3分類する。
+
+| 分類 | 説明 | 後続処理 |
+|------|------|---------|
+| 1. 質問への回答 | 直前の質問に対する回答（Yes/No、訂正値など） | unknown_points.json 更新 → Step⑦ |
+| 2. 修正依頼 | 「〇〇は△△の間違い」等のフリーテキスト修正指示 | AI で辞書エントリ抽出 → correction_dict.json 追記 → Step⑦ |
+| 3. 無関係 | 会議議事録と関係ないメッセージ | 無視 → Step⑭ に戻る |
+
+### 修正依頼の辞書エントリ生成
+
+ユーザーの自由文から Claude が `{誤: 正}` のペアを抽出し、correction_dict.json に追記する。
+
+```
+ユーザー: 「高尾じゃなくてTAKIOです」
+→ {"高尾": "TAKIO"} を辞書に追加
+```
+
+---
+
+## 9. ジョブ管理
+
+### 同時実行
+
+- アクティブなジョブは常に1つのみ
+- 新規ファイルがルートにアップロードされた時点で、前のジョブは「確定終了」
+
+### 確定終了時の処理
+
+- 前ジョブの Google Doc タイトルが既に `{stem}`（プレフィックスなし）であればそのまま
+- プレフィックス付きの場合も、その時点の状態で確定（追加処理なし）
+
+### Suspend / Resume
+
+- Step⑭ の Suspend は**非ブロッキング**
+- メインのポーリングループ（Google Drive 監視）は継続稼働
+- LINE Webhook 受信時に Resume をトリガー
+
+---
+
+## 10. 永続化（Railway Volume）
+
+マウントポイント: `/app/data`
+
+```
+/app/data/
+├── last_seen_file_ids.json    ← ポーリング用の既知ファイルID一覧
+├── correction_dict.json       ← グローバル補正辞書（ジョブ横断で蓄積）
+└── jobs/
+    └── 2025_0610_ABC商事_定例会議/
+        ├── merged_transcript.txt   ← オリジナルの文字起こし（不変）
+        ├── unknown_points.json     ← 不明点リスト（回答済みフラグ付き）
+        └── job_state.json          ← 現在のステップ、Doc ID 等
+```
+
+### correction_dict.json
+
+- ジョブをまたいで蓄積される
+- 手動修正依頼から生成されたエントリも含む
+- Step⑦ で毎回全エントリを適用
+
+### unknown_points.json
+
 ```json
 [
   {
-    "location": "行番号または該当テキスト",
-    "original": "元のテキスト",
-    "issue": "何が問題か",
-    "suggestion": "修正候補",
-    "guess_level": 0-100の数値
+    "id": "up_001",
+    "source": "claude",
+    "text": "52.5万",
+    "context": "〜〜で52.5万くらいの規模感で〜〜",
+    "hypothesis": "5万2500のことだと思われる",
+    "status": "open",
+    "answer": null
+  },
+  {
+    "id": "up_002",
+    "source": "regex_pattern3",
+    "text": "23年前",
+    "context": "〜〜を23年前に導入して〜〜",
+    "hypothesis": "2〜3年前の可能性",
+    "status": "answered",
+    "answer": "2〜3年前が正しい"
   }
 ]
 ```
 
-##### ③の判定ロジック
-- guess_level < 40 → 自動修正を適用（音声認識の典型的な誤変換もここで拾う）
-- guess_level >= 40 → フェーズBへ（将来実装まではそのまま残す）
+---
 
-##### フェーズB：人間確認ループ（将来実装）
+## 11. 技術スタック
 
-| ステップ | 処理内容 | 備考 |
-|----------|---------|------|
-| ④質問の選定 | guess_level >= 10 の中から最も文脈に影響する1箇所を選ぶ | |
-| ⑤LINEで質問 | LINE Messaging APIで管理者に質問を送信 | |
-| ⑥回答受信 | LINE Webhookで回答を受信 | |
-| ⑦回答に基づき補正 | 回答を反映してテキストを修正。未解決の箇所があれば④に戻る | |
-
-#### API通信方式
-- ①②のClaude API呼び出しはストリーミング方式（client.messages.stream）を使用
-- 理由: 非ストリーミングでは24,728文字の入力で600秒ReadTimeoutが発生した実績あり
-- ストリーミングにより接続を常にアクティブに保ち、タイムアウトを回避する
-- タイムアウト設定: 900秒（安全弁）
-- ③は入出力が小さいため非ストリーミングでも可
-
-#### 実装優先順位
-1. ストリーミング化（現在の一括方式のタイムアウト解消）
-2. ①②③の3ステップ分離
-3. フェーズBのLINE連携
-
-#### マスク処理
-- 固有名詞のマスク/アンマスク処理は従来通り維持
-- ①②の入力時にマスク済みテキストを渡す
-- ③の出力後にアンマスクする
-
-#### Step 4.3 の処理フロー（補足）
-1. `run_job_once.py` が入力ファイル名から `filename_hints.py` で固有名詞ヒントを抽出する
-2. 抽出したヒントを Claude の検出プロンプト / レガシー補正プロンプト末尾へ **ファイル名ヒント注入**する
-3. Claude が誤変換候補を検出し、`guess_level` を返す
-4. `guess_level < 40` の候補のみローカル置換で自動適用する
-5. プレースホルダー検証後に `merged_transcript_ai.txt` を保存する
-
-### ハイブリッド検出レイヤー（step_4_35 + step_4_4）
-
-- **Step 4.35 / `review_risky_terms.py`:** `merged_transcript_ai.txt` を GPT-4o でレビューし、危険語候補を **5 カテゴリ**で `risky_terms.json` に出す。
-  - `organization_candidate`
-  - `service_candidate`
-  - `proper_noun_candidate`
-  - `suspicious_number_or_role`
-  - `suspicious_word`
-- **出力スキーマ（現実装）:** 各要素は最低限 `type` / `text` / `reason` を持つ。監査観点では `position_ratio`（0.0–1.0）のような位置情報もあると望ましいが、**現行 `review_risky_terms.py` 実装では未付与**。
-- **Step 4.4 / `extract_unknown_points.py`:** 正規表現ベースで `unknown_points.json` を生成する。カテゴリは **`固有名詞` / `数値` / `主語`**。
-- **正規表現パターンの概要:**
-  - `固有名詞`: `A社` / `B社` / `某社` / `〇〇` / `XX` などの曖昧な名詞
-  - `数値`: `いくらか` / `金額未定` / `今月中` / `早めに` / `数件` / `何件か` / `後で調整` などの曖昧な定量・期限表現
-  - `主語`: `対応する` / `更新します` などの行為表現があるのに、`担当` / `チーム` / `当社` / `私` 等の主体ヒントが無い文
-- **合流:** `run_job_once.py` は Step 4.4 実行後に **`unknown_points.json` と `risky_terms.json` をマージ**し、以降の質問選定は両者の混在リストを対象にする。
-
-### 質問選定スコアリング（step_5_0）
-
-- **原則:** 1問で議事録の不確定性をどれだけ減らせるかを主軸にする。
-- **value 式:** `value = impact - recoverability + misstatement_risk + dependency_anchor + late_document_bonus`
-- **各軸:**
-  - `impact`（0–13）: 型の基礎点 + 同一語の出現回数 bonus
-  - `recoverability`（0–10）: 型の基礎点 + 雑談文脈 bonus。**減点軸**として使う
-  - `misstatement_risk`（0–8）: 金額・期限・合意・担当などのキーワードパターン + 型 bonus
-  - `dependency_anchor`（0–3）: 他の解釈の前提になりやすいか。**主語 / 数値系を優先**
-  - `late_document_bonus`（0–1）: 文書後半 **52% 以降**に現れる候補を優先
-- **Tiebreak:** 同点時は `(risky_band, TYPE_PRIORITY, idx)` を使う。
-- **英語 / 日本語キーの統合:** `organization_candidate` / `service_candidate` / `proper_noun_candidate` / `suspicious_word` は **`固有名詞` 帯**、`suspicious_number_or_role` は **`数値` 帯**として扱う。
-- **重複除去:** `(type, text)` が同一の unknown は代表 1 件に寄せ、`_dedupe_source_indexes` で元 index 群を持つ。
-- **実運用:** `run_question_cycle_once.py` はまず **AI に 1 問だけ選ばせる**。AI に失敗したときのみ、`question_value_selection.py` の value-based 選定へフォールバックする。
-
-### LINE 質問サイクル（step_5_1〜5_4）
-
-- **1ジョブにつき最大 1 問**。`run_question_cycle_once.py` は `question_result.json` / `question_message.txt` を 1 件ぶんだけ生成する。
-- **ファイル名ヒント注入:** 入力ファイル名から抽出した固有名詞ヒントは、Step 4.3 の AI 補正で優先的に利用する。これにより Step 5 に渡る `merged_transcript_ai.txt` / `merged_transcript_after_qa.txt` 側でも、質問対象の固有名詞が安定しやすくなる。
-- **Step 5.1:** `question_result.json` を出力。`question_status` は `generated` または `none`。
-- **Step 5.2:** `data/line_pending_context.json` に直近の `job_id` / `question_id` / `question_text` / `selected_unknown` / `selection_audit` を保存し、Webhook 側で回答を job に紐づける。
-- **Step 5.3:** `question_message.txt` を作成し、`--send-line` 指定かつ LINE 環境変数が揃う場合のみ push する。
-- **Step 5.4:** `data/line_answers.json` に回答があれば `recorrect_from_line_answer.py` で `merged_transcript_after_qa.txt` を生成する。回答が無い、空配列、または再補正失敗時は `ensure_after_qa_exists` が **`merged_transcript_ai.txt` を `merged_transcript_after_qa.txt` にコピー**して先へ進める。
-- **Webhook 連携:** **LINE Webhook**（`webhook_app.py`）は回答を `data/line_answers.json` に保存する。環境変数 **`AUTO_AFTER_ANSWER`** が truthy のときのみ、保存成功後に **`run_docs_hub_e2e.py --job-id … --after-answer --push`** を **子プロセス `Popen`** で起動する（**同一 job のファイルロック**で二重起動抑制）。Webhook の HTTP 応答は失敗させない。
-
-### Drive 自動 × 元ファイルの重複アップロード（2026-03 更新）
-- **問題:** 従来、Drive 上の元ファイルを **移動**する処理と、`export_minutes_to_google_docs` の **`--upload-local-file`** が **両方**効き、案件サブフォルダに **同内容の二重ファイル**ができた。
-- **対策:** `drive_auto_run_once.py` の `run_pipeline` が `run_job_once` に **`--no-docs-upload-source`** を付与。Drive 自動経路では **元ファイルは移動のみ**、**ローカルからの再アップロードは行わない**。手動 `run_job_once` の既定は従来どおり（フラグなしならアップロードし得る）。
+| コンポーネント | 技術 |
+|--------------|------|
+| ホスティング | Railway |
+| 永続化 | Railway Volume (`/app/data`) |
+| 音声文字起こし | OpenAI Whisper API |
+| AI 補正・検出・分類・議事録生成 | Claude 3.5 Sonnet (Anthropic API) |
+| ファイル監視 | Google Drive API v3（ポーリング） |
+| ドキュメント生成 | Google Docs API v1 |
+| ユーザー通知・対話 | LINE Messaging API |
+| OAuth 管理 | Google OAuth 2.0（環境変数から JSON 復元） |
 
 ---
 
-## ④ 議事録生成・Google Docs
+## 12. 環境変数
 
-- **`run_job_once` 内（step_6）:** `generate_minutes_transcript.py` → `minutes_draft.md`、`generate_minutes_other_sections.py` → `minutes_structured.md`、`export_minutes_to_google_docs.py`（`--push`、`--update-doc-id` で同一 Doc の本文差し替え。**更新時は Drive ファイル名を `--title` に合わせる**処理あり）。
-- **`run_docs_hub_e2e.py`:** Webhook 後などの compose + export オーケストレータ（`--after-answer` で再補正→`generate_minutes_transcript`→質問準備→Docs 等）。
-- **`compose_docs_hub_markdown.py`:** `minutes_structured.md` を組み立て。
-  - **デフォルト:** **確認ワークスペース（質問・理由・`line_answers` の回答表示など）は含めない**（提出物としての Docs に Q&A メタを混ぜない）。
-  - **社内デバッグ用:** `--include-internal-workspace` または環境変数 **`DOCS_HUB_INCLUDE_INTERNAL_WORKSPACE=1`** で従来の長い Markdown を出力可能。
-- **`google_doc_hub.json`:** `doc_id` 永続化。転写直後 Docs と最終 export の **同一ドキュメント**を指す。
-- **再利用ルール:** Step 4.0 / Step 6.3 / `run_docs_hub_e2e.py` は、`data/transcriptions/<job_id>/google_doc_hub.json` に `doc_id` があれば **`--update-doc-id` で既存 Doc を再利用**する。**Drive 上で stem 名検索して見つける方式ではなく、ローカル meta JSON が正本**。
-- **実運用上の見え方:** Step 4.0 で `【文字起こし】{stem}` の暫定 Doc を早く見せ、Step 6.3 で同じ Doc を最終議事録本文へ更新する。
-
----
-
-## ⑤ 命名・ファイル配置・出力ルール（要約）
-
-- ファイル命名の理想: `yyyy_mmdd_顧客名_会議名`（詳細は元要件どおり）。
-- **入力ソースの配置:** Drive 自動では `data/incoming_audio/` にダウンロードされ、`run_job_once` の relocate が有効なら最終的に **`data/incoming_audio/<stem>/<元ファイル名>`** へ入る。
-- **中間生成物 / 成果物:** 文字起こし・補正・質問・議事録生成の主出力は **`data/transcriptions/<job_id>/`** 配下に集約される（`input_16k_mono.wav` / `chunks/` / `chunk_*.json` / `merged_transcript*.txt` / `question_result.json` / `minutes_*.md` など）。
-- **ワーカーログ / ロック:** 常駐 Drive ワーカーの PID ロックは **`logs/drive_auto_run_forever.lock`**。
-- **ワーカー状態:** 常駐 Drive ワーカーの状態サマリは **`data/worker_status.json`**。
-- **ログ:** `run_job_once` のジョブログは各 job 配下の **`e2e_run_log.txt`**、常駐系・アプリ系のログ / 補助ファイルは **`logs/`** 配下を基本とする。
-- 発言録セクションは **極力原文**；フィラー削除・明らかな誤字・区切り整理のみ許可、要約・推測補完は禁止（生成スクリプトのプロンプト・ルールに依存）。
+```
+GOOGLE_CREDENTIALS_JSON       ← サービスアカウントまたは OAuth クレデンシャル JSON
+GOOGLE_TOKEN_JSON              ← OAuth トークン JSON
+MEETING_FOLDER_ID              ← Google Drive の固定フォルダ ID
+ANTHROPIC_API_KEY              ← Claude API キー
+OPENAI_API_KEY                 ← Whisper API キー
+LINE_CHANNEL_ACCESS_TOKEN      ← LINE Messaging API アクセストークン
+LINE_CHANNEL_SECRET            ← LINE Messaging API チャネルシークレット
+LINE_USER_ID                   ← 通知先の LINE ユーザー ID
+```
 
 ---
 
-## ⑥ 学習・永続化（MVP）
+## 13. エントリポイント
 
-- LINE 回答は `data/line_answers.json` に追記（**各レコードに `job_id`**）。任意で Google Sheets へも（`webhook_app`・サービスアカウント設定時）。
+```
+railway_entry.sh
+  → railway_bootstrap.py（環境変数から OAuth JSON ファイルを復元）
+  → drive_auto_run_forever.py（メインループ起動）
+```
 
----
+### メインループの動作
 
-## ⑦ 運用・トラブル（短いチェックリスト）
+```python
+while True:
+    # 1. Google Drive ルートをポーリング
+    new_file = check_for_new_file()
 
-| 現象 | 確認先 |
-|------|--------|
-| 自動で拾われない | ファイルは **監視フォルダ直下**か。既に **案件サブフォルダにしかない**と一覧に出ない場合がある。`last_seen_file_ids.json` で既読扱いになっていないか。 |
-| `no_new_files` | 上記＋拡張子／mime。 |
-| relocate 失敗 | 移動先 **同名ファイルあり**／**stem と同名のファイルがフォルダ名と衝突** 等。 |
-| 議事録・Docs が二重 | Drive 自動では **`--no-docs-upload-source` 済み**か確認。手動では upload オプションの有無。 |
-| AI 補正の異常 | `e2e_run_log.txt` と Drive 上の `_処理ログ_<job_id>.txt`。`step_4_3_ai_correct`、`correct_full_text:`、`[WARNING] correct_full_text:` を確認。 |
+    if new_file:
+        # 前ジョブがあれば確定終了
+        finalize_previous_job()
+        # 新ジョブ開始 (Phase A → Phase B)
+        start_new_job(new_file)
 
----
+    # 2. アクティブジョブが Suspend 中なら LINE 受信をチェック
+    if active_job and active_job.is_suspended():
+        message = check_line_messages()
+        if message:
+            handle_line_message(message)  # Step⑯ の分類処理
 
-## 変更履歴（この文書レベル）
-
-- **2026-03:** AI 補正のチャンク化、Drive 自動の `--no-docs-upload-source`、Webhook の `AUTO_AFTER_ANSWER`、監視が Drive 直下であることの明記、relocate 衝突の注意、スクリプト地図の追加。
-- **2026-03-28:** Drive 投入を **パターン1（Drive 上で stem 名サブフォルダ作成＋元ファイル移動）** と明文化。新規検知は **監視フォルダ直下のファイルのみ**、直下フォルダエントリは除外。処理順は **先に Drive 移動 → ダウンロード → `run_job_once`**。ローカル relocate は手動経路用と注記。
-- **2026-03-29:** **Railway** 上で Webhook と Drive 常駐ワーカーを同居起動（`Dockerfile` / `scripts/railway_entry.sh` / `railway_bootstrap.py`）。`DRIVE_FOLDER_ID` 等の環境変数。PC 常時起動は不要と明記。
-- **2026-03-30:** `webhook_app.py` の FastAPI `startup` で Drive 常駐の起動試行を追加（起動経路のズレに対する保険）。テキスト投入でも mechanical→AI 補正→質問ループまで走ることを運用前提に追記。
-- **2026-03-31:** **転写直後の Google Docs**（`step_4_0_transcription_docs`、題名 `【文字起こし】{stem}`）と仕様固定の注記。`DRIVE_FOLDER_ID` の扱いを本文に整合。**compose_docs_hub** のデフォルトから確認ワークスペース除外。最終 export 時の Drive 題名更新と「将来はステータス連続表記を検討（未定）」を注記。AI 補正の記述をチャンク＋`gpt-4.1` 系に更新。
-- **2026-04-01:** `run_job_once.py` 基準の **実行ステップ 2.1→6.3 の表**、Step 4.35 + 4.4 のハイブリッド検出、Step 5.0 の value-based スコア式、LINE 質問サイクル、`google_doc_hub.json` ベースの Doc 再利用、`data/incoming_audio` / `data/transcriptions` / `logs` / `worker_status.json` の配置規約を追記。あわせて Step 4.3 の方針を **Claude 全文一括 + ストリーミング + timeout 900 秒** に更新。
+    sleep(POLLING_INTERVAL)
+```
