@@ -449,6 +449,7 @@ def main() -> None:
             args.answers_json,
             "--title",
             final_doc_title,
+            "--skip-compose",
         ]
         if args.push:
             sync_cmd.append("--push")

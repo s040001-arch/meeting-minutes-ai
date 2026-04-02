@@ -97,19 +97,20 @@ def _export_cmd(
 
 
 def cmd_sync_docs(args: argparse.Namespace) -> None:
-    compose_cmd = [
-        _py(),
-        os.path.join(REPO_ROOT, "compose_docs_hub_markdown.py"),
-        "--job-id",
-        args.job_id,
-        "--input-root",
-        args.input_root,
-        "--answers-json",
-        args.answers_json,
-    ]
-    if getattr(args, "include_internal_workspace", False):
-        compose_cmd.append("--include-internal-workspace")
-    _run(compose_cmd + (["--title", args.title] if args.title else []))
+    if not getattr(args, "skip_compose", False):
+        compose_cmd = [
+            _py(),
+            os.path.join(REPO_ROOT, "compose_docs_hub_markdown.py"),
+            "--job-id",
+            args.job_id,
+            "--input-root",
+            args.input_root,
+            "--answers-json",
+            args.answers_json,
+        ]
+        if getattr(args, "include_internal_workspace", False):
+            compose_cmd.append("--include-internal-workspace")
+        _run(compose_cmd + (["--title", args.title] if args.title else []))
     _run(
         _export_cmd(
             args.job_id,
@@ -232,6 +233,11 @@ def main() -> None:
         "--include-internal-workspace",
         action="store_true",
         help="Docs 用 MD に確認ワークスペース・回答メタを含める（デフォルトは成果物のみ）",
+    )
+    parser.add_argument(
+        "--skip-compose",
+        action="store_true",
+        help="compose_docs_hub_markdown.py をスキップし、既存の minutes_structured.md をそのまま使用する（generate_minutes_other_sections.py 実行後に使用）",
     )
     args = parser.parse_args()
     if os.getenv("DOCS_HUB_INCLUDE_INTERNAL_WORKSPACE", "").strip().lower() in ("1", "true", "yes"):

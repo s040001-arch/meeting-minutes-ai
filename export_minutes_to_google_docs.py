@@ -24,7 +24,8 @@ DOCS_SCOPES = [
 def md_to_google_docs_text(md: str) -> str:
     """
     MarkdownをGoogle Docsへ貼り付けやすいプレーンテキストに最小変換する。
-    ここでは精度より「接続」を優先する（見出し/箇条書き中心に整形）。
+    見出し記号（#）は除去してプレーンテキストにする。
+    見出しスタイルの適用は apply_heading_styles() で別途行う。
     """
     lines: List[str] = []
     for raw in md.splitlines():
@@ -33,7 +34,7 @@ def md_to_google_docs_text(md: str) -> str:
             lines.append("")
             continue
 
-        # 見出し
+        # 見出し（# を除去してプレーンテキスト化）
         line = re.sub(r"^#{1,6}\s*", "", line)
 
         # 箇条書き
@@ -42,6 +43,64 @@ def md_to_google_docs_text(md: str) -> str:
 
         lines.append(line)
     return "\n".join(lines).strip() + "\n"
+
+
+def _parse_heading_map(md: str) -> dict:
+    """Markdown の # / ## 行から {プレーンテキスト: namedStyleType} の辞書を生成する。
+
+    # タイトル  → "TITLE"
+    ## セクション → "HEADING_2"
+    """
+    heading_map: dict = {}
+    for line in md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading_map[stripped[3:].strip()] = "HEADING_2"
+        elif stripped.startswith("# "):
+            heading_map[stripped[2:].strip()] = "TITLE"
+    return heading_map
+
+
+def apply_heading_styles(docs_service, doc_id: str, heading_map: dict) -> None:
+    """挿入済みテキストの段落に Heading / Title スタイルを適用する。
+
+    Google Docs 上で段落テキストが heading_map のキーと一致した場合、
+    対応する namedStyleType（TITLE または HEADING_2）を updateParagraphStyle で設定する。
+    """
+    if not heading_map:
+        return
+    doc = docs_service.documents().get(documentId=doc_id).execute()
+    body = doc.get("body", {})
+    content = body.get("content", [])
+
+    style_requests: List[dict] = []
+    for item in content:
+        paragraph = item.get("paragraph")
+        if not paragraph:
+            continue
+        start_idx = item.get("startIndex")
+        end_idx = item.get("endIndex")
+        if start_idx is None or end_idx is None:
+            continue
+        para_text = "".join(
+            el.get("textRun", {}).get("content", "")
+            for el in paragraph.get("elements", [])
+        ).strip()
+        if para_text in heading_map:
+            style_requests.append({
+                "updateParagraphStyle": {
+                    "range": {"startIndex": start_idx, "endIndex": end_idx},
+                    "paragraphStyle": {"namedStyleType": heading_map[para_text]},
+                    "fields": "namedStyleType",
+                }
+            })
+
+    # 50件ずつ送信（API リクエスト制限対策）
+    for i in range(0, len(style_requests), 50):
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": style_requests[i : i + 50]},
+        ).execute()
 
 
 def resolve_input(minutes_structured_path: str | None, job_id: str, input_root: str) -> str:
@@ -490,6 +549,12 @@ def main() -> None:
             text=text,
             chunk_size=args.chunk_size,
         )
+
+    # 見出しスタイルを適用（Title / Heading 2）
+    heading_map = _parse_heading_map(md)
+    if heading_map:
+        apply_heading_styles(docs_service, doc_id, heading_map)
+
     actual_text = fetch_google_doc_text(docs_service, doc_id)
     expected_chars = len(text)
     actual_chars = len(actual_text)

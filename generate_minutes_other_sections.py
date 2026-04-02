@@ -26,7 +26,7 @@ def extract_title_and_transcript(minutes_draft_text: str) -> Tuple[str, str]:
     in_transcript = False
     for line in lines:
         if not in_transcript:
-            if line.strip() in {"## 発言録", "##発言録"}:
+            if line.strip() in {"## 発言録", "##発言録", "## 発言録（逐語）", "##発言録（逐語）"}:
                 in_transcript = True
             continue
         transcript_lines.append(line)

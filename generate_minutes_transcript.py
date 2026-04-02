@@ -16,7 +16,7 @@ def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> 
 def build_minutes_text(title: str, transcript_text: str) -> str:
     return (
         f"# {title}\n\n"
-        "## 発言録\n\n"
+        "## 発言録（逐語）\n\n"
         f"{transcript_text.strip()}\n"
     )
 
