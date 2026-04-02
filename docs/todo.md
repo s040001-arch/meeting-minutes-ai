@@ -258,10 +258,10 @@ Spec.md が固まったため、以下の順序で実装を進める。
 
 ### Phase 2: AI補正パイプライン簡素化（Opus 一発補正）
 
-- [ ] 実装: `ai_correct_text.py` のマスキング→検出→str.replace 多段処理を廃止
-- [ ] 実装: 機械補正後のテキストを Opus に一括で渡す単一 Claude 呼び出しに置き換え
-- [ ] 実装: プロンプトにコンテキスト情報（参加者・企業名・ナレッジメモ・補正ルール）を一括注入
-- [ ] 実装: `run_job_once.py` / `run_resume_from_step7.py` のモデル指定を Opus に更新
+- [x] 実装: `ai_correct_text.py` のマスキング→検出→str.replace 多段処理を廃止
+- [x] 実装: 機械補正後のテキストを Opus に一括で渡す単一 Claude 呼び出しに置き換え
+- [x] 実装: プロンプトにコンテキスト情報（参加者・企業名・ナレッジメモ・補正ルール）を一括注入
+- [x] 実装: `run_job_once.py` / `run_resume_from_step7.py` の PHASE_LABELS を Opus 一括方式に整理
 - [ ] 検証: 実データで補正品質 85% 以上を確認
 
 ### Phase 3: 品質テスト

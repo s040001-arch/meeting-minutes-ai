@@ -9,24 +9,28 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Callable, Optional
 
 from filename_hints import format_hints_for_prompt
-from job_context import format_context_for_detection_prompt, format_context_for_prompt
-from knowledge_sheet_store import format_knowledge_for_detection_prompt, format_knowledge_for_prompt, load_knowledge_memos
+from job_context import format_context_for_prompt
+from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
 
 logger = logging.getLogger(__name__)
 
+# Claude 4 Opus — environment variable ANTHROPIC_CORRECTION_MODEL overrides this.
+OPUS_CORRECTION_MODEL = "claude-opus-4-20250514"
 
-def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> str:
-    if input_path:
-        return input_path
-    return os.path.join(
-        input_root,
-        job_id,
-        "merged_transcript_mechanical.txt",
-    )
+_STREAM_MAX_RETRIES = 2
+_STREAM_CHUNK_PREVIEW_CHARS = 80
+_STREAM_LOG_EVERY_CHARS = 500
+_STREAM_LOG_EVERY_SEC = 10.0
+_STREAM_RETRY_BACKOFF_SEC = (5.0, 10.0)
 
+
+# ---------------------------------------------------------------------------
+# API key utilities
+# ---------------------------------------------------------------------------
 
 def _normalize_api_key(raw: str | None) -> str | None:
     if not raw:
@@ -65,338 +69,19 @@ def resolve_openai_api_key() -> tuple[str | None, str]:
     return None, "not_found"
 
 
-def split_mechanical_for_ai_correction(
-    text: str,
-    *,
-    target_chars: int = 5000,
-    lookback: int = 1500,
-    hard_max: int = 12000,
-) -> list[str]:
-    """
-    長文AI補正用に機械補正テキストをチャンクに分割する。
-    目標文字数付近で切り、可能なら直近の改行または句点へ後方スナップする。
-    単一ブロックが極端に長い場合は hard_max でハードカットする。
-    連結すると元テキストと一致する（損失なし）。
-    """
-    if not text:
-        return []
-    n = len(text)
-    chunks: list[str] = []
-    start = 0
-    while start < n:
-        remaining = n - start
-        if remaining <= target_chars:
-            chunks.append(text[start:n])
-            break
-        t_end = min(start + target_chars, n)
-        lo = max(start, t_end - lookback)
-        split_at = -1
-        for i in range(t_end - 1, lo - 1, -1):
-            c = text[i]
-            if c in "\n\r":
-                split_at = i + 1
-                break
-            if c in "。．":
-                split_at = i + 1
-                break
-        if split_at <= start:
-            if t_end - start > hard_max:
-                split_at = start + hard_max
-            else:
-                split_at = t_end
-        if split_at <= start:
-            split_at = min(start + hard_max, n)
-        if split_at <= start:
-            split_at = min(start + 1, n)
-        chunk = text[start:split_at]
-        chunks.append(chunk)
-        start = split_at
-    return chunks
-
-
-_PLACEHOLDER_STRICT_RE = re.compile(r"<[A-Z]+_[0-9]{4}>")
-_FILLER_RE = re.compile(r"(?:うん|なんか|えーと|えっと|あのー?|ま)(?:、|。|\\s|$)")
-_SENTENCE_SPLIT_RE = re.compile(r"[。！？]")
-_TOPIC_BREAK_HINT_RE = re.compile(
-    r"(?:^|\n)\s*(?:で、|ただ、|一方で、|一方、|あと、|なので、|まず、|次に、|つまり、|そのうえで、|一方で|ちなみに、)"
-)
-
-# Priority (small -> large):
-# MONEY / DATE / PERSON / COMPANY should win over generic NUM.
-_MASK_PATTERN_SPECS: list[tuple[str, re.Pattern[str], int]] = [
-    (
-        "MONEY",
-        re.compile(
-            r"(?:¥\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:円|万円|億円|千円|百万円|兆円)"
-        ),
-        10,
-    ),
-    (
-        "DATE",
-        re.compile(
-            r"(?:\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)"
-        ),
-        20,
-    ),
-    (
-        "PERSON",
-        re.compile(r"[\u4E00-\u9FFF]{1,4}(?:さん|氏|様|殿)"),
-        30,
-    ),
-    (
-        "COMPANY",
-        re.compile(
-            # Require 2+ chars before 社/グループ/ホールディングス to avoid masking
-            # single-kanji pronouns like 古社 / 同社 / 当社 / 御社 which would
-            # prevent Claude from detecting misrecognitions such as 古社→子会社.
-            r"(?:株式会社[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}|[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{2,24}(?:社|グループ|ホールディングス))"
-        ),
-        40,
-    ),
-    (
-        "NUM",
-        re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*(?:社|人|名|問|回|件|本|台|社数|日|時間|分))?"),
-        90,
-    ),
-]
-
-
-def _extract_placeholders_strict(text: str) -> list[str]:
-    return [m.group(0) for m in _PLACEHOLDER_STRICT_RE.finditer(text)]
-
-
-def _mask_protected_tokens(text: str) -> tuple[str, dict[str, str], list[str]]:
-    candidates: list[tuple[int, int, int, str]] = []
-    for p_type, pattern, priority in _MASK_PATTERN_SPECS:
-        for m in pattern.finditer(text):
-            s, e = m.span()
-            if s >= e:
-                continue
-            candidates.append((s, e, priority, p_type))
-
-    # start asc, priority asc, length desc
-    candidates.sort(key=lambda x: (x[0], x[2], -(x[1] - x[0])))
-
-    selected: list[tuple[int, int, str]] = []
-    last_end = -1
-    for s, e, _priority, p_type in candidates:
-        if s < last_end:
-            continue
-        selected.append((s, e, p_type))
-        last_end = e
-
-    counters: dict[str, int] = {}
-    mapping: dict[str, str] = {}
-    expected: list[str] = []
-
-    out_parts: list[str] = []
-    pos = 0
-    for s, e, p_type in selected:
-        if s < pos:
-            continue
-        original = text[s:e]
-        if not original.strip():
-            continue
-        out_parts.append(text[pos:s])
-        counters[p_type] = counters.get(p_type, 0) + 1
-        placeholder = f"<{p_type}_{counters[p_type]:04d}>"
-        out_parts.append(placeholder)
-        mapping[placeholder] = original
-        expected.append(placeholder)
-        pos = e
-    out_parts.append(text[pos:])
-    return "".join(out_parts), mapping, expected
-
-
-def _restore_masked_text(masked_text: str, mapping: dict[str, str]) -> str:
-    def repl(m: re.Match[str]) -> str:
-        token = m.group(0)
-        return mapping.get(token, token)
-
-    return _PLACEHOLDER_STRICT_RE.sub(repl, masked_text)
-
-
-def _validate_placeholder_sequence(
-    corrected_masked: str,
-    expected_placeholders: list[str],
-) -> None:
-    actual_placeholders = _extract_placeholders_strict(corrected_masked)
-    if actual_placeholders != expected_placeholders:
-        raise RuntimeError(
-            "placeholder_sequence_mismatch "
-            f"expected={expected_placeholders} actual={actual_placeholders}"
-        )
-
-
-def _count_paragraphs(text: str) -> int:
-    blocks = [b for b in re.split(r"\n\s*\n+", text) if b.strip()]
-    return len(blocks)
-
-
-def compute_readability_stats(text: str) -> dict[str, int]:
-    return {
-        "period_count": text.count("。"),
-        "comma_count": text.count("、"),
-        "newline_count": text.count("\n"),
-        "paragraph_count": _count_paragraphs(text),
-        "filler_count": len(_FILLER_RE.findall(text)),
-    }
-
-
-def compute_structure_quality(text: str) -> dict[str, float]:
-    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
-    sentence_count = len(sentences)
-    paragraph_count = _count_paragraphs(text)
-    sentence_lengths = [len(s) for s in sentences]
-    avg_sentence_len = (sum(sentence_lengths) / sentence_count) if sentence_count else 0.0
-    short_sentence_rate = (
-        (sum(1 for n in sentence_lengths if n <= 8) / sentence_count) if sentence_count else 0.0
-    )
-    long_sentence_rate = (
-        (sum(1 for n in sentence_lengths if n >= 80) / sentence_count) if sentence_count else 0.0
-    )
-    sentences_per_paragraph = (sentence_count / paragraph_count) if paragraph_count > 0 else 0.0
-    topic_break_hint_count = len(_TOPIC_BREAK_HINT_RE.findall(text))
-
-    # 5-item rubric: prioritize "readable structure", not raw punctuation counts.
-    rubric = {
-        "has_enough_sentences": 1.0 if sentence_count >= 2 else 0.0,
-        "avg_sentence_len_band": 1.0 if 18.0 <= avg_sentence_len <= 65.0 else 0.0,
-        "short_sentence_rate_ok": 1.0 if short_sentence_rate <= 0.40 else 0.0,
-        "long_sentence_rate_ok": 1.0 if long_sentence_rate <= 0.25 else 0.0,
-        "paragraph_density_ok": 1.0 if 1.2 <= sentences_per_paragraph <= 6.5 else 0.0,
-    }
-    quality_score = float(sum(rubric.values()))
-    return {
-        "sentence_count": float(sentence_count),
-        "paragraph_count": float(paragraph_count),
-        "avg_sentence_len": float(avg_sentence_len),
-        "short_sentence_rate": float(short_sentence_rate),
-        "long_sentence_rate": float(long_sentence_rate),
-        "sentences_per_paragraph": float(sentences_per_paragraph),
-        "topic_break_hint_count": float(topic_break_hint_count),
-        "quality_score": quality_score,
-        **rubric,
-    }
-
-
-def _build_system_prompt(
-    *,
-    aggressive_structure: bool,
-    filename_hints: list[str] | None = None,
-    knowledge_memos: list[str] | None = None,
-    job_context: dict | None = None,
-) -> str:
-    base = (
-        "あなたは議事録の可読性整形アシスタントです。"
-        "要約・言い換え・内容の追加/削除は禁止です。"
-        "日付・時刻・数値・金額は変更禁止です。"
-        "入力には保護トークン <TYPE_0001> 形式が含まれます。"
-        "この保護トークンは1文字も変更・削除・追加・並べ替えしてはいけません。"
-        "保護トークンの出現順は入力と完全に一致させてください。"
-        "出力は整形後テキスト本文のみとし、説明文や注釈は付けないでください。"
-        "\n【補正の判断基準】"
-        "\n・文脈から高い確信度で判断できる音声誤変換（例：「古車」→「各社」、「人的尊敬」→「人的資本」）は修正してください。"
-        "\n・ナレッジに登録された正しい表記との明らかな差異は修正してください。"
-        "\n・同一テキスト内で同一の対象を指す固有名詞の表記揺れは、最も正確と思われる表記に統一してください。"
-        "\n・確信が持てない固有名詞・人名・会社名の推測置換は禁止です（そのまま残してください）。"
-    )
-    if not aggressive_structure:
-        return (
-            base
-            + "\n意味を変えない範囲で、句読点・改行・段落・文境界・明らかな脱字/崩れの修正を行ってください。"
-            + "\nフィラー（「えーと」「あのー」「うん」「はい」などの単独相槌）は削除してください。"
-            + "ただし、言いよどみや自己訂正（「〜じゃなくて、〜」「いや、〜」など）は話者の意図として残してください。"
-            + "\n段落は文数よりも話題のまとまりを優先して調整してください。"
-            + format_hints_for_prompt(filename_hints or [])
-            + format_knowledge_for_prompt(knowledge_memos or [])
-            + format_context_for_prompt(job_context or {})
-        )
-    return (
-        base
-        + "\n意味を変えない範囲で文構造の再構成を積極的に行ってください。"
-        + "\n長すぎる文は分割し、話題単位で段落分けしてください。"
-        + "\n段落の文数目安は3-5文ですが、意味のまとまりを優先してください。"
-        + "\n過分割（短文だけの段落乱立）は避け、理解しやすいまとまりにしてください。"
-        + "\nフィラー（「えーと」「あのー」「うん」「なんか」など）は削除し、重複表現を整理してください。"
-        + "ただし、言いよどみや自己訂正（「〜じゃなくて、〜」など）は話者の意図として残してください。"
-        + "\n語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
-        + format_hints_for_prompt(filename_hints or [])
-        + format_knowledge_for_prompt(knowledge_memos or [])
-        + format_context_for_prompt(job_context or {})
+def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> str:
+    if input_path:
+        return input_path
+    return os.path.join(
+        input_root,
+        job_id,
+        "merged_transcript_mechanical.txt",
     )
 
 
-def _build_detection_system_prompt(
-    filename_hints: list[str] | None = None,
-    knowledge_memos: list[str] | None = None,
-    job_context: dict | None = None,
-) -> str:
-    return (
-        "あなたは議事録補正の分析アシスタントです。"
-        "入力はマスク済みの日本語テキストです。"
-        "音声認識由来の誤変換・脱字・崩れ・接続不良を幅広く検出してください。"
-        "\n【検出対象】"
-        "\n・音が似ているが漢字が違う誤変換（例：「ショート力」→「仕事力」、「電シス」→「デイシス」）"
-        "\n・文脈から意味的に明らかに合わない語句（例：「優勝」→「有償」、「人的尊敬」→「人的資本」、「古車」→「各社」）"
-        "\n・慣用句・ビジネス用語の誤認識（例：「妖怪じゃないですか」→「要諦じゃないですか」、「減ったぶり」→「へったくれ」）"
-        "\n・同一テキスト内で同一の対象を指す固有名詞の表記揺れ（例：「THR」「thr」「T HR」の混在 → 「THR」に統一）"
-        "\n【guess_level の評価基準】"
-        "\n・0〜20（自動修正）: 文脈から見てほぼ確実な誤変換。典型的な音声誤変換パターン。ナレッジに登録済みの正しい表記との明らかな差異。"
-        "\n・20〜40（自動修正）: 文脈から強く推測できる誤変換。慣用句・ビジネス用語の誤認識。"
-        "\n・40〜70（要確認）: 候補はあるが複数考えられる、または文脈依存で確信が持てないもの。"
-        "\n・70〜100（保留）: 固有名詞で文脈不足、または判断材料が不十分なもの。"
-        "\n日付・時刻・数値・金額は変更禁止です。"
-        "保護トークン <TYPE_0001> 形式は1文字も変更・削除・追加・並べ替えしてはいけません。"
-        "出力は JSON 配列のみとし、説明文・前置き・コードフェンスを付けないでください。"
-        "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
-        "location は該当箇所の前後10文字程度の短い抜粋、original は元の問題箇所そのもの、"
-        "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
-        + format_hints_for_prompt(filename_hints or [])
-        + format_knowledge_for_detection_prompt(knowledge_memos or [])
-        + format_context_for_detection_prompt(job_context or {})
-    )
-
-
-def _build_consistency_check_prompt(
-    filename_hints: list[str] | None = None,
-    knowledge_memos: list[str] | None = None,
-    job_context: dict | None = None,
-) -> str:
-    """第2パス用の一貫性チェックプロンプト。
-    第1パスで自動補正された後のテキストに対して、残存する表記揺れや
-    見落とした誤変換を厳選して検出する。
-    guess_level は 0〜20 の範囲のみ使用する（不確かな場合は検出しない）。
-    """
-    return (
-        "あなたは議事録の表記一貫性チェッカーです。"
-        "入力はマスク済みの日本語テキストです（第1パスで音声認識誤変換を補正済み）。"
-        "以下の問題のみを検出してください。不確かなものは検出しないでください。"
-        "\n【検出対象（確実なもののみ）】"
-        "\n・同一テキスト内で同一の対象を指す固有名詞の表記揺れ（例：「高橋さん」と「TOKIO さん」が同一人物）"
-        "\n・第1パスで見落とした、文脈から9割以上確実な音声認識誤変換"
-        "\nguess_level は必ず 0〜20 の範囲のみ使用してください（不確かな場合は検出リストに含めない）。"
-        "\n日付・時刻・数値・金額は変更禁止です。"
-        "保護トークン <TYPE_0001> 形式は1文字も変更・削除・追加・並べ替えしてはいけません。"
-        "出力は JSON 配列のみとし、説明文・前置き・コードフェンスを付けないでください。"
-        "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
-        + format_hints_for_prompt(filename_hints or [])
-        + format_knowledge_for_detection_prompt(knowledge_memos or [])
-        + format_context_for_detection_prompt(job_context or {})
-    )
-
-
-_STREAM_MAX_RETRIES = 2
-_STREAM_CHUNK_PREVIEW_CHARS = 80
-_STREAM_LOG_EVERY_CHARS = 500
-_STREAM_LOG_EVERY_SEC = 10.0
-_STREAM_RETRY_BACKOFF_SEC = (5.0, 10.0)
-_UNKNOWN_NUMBER_HINT_RE = re.compile(
-    r"(?:\d|[0-9０-９]+|円|万円|億円|時|分|日|月|年|件|人|名|社|金額|数値|期限|役職|担当)"
-)
-_UNKNOWN_ORG_HINT_RE = re.compile(r"(?:株式会社|有限会社|会社|企業|法人|部門|部署|グループ|ホールディングス)")
-_UNKNOWN_SERVICE_HINT_RE = re.compile(r"(?:サービス|製品|商品|プラン|研修|サーベイ|プロジェクト)")
-
+# ---------------------------------------------------------------------------
+# Streaming helper
+# ---------------------------------------------------------------------------
 
 def _is_retryable_stream_error(exc: Exception) -> bool:
     if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
@@ -415,62 +100,6 @@ def _stream_chunk_preview(text: str) -> str:
     if len(preview) > _STREAM_CHUNK_PREVIEW_CHARS:
         preview = preview[:_STREAM_CHUNK_PREVIEW_CHARS] + "..."
     return preview
-
-
-def _classify_unknown_candidate_type(original: str, suggestion: str, issue: str, location: str) -> str:
-    combined = "\n".join([original, suggestion, issue, location])
-    if _UNKNOWN_NUMBER_HINT_RE.search(combined):
-        return "suspicious_number_or_role"
-    if _UNKNOWN_ORG_HINT_RE.search(combined):
-        return "organization_candidate"
-    if _UNKNOWN_SERVICE_HINT_RE.search(combined):
-        return "service_candidate"
-    return "suspicious_word"
-
-
-def _build_ai_unknown_points(
-    detections: list[dict[str, object]],
-    placeholder_mapping: dict[str, str],
-    *,
-    min_guess_level: int = 40,
-) -> list[dict[str, object]]:
-    unknowns: list[dict[str, object]] = []
-    for item in detections:
-        guess_level = int(item.get("guess_level", 100))
-        if guess_level < min_guess_level:
-            continue
-        original = _restore_masked_text(str(item.get("original", "")).strip(), placeholder_mapping).strip()
-        suggestion = _restore_masked_text(
-            str(item.get("suggestion", "")).strip(),
-            placeholder_mapping,
-        ).strip()
-        issue = _restore_masked_text(str(item.get("issue", "")).strip(), placeholder_mapping).strip()
-        location = _restore_masked_text(
-            str(item.get("location", "")).strip(),
-            placeholder_mapping,
-        ).strip()
-        if not original:
-            continue
-        type_raw = _classify_unknown_candidate_type(original, suggestion, issue, location)
-        reason_parts = ["Claude が文脈上不確実と判断しました。"]
-        if issue:
-            reason_parts.append(issue)
-        if suggestion:
-            reason_parts.append(f"候補: {suggestion}")
-        reason_parts.append(f"guess_level={guess_level}")
-        unknown: dict[str, object] = {
-            "type": type_raw,
-            "text": original,
-            "reason": " ".join(reason_parts).strip(),
-            "source": "claude_step9",
-            "guess_level": guess_level,
-        }
-        if suggestion:
-            unknown["hypothesis"] = suggestion
-        if location:
-            unknown["context"] = location
-        unknowns.append(unknown)
-    return unknowns
 
 
 def _stream_anthropic_text(
@@ -548,259 +177,13 @@ def _stream_anthropic_text(
     raise RuntimeError(f"{log_label} exhausted retries")
 
 
-def _parse_detection_response(raw_text: str) -> list[dict[str, object]]:
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    data = json.loads(text)
-    if not isinstance(data, list):
-        raise RuntimeError("detection_response_not_list")
-    parsed: list[dict[str, object]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        original = str(item.get("original", "")).strip()
-        suggestion = str(item.get("suggestion", "")).strip()
-        issue = str(item.get("issue", "")).strip()
-        location = str(item.get("location", "")).strip()
-        guess_raw = item.get("guess_level", 100)
-        try:
-            guess_level = int(guess_raw)
-        except (TypeError, ValueError):
-            guess_level = 100
-        guess_level = max(0, min(100, guess_level))
-        if not original:
-            continue
-        parsed.append(
-            {
-                "location": location,
-                "original": original,
-                "issue": issue,
-                "suggestion": suggestion,
-                "guess_level": guess_level,
-            }
-        )
-    return parsed
-
-
-def _apply_low_guess_replacements(
-    masked_text: str,
-    detections: list[dict[str, object]],
-) -> tuple[str, int, int]:
-    updated = masked_text
-    auto_applied = 0
-    skipped = 0
-    # Track already-applied pairs to avoid double-counting when Claude returns
-    # the same (original, suggestion) pair multiple times for different occurrences.
-    applied_pairs: set[tuple[str, str]] = set()
-    for item in detections:
-        original = str(item.get("original", ""))
-        suggestion = str(item.get("suggestion", ""))
-        guess_level = int(item.get("guess_level", 100))
-        if guess_level >= 40:
-            skipped += 1
-            continue
-        if not original or not suggestion or original == suggestion:
-            skipped += 1
-            continue
-        orig_placeholders = _PLACEHOLDER_STRICT_RE.findall(original)
-        sugg_placeholders = _PLACEHOLDER_STRICT_RE.findall(suggestion)
-        if sorted(orig_placeholders) != sorted(sugg_placeholders):
-            logger.warning(
-                "skipped: placeholder mismatch in suggestion | "
-                f"original={original!r} suggestion={suggestion!r} "
-                f"orig_ph={orig_placeholders} sugg_ph={sugg_placeholders}"
-            )
-            skipped += 1
-            continue
-        pair = (original, suggestion)
-        if pair in applied_pairs:
-            # Already replaced all occurrences in a prior iteration; skip duplicate detection.
-            skipped += 1
-            continue
-        count = updated.count(original)
-        if count == 0:
-            skipped += 1
-            continue
-        # Replace ALL occurrences at once — if we are confident (guess_level < 40)
-        # the correction is correct, every occurrence should be fixed, not just the first.
-        updated = updated.replace(original, suggestion)
-        auto_applied += count
-        applied_pairs.add(pair)
-    return updated, auto_applied, skipped
-
-
-def _correct_full_text_legacy(
-    *,
-    text: str,
-    api_key: str,
-    model: str,
-    timeout_sec: int,
-    max_tokens: int,
-    filename_hints: list[str] | None = None,
-    knowledge_memos: list[str] | None = None,
-    job_context: dict | None = None,
-) -> str:
-    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
-    system_prompt = _build_system_prompt(
-        aggressive_structure=False,
-        filename_hints=filename_hints,
-        knowledge_memos=knowledge_memos,
-        job_context=job_context,
-    )
-    full_response, stop_reason = _stream_anthropic_text(
-        api_key=api_key,
-        model=model,
-        system_prompt=system_prompt,
-        user_message=masked_text,
-        max_tokens=max_tokens,
-        timeout_sec=timeout_sec,
-        log_label="AI correction streaming",
-    )
-    _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
-    if stop_reason == "max_tokens":
-        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
-        print(
-            f"[WARNING] correct_full_text: fallback to original. "
-            f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
-        )
-        return text
-
-    corrected_masked = full_response.strip()
-    _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
-    print(
-        f"correct_full_text: output_chars={len(corrected_masked)} "
-        f"stop_reason={stop_reason}"
-    )
-    if not corrected_masked:
-        _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-        _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
-        print(
-            f"[WARNING] correct_full_text: fallback to original. "
-            f"reason=anthropic_text_missing input_chars={len(text)}"
-        )
-        return text
-
-    _validate_placeholder_sequence(corrected_masked, expected_placeholders)
-    restored = _restore_masked_text(corrected_masked, placeholder_mapping)
-    _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
-    print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
-    return restored
-
-
-def call_openai_for_correction_detailed(
-    text: str,
-    model: str,
-    api_key: str,
-    timeout_sec: int = 300,
-    *,
-    aggressive_structure: bool = False,
-) -> tuple[str, dict[str, object]]:
-    """
-    OpenAI Responses API で議事録可読性整形を実行し、評価用メタを返す。
-    """
-    stats_before = compute_readability_stats(text)
-    structure_before = compute_structure_quality(text)
-    masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
-
-    url = "https://api.openai.com/v1/responses"
-    payload = {
-        "model": model,
-        "temperature": 0.2,
-        "max_output_tokens": 12000,
-        "input": [
-            {
-                "role": "system",
-                "content": _build_system_prompt(aggressive_structure=aggressive_structure),
-            },
-            {"role": "user", "content": masked_text},
-        ],
-    }
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url=url,
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI API error: {e.code} {detail}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"OpenAI API connection error: {e}") from e
-
-    result = json.loads(body)
-    response_status = result.get("status")
-    incomplete_details = result.get("incomplete_details")
-    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    output_items = result.get("output", [])
-    output_count = len(output_items) if isinstance(output_items, list) else 0
-    print(f"debug_openai_response_status={response_status}")
-    print(
-        "debug_openai_response_incomplete_details="
-        + json.dumps(incomplete_details, ensure_ascii=False)
-    )
-    print(
-        "debug_openai_response_usage="
-        + json.dumps(
-            {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            },
-            ensure_ascii=False,
-        )
-    )
-    print(f"debug_openai_response_output_count={output_count}")
-
-    texts: list[str] = []
-    for item in output_items:
-        for c in item.get("content", []):
-            if c.get("type") == "output_text":
-                texts.append(c.get("text", ""))
-
-    corrected_masked = "\n".join(t for t in texts if t).strip()
-    print(f"debug_openai_output_text_len={len(corrected_masked)}")
-    if not corrected_masked:
-        raise RuntimeError("OpenAI response did not contain output_text.")
-
-    _validate_placeholder_sequence(corrected_masked, expected_placeholders)
-
-    corrected = _restore_masked_text(corrected_masked, placeholder_mapping)
-    stats_after = compute_readability_stats(corrected)
-    structure_after = compute_structure_quality(corrected)
-    meta: dict[str, object] = {
-        "stats_before": stats_before,
-        "stats_after": stats_after,
-        "structure_before": structure_before,
-        "structure_after": structure_after,
-        "placeholder_ok": True,
-        "aggressive_structure": aggressive_structure,
-    }
-    return corrected, meta
-
-
-_LAST_CORRECT_FULL_TEXT_META: dict[str, object] = {}
-
-
-def get_last_correct_full_text_meta() -> dict[str, object]:
-    return dict(_LAST_CORRECT_FULL_TEXT_META)
-
+# ---------------------------------------------------------------------------
+# Visible log helper
+# ---------------------------------------------------------------------------
 
 def _append_visible_log(visible_log_path: str | None, message: str) -> None:
     if not visible_log_path:
         return
-    from datetime import datetime
     ts = datetime.now().isoformat(timespec="seconds")
     line = f"[{ts}] {message}\n"
     try:
@@ -811,27 +194,79 @@ def _append_visible_log(visible_log_path: str | None, message: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Opus correction prompt
+# ---------------------------------------------------------------------------
+
+def _build_opus_correction_system_prompt(
+    filename_hints: list[str] | None = None,
+    knowledge_memos: list[str] | None = None,
+    job_context: dict | None = None,
+) -> str:
+    """Claude 4 Opus 向け一括補正プロンプト。
+    マスキングなしでテキスト全文をそのまま渡す前提。
+    補正後テキスト本文のみを出力させる。
+    """
+    return (
+        "あなたは会議の音声認識テキストを補正する専門アシスタントです。"
+        "入力テキストは音声認識（Whisper）の出力を機械補正したものです。"
+        "以下の補正ルールに従って補正し、補正後のテキスト本文のみを出力してください。"
+        "説明文・前置き・注釈は一切付けないでください。"
+        "\n\n【補正ルール】"
+        "\n1. 音声誤変換を正しい表記に修正する"
+        "\n   - 文脈から高い確信度で判断できる場合のみ修正する"
+        "\n   - 例：「古車」→「子会社」、「人的尊敬」→「人的資本」、「妖怪じゃないですか」→「要諦じゃないですか」"
+        "\n2. 同一テキスト内で同一の対象を指す固有名詞の表記揺れを統一する"
+        "\n   - 例：「THR」「thr」「T HR」の混在 → 「THR」に統一"
+        "\n3. 明確なフィラー（「えーと」「あのー」などの単独相槌）を削除する"
+        "\n4. 言いよどみや自己訂正（「〜じゃなくて、〜」「いや、〜」など）は話者の意図として残す"
+        "\n5. 日付・時刻・数値・金額は変更しない"
+        "\n6. 要約・内容の追加・削除は禁止"
+        "\n7. 不確かな固有名詞・人名・会社名の推測置換は禁止（確信が持てない場合はそのまま残す）"
+        + format_hints_for_prompt(filename_hints or [])
+        + format_context_for_prompt(job_context or {})
+        + format_knowledge_for_prompt(knowledge_memos or [])
+    )
+
+
+# ---------------------------------------------------------------------------
+# correct_full_text — public API
+# ---------------------------------------------------------------------------
+
+_LAST_CORRECT_FULL_TEXT_META: dict[str, object] = {}
+
+
+def get_last_correct_full_text_meta() -> dict[str, object]:
+    return dict(_LAST_CORRECT_FULL_TEXT_META)
+
+
 def correct_full_text(
     text: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     timeout_sec: int = 900,
     on_phase: Optional[Callable[[str], None]] = None,
     filename_hints: list[str] | None = None,
     visible_log_path: str | None = None,
     job_context: dict | None = None,
 ) -> str:
-    """
-    全文を一括でAI補正する。チャンク分割なし。
-    Anthropic Messages API を使用。
-    戻り値は補正後テキスト。失敗時は元テキストを返す。
+    """機械補正済みテキストを Claude 4 Opus に一括で渡し補正済み全文を返す。
 
-    ENABLE_CONSISTENCY_PASS=1 環境変数を設定すると、第1パス後に
-    第2パス（一貫性チェック）を実行する。
+    マスキング・JSON 検出・str.replace の多段処理は廃止。
+    テキスト全文をそのままプロンプトに渡すことで文脈を保持する。
+
+    ai_unknown_points は常に空リスト（Step⑨ / ⑩ の Regex 検出が担当）。
+    失敗時は元テキストをそのまま返す。
     """
     if not text:
         return text
 
-    print(f"correct_full_text: input_chars={len(text)}")
+    resolved_model = (
+        model
+        or os.environ.get("ANTHROPIC_CORRECTION_MODEL", "").strip()
+        or OPUS_CORRECTION_MODEL
+    )
+
+    print(f"correct_full_text: input_chars={len(text)} model={resolved_model}")
     global _LAST_CORRECT_FULL_TEXT_META
     max_tokens = min(max(int(len(text) * 1.0), 8192), 40960)
     _LAST_CORRECT_FULL_TEXT_META = {
@@ -851,6 +286,7 @@ def correct_full_text(
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
     try:
+        # ── ナレッジ読み込み ──────────────────────────────────────────────
         try:
             knowledge_memos = load_knowledge_memos()
             print(f"correct_full_text: knowledge_memos={len(knowledge_memos)}")
@@ -871,203 +307,61 @@ def correct_full_text(
                 visible_log_path,
                 f"Step 8: ナレッジ読み込み: エラー → {e!r}",
             )
-        if on_phase:
-            on_phase("masking")
-        masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
-        logger.info(f"Step 4.3a: マスキング完了 placeholders={len(placeholder_mapping)}")
 
+        # ── Opus 一括補正 ─────────────────────────────────────────────────
         if on_phase:
-            on_phase("ai_detect")
-        api_started_at = time.time()
-        detection_response, stop_reason = _stream_anthropic_text(
+            on_phase("ai_correct")
+        _append_visible_log(visible_log_path, "Step 8: AI補正開始（Opus一括）")
+
+        system_prompt = _build_opus_correction_system_prompt(
+            filename_hints=filename_hints,
+            knowledge_memos=knowledge_memos,
+            job_context=job_context,
+        )
+
+        full_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
-            model=model,
-            system_prompt=_build_detection_system_prompt(
-                filename_hints,
-                knowledge_memos=knowledge_memos,
-                job_context=job_context,
-            ),
-            user_message=masked_text,
+            model=resolved_model,
+            system_prompt=system_prompt,
+            user_message=text,
             max_tokens=max_tokens,
             timeout_sec=timeout_sec,
-            log_label="AI correction detection streaming",
+            log_label="AI correction streaming",
         )
-        api_elapsed_sec = time.time() - api_started_at
         _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
+
         if stop_reason == "max_tokens":
-            print(
-                f"[WARNING] correct_full_text: detection hit max_tokens. "
-                "falling back to legacy full-text correction."
-            )
-            return _correct_full_text_legacy(
-                text=text,
-                api_key=api_key,
-                model=model,
-                timeout_sec=timeout_sec,
-                max_tokens=max_tokens,
-                filename_hints=filename_hints,
-                knowledge_memos=knowledge_memos,
-                job_context=job_context,
-            )
-
-        detections = _parse_detection_response(detection_response)
-        detection_count = len(detections)
-        auto_candidates = sum(1 for item in detections if int(item["guess_level"]) < 40)
-        skipped_candidates = detection_count - auto_candidates
-        ai_unknown_points = _build_ai_unknown_points(
-            detections,
-            placeholder_mapping,
-            min_guess_level=40,
-        )
-        _LAST_CORRECT_FULL_TEXT_META["ai_unknown_points"] = ai_unknown_points
-        _LAST_CORRECT_FULL_TEXT_META["ai_unknown_points_count"] = len(ai_unknown_points)
-        logger.info(
-            f"Step 4.3b: AI検出完了 detections={detection_count} "
-            f"(API応答時間={api_elapsed_sec:.1f}s)"
-        )
-        print(
-            f"correct_full_text: detection_count={detection_count} "
-            f"auto_candidates={auto_candidates} skipped_candidates={skipped_candidates}"
-        )
-        print(
-            f"correct_full_text: ai_unknown_points_count={len(ai_unknown_points)} "
-            "threshold_guess_level>=40"
-        )
-
-        if on_phase:
-            on_phase("auto_apply")
-        corrected_masked, auto_applied, skipped_total = _apply_low_guess_replacements(
-            masked_text,
-            detections,
-        )
-        logger.info(
-            f"Step 4.3c: 自動置換完了 applied={auto_applied} skipped={skipped_total}"
-        )
-        print(
-            f"correct_full_text: auto_applied={auto_applied} "
-            f"skipped_for_phase_b={skipped_total}"
-        )
-        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected_masked)
-
-        if on_phase:
-            on_phase("unmask")
-        restored = _restore_masked_text(corrected_masked, placeholder_mapping)
-        logger.info("Step 4.3d: アンマスキング完了")
-        try:
-            _validate_placeholder_sequence(corrected_masked, expected_placeholders)
-        except Exception as e:
-            logger.warning(f"Step 4.3e: プレースホルダー検証NG detail={e!r}")
-            raise
-        if on_phase:
-            on_phase("verify")
-        logger.info("Step 4.3e: プレースホルダー検証OK")
-        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
-
-        # ── Optional 2nd-pass: consistency check ──────────────────────────
-        consistency_pass_enabled = os.environ.get(
-            "ENABLE_CONSISTENCY_PASS", ""
-        ).strip().lower() in ("1", "true", "yes")
-        if consistency_pass_enabled:
-            if on_phase:
-                on_phase("consistency")
-            _append_visible_log(visible_log_path, "Step 8.5: 一貫性チェック開始")
-            try:
-                re_masked, re_mapping, re_expected = _mask_protected_tokens(restored)
-                consistency_response, _ = _stream_anthropic_text(
-                    api_key=api_key,
-                    model=model,
-                    system_prompt=_build_consistency_check_prompt(
-                        filename_hints,
-                        knowledge_memos=knowledge_memos,
-                        job_context=job_context,
-                    ),
-                    user_message=re_masked,
-                    max_tokens=max_tokens,
-                    timeout_sec=timeout_sec,
-                    log_label="AI consistency check streaming",
-                )
-                consistency_detections = _parse_detection_response(consistency_response)
-                # Consistency pass uses strict threshold (< 20) to avoid false positives
-                strict_detections = [
-                    d for d in consistency_detections if int(d.get("guess_level", 100)) < 20
-                ]
-                if strict_detections:
-                    re_corrected, c_applied, c_skipped = _apply_low_guess_replacements(
-                        re_masked, strict_detections
-                    )
-                    _validate_placeholder_sequence(re_corrected, re_expected)
-                    restored = _restore_masked_text(re_corrected, re_mapping)
-                    logger.info(
-                        f"Step 4.3f: 一貫性チェック完了 applied={c_applied} skipped={c_skipped}"
-                    )
-                    _append_visible_log(
-                        visible_log_path,
-                        f"Step 8.5: 一貫性チェック完了 applied={c_applied}",
-                    )
-                else:
-                    _append_visible_log(
-                        visible_log_path, "Step 8.5: 一貫性チェック: 修正なし"
-                    )
-            except Exception as c_err:
-                logger.warning(f"Step 4.3f: 一貫性チェックエラー（スキップ） detail={c_err!r}")
-                _append_visible_log(
-                    visible_log_path, f"Step 8.5: 一貫性チェック: エラー（スキップ）→ {c_err!r}"
-                )
-        # ──────────────────────────────────────────────────────────────────
-
-        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
-        print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
-        return restored
-    except json.JSONDecodeError as e:
-        print(
-            f"[WARNING] correct_full_text: detection JSON parse failed. "
-            f"falling back to legacy full-text correction. error={e!r}"
-        )
-        try:
-            return _correct_full_text_legacy(
-                text=text,
-                api_key=api_key,
-                model=model,
-                timeout_sec=timeout_sec,
-                max_tokens=max_tokens,
-                filename_hints=filename_hints,
-                knowledge_memos=knowledge_memos,
-                job_context=job_context,
-            )
-        except Exception as legacy_e:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"legacy_exception:{legacy_e!r}"
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
             print(
                 f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=legacy_exception:{legacy_e!r} input_chars={len(text)}"
+                f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
             )
+            _append_visible_log(visible_log_path, "Step 8: AI補正: max_tokens 到達 → 元テキスト返却")
             return text
-    except RuntimeError as e:
-        if str(e) == "detection_response_not_list":
+
+        corrected = full_response.strip()
+        if not corrected:
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
             print(
-                "[WARNING] correct_full_text: detection response was not JSON array. "
-                "falling back to legacy full-text correction."
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=anthropic_text_missing input_chars={len(text)}"
             )
-            try:
-                return _correct_full_text_legacy(
-                    text=text,
-                    api_key=api_key,
-                    model=model,
-                    timeout_sec=timeout_sec,
-                    max_tokens=max_tokens,
-                    filename_hints=filename_hints,
-                    knowledge_memos=knowledge_memos,
-                    job_context=job_context,
-                )
-            except Exception as legacy_e:
-                _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-                _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"legacy_exception:{legacy_e!r}"
-                print(
-                    f"[WARNING] correct_full_text: fallback to original. "
-                    f"reason=legacy_exception:{legacy_e!r} input_chars={len(text)}"
-                )
-                return text
-        raise
+            _append_visible_log(visible_log_path, "Step 8: AI補正: 空レスポンス → 元テキスト返却")
+            return text
+
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected)
+        print(
+            f"correct_full_text: final_chars={len(corrected)} "
+            f"(input was {len(text)}) stop_reason={stop_reason}"
+        )
+        _append_visible_log(
+            visible_log_path,
+            f"Step 8: AI補正完了 output={len(corrected)} stop_reason={stop_reason}",
+        )
+        return corrected
+
     except httpx.TimeoutException as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
         _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = f"timeout:{e!r}:timeout_sec={timeout_sec}"
@@ -1075,6 +369,7 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=timeout:{e!r} timeout_sec={timeout_sec} input_chars={len(text)}"
         )
+        _append_visible_log(visible_log_path, f"Step 8: AI補正: タイムアウト → 元テキスト返却")
         return text
     except httpx.HTTPError as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -1083,6 +378,7 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=http_error:{e!r} input_chars={len(text)}"
         )
+        _append_visible_log(visible_log_path, f"Step 8: AI補正: HTTP エラー → 元テキスト返却")
         return text
     except Exception as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -1091,28 +387,13 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=exception:{e!r} input_chars={len(text)}"
         )
+        _append_visible_log(visible_log_path, f"Step 8: AI補正: 例外 → 元テキスト返却 → {e!r}")
         return text
 
 
-def call_openai_for_correction(
-    text: str,
-    model: str,
-    api_key: str,
-    timeout_sec: int = 300,
-) -> str:
-    """
-    最小実装:
-    OpenAI Responses API を直接呼び出し、自然な日本語へ整形する。
-    """
-    corrected, _meta = call_openai_for_correction_detailed(
-        text=text,
-        model=model,
-        api_key=api_key,
-        timeout_sec=timeout_sec,
-        aggressive_structure=False,
-    )
-    return corrected
-
+# ---------------------------------------------------------------------------
+# Legacy OpenAI helpers (used by recorrect_with_answer.py / recorrect_from_line_answer.py)
+# ---------------------------------------------------------------------------
 
 def call_openai_incorporate_answer(
     text: str,
@@ -1124,8 +405,7 @@ def call_openai_incorporate_answer(
     *,
     excerpt_mode: bool = False,
 ) -> str:
-    """
-    Task 5-4: ユーザー回答を補正済み全文へ反映したうえで、再度整形する。
+    """ユーザー回答を補正済み全文へ反映したうえで、再度整形する。
     excerpt_mode が True のときは text を発言録の一部として扱い、同範囲の更新後テキストのみを返す。
     """
     url = "https://api.openai.com/v1/responses"
@@ -1196,9 +476,13 @@ def call_openai_incorporate_answer(
     return updated
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="AI補正（Task 4-3）: merged_transcript_mechanical.txt を自然文に整形"
+        description="AI補正（Step⑧）: 機械補正済みテキストを Claude 4 Opus で一括補正"
     )
     parser.add_argument("--job-id", required=True, help="対象ジョブID")
     parser.add_argument(
@@ -1213,8 +497,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4.1",
-        help="OpenAIモデル名（デフォルト: gpt-4.1）",
+        default=None,
+        help=f"Anthropic モデル名（デフォルト: {OPUS_CORRECTION_MODEL}）",
     )
     args = parser.parse_args()
 
@@ -1222,31 +506,19 @@ def main() -> None:
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"input file not found: {input_path}")
 
-    api_key, key_source = resolve_openai_api_key()
-    print(f"debug_openai_api_key_found={bool(api_key)}")
-    print(f"debug_openai_api_key_source={key_source}")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. "
-            "PowerShellを再起動するか、$env:OPENAI_API_KEY を現在セッションに設定してください。"
-        )
-
     with open(input_path, "r", encoding="utf-8") as f:
         original_text = f.read()
 
-    corrected_text = call_openai_for_correction(
+    corrected_text = correct_full_text(
         text=original_text,
         model=args.model,
-        api_key=api_key,
     )
 
     print(f"job_id={args.job_id}")
     print(f"input={input_path}")
-    print(f"model={args.model}")
     print("corrected_text=")
     print(corrected_text)
 
 
 if __name__ == "__main__":
     main()
-

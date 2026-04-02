@@ -164,12 +164,7 @@ def main() -> None:
         )
 
         phase_labels = {
-            "masking": "マスキング",
-            "ai_detect": "AI検出",
-            "auto_apply": "自動置換",
-            "unmask": "復元",
-            "verify": "検証",
-            "consistency": "一貫性チェック",
+            "ai_correct": "AI補正",
         }
 
         def _on_ai_phase(phase: str) -> None:
