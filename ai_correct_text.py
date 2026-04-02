@@ -12,6 +12,7 @@ import urllib.request
 from typing import Callable, Optional
 
 from filename_hints import format_hints_for_prompt
+from job_context import format_context_for_detection_prompt, format_context_for_prompt
 from knowledge_sheet_store import format_knowledge_for_detection_prompt, format_knowledge_for_prompt, load_knowledge_memos
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,7 @@ def _build_system_prompt(
     aggressive_structure: bool,
     filename_hints: list[str] | None = None,
     knowledge_memos: list[str] | None = None,
+    job_context: dict | None = None,
 ) -> str:
     base = (
         "あなたは議事録の可読性整形アシスタントです。"
@@ -308,6 +310,7 @@ def _build_system_prompt(
             + "\n段落は文数よりも話題のまとまりを優先して調整してください。"
             + format_hints_for_prompt(filename_hints or [])
             + format_knowledge_for_prompt(knowledge_memos or [])
+            + format_context_for_prompt(job_context or {})
         )
     return (
         base
@@ -320,19 +323,21 @@ def _build_system_prompt(
         + "\n語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
         + format_hints_for_prompt(filename_hints or [])
         + format_knowledge_for_prompt(knowledge_memos or [])
+        + format_context_for_prompt(job_context or {})
     )
 
 
 def _build_detection_system_prompt(
     filename_hints: list[str] | None = None,
     knowledge_memos: list[str] | None = None,
+    job_context: dict | None = None,
 ) -> str:
     return (
         "あなたは議事録補正の分析アシスタントです。"
         "入力はマスク済みの日本語テキストです。"
         "音声認識由来の誤変換・脱字・崩れ・接続不良を幅広く検出してください。"
         "\n【検出対象】"
-        "\n・音が似ているが漢字が違う誤変換（例：「ショート力」→「仕事力」、「電シス」→「レイシス」）"
+        "\n・音が似ているが漢字が違う誤変換（例：「ショート力」→「仕事力」、「電シス」→「デイシス」）"
         "\n・文脈から意味的に明らかに合わない語句（例：「優勝」→「有償」、「人的尊敬」→「人的資本」、「古車」→「各社」）"
         "\n・慣用句・ビジネス用語の誤認識（例：「妖怪じゃないですか」→「要諦じゃないですか」、「減ったぶり」→「へったくれ」）"
         "\n・同一テキスト内で同一の対象を指す固有名詞の表記揺れ（例：「THR」「thr」「T HR」の混在 → 「THR」に統一）"
@@ -349,6 +354,35 @@ def _build_detection_system_prompt(
         "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
         + format_hints_for_prompt(filename_hints or [])
         + format_knowledge_for_detection_prompt(knowledge_memos or [])
+        + format_context_for_detection_prompt(job_context or {})
+    )
+
+
+def _build_consistency_check_prompt(
+    filename_hints: list[str] | None = None,
+    knowledge_memos: list[str] | None = None,
+    job_context: dict | None = None,
+) -> str:
+    """第2パス用の一貫性チェックプロンプト。
+    第1パスで自動補正された後のテキストに対して、残存する表記揺れや
+    見落とした誤変換を厳選して検出する。
+    guess_level は 0〜20 の範囲のみ使用する（不確かな場合は検出しない）。
+    """
+    return (
+        "あなたは議事録の表記一貫性チェッカーです。"
+        "入力はマスク済みの日本語テキストです（第1パスで音声認識誤変換を補正済み）。"
+        "以下の問題のみを検出してください。不確かなものは検出しないでください。"
+        "\n【検出対象（確実なもののみ）】"
+        "\n・同一テキスト内で同一の対象を指す固有名詞の表記揺れ（例：「高橋さん」と「TOKIO さん」が同一人物）"
+        "\n・第1パスで見落とした、文脈から9割以上確実な音声認識誤変換"
+        "\nguess_level は必ず 0〜20 の範囲のみ使用してください（不確かな場合は検出リストに含めない）。"
+        "\n日付・時刻・数値・金額は変更禁止です。"
+        "保護トークン <TYPE_0001> 形式は1文字も変更・削除・追加・並べ替えしてはいけません。"
+        "出力は JSON 配列のみとし、説明文・前置き・コードフェンスを付けないでください。"
+        "各要素は location, original, issue, suggestion, guess_level の5キーを持つオブジェクトにしてください。"
+        + format_hints_for_prompt(filename_hints or [])
+        + format_knowledge_for_detection_prompt(knowledge_memos or [])
+        + format_context_for_detection_prompt(job_context or {})
     )
 
 
@@ -606,12 +640,14 @@ def _correct_full_text_legacy(
     max_tokens: int,
     filename_hints: list[str] | None = None,
     knowledge_memos: list[str] | None = None,
+    job_context: dict | None = None,
 ) -> str:
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
     system_prompt = _build_system_prompt(
         aggressive_structure=False,
         filename_hints=filename_hints,
         knowledge_memos=knowledge_memos,
+        job_context=job_context,
     )
     full_response, stop_reason = _stream_anthropic_text(
         api_key=api_key,
@@ -782,11 +818,15 @@ def correct_full_text(
     on_phase: Optional[Callable[[str], None]] = None,
     filename_hints: list[str] | None = None,
     visible_log_path: str | None = None,
+    job_context: dict | None = None,
 ) -> str:
     """
     全文を一括でAI補正する。チャンク分割なし。
     Anthropic Messages API を使用。
     戻り値は補正後テキスト。失敗時は元テキストを返す。
+
+    ENABLE_CONSISTENCY_PASS=1 環境変数を設定すると、第1パス後に
+    第2パス（一貫性チェック）を実行する。
     """
     if not text:
         return text
@@ -845,6 +885,7 @@ def correct_full_text(
             system_prompt=_build_detection_system_prompt(
                 filename_hints,
                 knowledge_memos=knowledge_memos,
+                job_context=job_context,
             ),
             user_message=masked_text,
             max_tokens=max_tokens,
@@ -866,6 +907,7 @@ def correct_full_text(
                 max_tokens=max_tokens,
                 filename_hints=filename_hints,
                 knowledge_memos=knowledge_memos,
+                job_context=job_context,
             )
 
         detections = _parse_detection_response(detection_response)
@@ -920,6 +962,60 @@ def correct_full_text(
             on_phase("verify")
         logger.info("Step 4.3e: プレースホルダー検証OK")
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
+
+        # ── Optional 2nd-pass: consistency check ──────────────────────────
+        consistency_pass_enabled = os.environ.get(
+            "ENABLE_CONSISTENCY_PASS", ""
+        ).strip().lower() in ("1", "true", "yes")
+        if consistency_pass_enabled:
+            if on_phase:
+                on_phase("consistency")
+            _append_visible_log(visible_log_path, "Step 8.5: 一貫性チェック開始")
+            try:
+                re_masked, re_mapping, re_expected = _mask_protected_tokens(restored)
+                consistency_response, _ = _stream_anthropic_text(
+                    api_key=api_key,
+                    model=model,
+                    system_prompt=_build_consistency_check_prompt(
+                        filename_hints,
+                        knowledge_memos=knowledge_memos,
+                        job_context=job_context,
+                    ),
+                    user_message=re_masked,
+                    max_tokens=max_tokens,
+                    timeout_sec=timeout_sec,
+                    log_label="AI consistency check streaming",
+                )
+                consistency_detections = _parse_detection_response(consistency_response)
+                # Consistency pass uses strict threshold (< 20) to avoid false positives
+                strict_detections = [
+                    d for d in consistency_detections if int(d.get("guess_level", 100)) < 20
+                ]
+                if strict_detections:
+                    re_corrected, c_applied, c_skipped = _apply_low_guess_replacements(
+                        re_masked, strict_detections
+                    )
+                    _validate_placeholder_sequence(re_corrected, re_expected)
+                    restored = _restore_masked_text(re_corrected, re_mapping)
+                    logger.info(
+                        f"Step 4.3f: 一貫性チェック完了 applied={c_applied} skipped={c_skipped}"
+                    )
+                    _append_visible_log(
+                        visible_log_path,
+                        f"Step 8.5: 一貫性チェック完了 applied={c_applied}",
+                    )
+                else:
+                    _append_visible_log(
+                        visible_log_path, "Step 8.5: 一貫性チェック: 修正なし"
+                    )
+            except Exception as c_err:
+                logger.warning(f"Step 4.3f: 一貫性チェックエラー（スキップ） detail={c_err!r}")
+                _append_visible_log(
+                    visible_log_path, f"Step 8.5: 一貫性チェック: エラー（スキップ）→ {c_err!r}"
+                )
+        # ──────────────────────────────────────────────────────────────────
+
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(restored)
         print(f"correct_full_text: final_chars={len(restored)} (input was {len(text)})")
         return restored
     except json.JSONDecodeError as e:
@@ -936,6 +1032,7 @@ def correct_full_text(
                 max_tokens=max_tokens,
                 filename_hints=filename_hints,
                 knowledge_memos=knowledge_memos,
+                job_context=job_context,
             )
         except Exception as legacy_e:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -960,6 +1057,7 @@ def correct_full_text(
                     max_tokens=max_tokens,
                     filename_hints=filename_hints,
                     knowledge_memos=knowledge_memos,
+                    job_context=job_context,
                 )
             except Exception as legacy_e:
                 _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True

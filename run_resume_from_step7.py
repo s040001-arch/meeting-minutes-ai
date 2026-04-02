@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ai_correct_text import correct_full_text, get_last_correct_full_text_meta
 from filename_hints import extract_filename_hints
+from job_context import load_job_context
 from progress_tracker import finalize_job_progress, update_job_progress
 from repo_env import load_dotenv_local
 from run_job_once import (
@@ -168,6 +169,7 @@ def main() -> None:
             "auto_apply": "自動置換",
             "unmask": "復元",
             "verify": "検証",
+            "consistency": "一貫性チェック",
         }
 
         def _on_ai_phase(phase: str) -> None:
@@ -181,11 +183,13 @@ def main() -> None:
             )
 
         hints = extract_filename_hints(args.job_id)
+        job_context = load_job_context(job_dir)
         ai_text = correct_full_text(
             text=mechanical_text,
             on_phase=_on_ai_phase,
             filename_hints=hints,
             visible_log_path=visible_log_path,
+            job_context=job_context if job_context else None,
         )
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)

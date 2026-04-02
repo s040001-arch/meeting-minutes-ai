@@ -13,6 +13,7 @@ from ai_correct_text import (
     resolve_openai_api_key,
 )
 from filename_hints import extract_filename_hints, format_hints_for_prompt
+from job_context import load_job_context
 from progress_tracker import (
     ensure_artifact_flags,
     finalize_job_progress,
@@ -630,10 +631,13 @@ def main() -> None:
     filename = Path(args.input_audio).name
     hints = extract_filename_hints(filename)
     hints_prompt_text = format_hints_for_prompt(hints)
+    job_context = load_job_context(os.path.join(args.input_root, args.job_id))
     hub_meta_path = os.path.join(args.input_root, args.job_id, "google_doc_hub.json")
     if hints:
         log_line(log_path, f"📎 ファイル名ヒント抽出: {hints}")
         log_line(log_path, f"filename_hints_prompt_enabled={bool(hints_prompt_text)}")
+    if job_context:
+        log_line(log_path, f"📋 ジョブコンテキスト読み込み: {list(job_context.keys())}")
     try:
         if input_ext in TEXT_EXTENSIONS:
             log_line(log_path, "input_type=txt")
@@ -872,6 +876,7 @@ def main() -> None:
             "auto_apply": "自動置換",
             "unmask": "復元",
             "verify": "検証",
+            "consistency": "一貫性チェック",
         }
 
         def _on_ai_phase(phase: str):
@@ -885,6 +890,7 @@ def main() -> None:
             on_phase=_on_ai_phase,
             filename_hints=hints,
             visible_log_path=visible_log_path,
+            job_context=job_context if job_context else None,
         )
 
         with open(ai_path, "w", encoding="utf-8") as f:
