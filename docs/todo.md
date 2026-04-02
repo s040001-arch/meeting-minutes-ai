@@ -239,6 +239,38 @@
 
 ---
 
+## Opus 移行計画
+
+Spec.md が固まったため、以下の順序で実装を進める。
+
+| Phase | 内容 | 理由 |
+|-------|------|------|
+| Phase 1 | LINE webhook 非同期化 | Opus の前提条件。これがないとテスト自体できない |
+| Phase 2 | AI補正パイプライン簡素化（Opus 一発補正） | 音声処理側。既に非同期なので Phase 1 と独立 |
+| Phase 3 | 品質テスト | 同じ音声データで Sonnet vs Opus 比較 |
+
+### Phase 1: LINE webhook 非同期化
+
+- [x] 実装: `/callback` を即座に HTTP 200 を返す構成に変更
+- [x] 実装: `handle_user_input()` を FastAPI `BackgroundTasks` で非同期実行
+- [x] 実装: LINE への応答を reply API（replyToken）から push message API（LINE_USER_ID）に切り替え
+- [ ] 検証: Opus 呼び出しを含む処理が LINE reply token 失効（30 秒）の制約を受けないことを確認
+
+### Phase 2: AI補正パイプライン簡素化（Opus 一発補正）
+
+- [ ] 実装: `ai_correct_text.py` のマスキング→検出→str.replace 多段処理を廃止
+- [ ] 実装: 機械補正後のテキストを Opus に一括で渡す単一 Claude 呼び出しに置き換え
+- [ ] 実装: プロンプトにコンテキスト情報（参加者・企業名・ナレッジメモ・補正ルール）を一括注入
+- [ ] 実装: `run_job_once.py` / `run_resume_from_step7.py` のモデル指定を Opus に更新
+- [ ] 検証: 実データで補正品質 85% 以上を確認
+
+### Phase 3: 品質テスト
+
+- [ ] 検証: 同一音声データで Sonnet（旧）vs Opus（新）の補正結果を比較
+- [ ] 検証: 処理時間・コスト・品質のトレードオフを記録
+
+---
+
 ## 変更履歴（この文書）
 
 - **2025-01-23:** 3フェーズ計画（Whisper API移行→状態管理→Webhook整備）に全面再構成。`review_risky_terms.py` 削除完了を反映。`spec.md` 更新完了を反映。

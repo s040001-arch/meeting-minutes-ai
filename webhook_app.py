@@ -20,7 +20,7 @@ try:
     write_google_oauth_files_from_env()
 except Exception:
     pass
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 
@@ -29,7 +29,7 @@ from progress_tracker import read_job_progress, read_last_job_progress, update_j
 
 app = FastAPI()
 
-LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
 # MVP検証用: ローカルJSON。PaaS（例: Railway）のエフェメラルFSでは再起動で消える。次段階でDB/Sheets等へ差し替え前提。
 ANSWERS_SAVE_PATH = os.path.join("data", "line_answers.json")
@@ -1113,8 +1113,53 @@ async def line_pending_sync(request: Request):
     return {"status": "ok"}
 
 
+def _send_line_push(text: str) -> None:
+    """LINE push message API でメッセージを送信する。
+    LINE_USER_ID と LINE_CHANNEL_ACCESS_TOKEN が未設定の場合はログのみ残してスキップ。
+    """
+    channel_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    line_user_id = os.getenv("LINE_USER_ID", "").strip()
+    if not channel_token or not line_user_id:
+        print(
+            f"_send_line_push skipped: LINE_USER_ID={'set' if line_user_id else 'unset'} "
+            f"LINE_CHANNEL_ACCESS_TOKEN={'set' if channel_token else 'unset'}"
+        )
+        return
+    payload = {
+        "to": line_user_id,
+        "messages": [{"type": "text", "text": text}],
+    }
+    try:
+        resp = requests.post(
+            LINE_PUSH_URL,
+            headers={
+                "Authorization": f"Bearer {channel_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            print(f"_send_line_push error: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"_send_line_push exception: {e!r}")
+
+
+def _handle_webhook_background(text: str, user_id: str) -> None:
+    """BackgroundTasks から呼び出されるワーカー。
+    handle_user_input() を実行し、結果を push message API で送信する。
+    エラー時もユーザーに push で通知する。
+    """
+    try:
+        reply_text = handle_user_input(text, user_id=user_id or None)
+        _send_line_push(reply_text)
+    except Exception as e:
+        print(f"_handle_webhook_background error: {e!r}")
+        _send_line_push("処理中にエラーが発生しました。しばらく経ってから再度お試しください。")
+
+
 @app.post("/callback")
-async def callback(request: Request):
+async def callback(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     print(body)
 
@@ -1124,7 +1169,6 @@ async def callback(request: Request):
             return {"status": "ok"}
 
         evt = events[0]
-        reply_token = evt.get("replyToken")
         message = evt.get("message") or {}
 
         if message.get("type") != "text":
@@ -1132,32 +1176,11 @@ async def callback(request: Request):
 
         text = message.get("text")
         user_id = str((evt.get("source") or {}).get("userId") or "")
-        if not reply_token or text is None:
+        if text is None:
             return {"status": "ok"}
 
-        reply_text = handle_user_input(text, user_id=user_id or None)
-
-        channel_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-        if not channel_token:
-            print("LINE_CHANNEL_ACCESS_TOKEN is not set")
-            return {"status": "ok"}
-
-        payload = {
-            "replyToken": reply_token,
-            "messages": [{"type": "text", "text": reply_text}],
-        }
-        resp = requests.post(
-            LINE_REPLY_URL,
-            headers={
-                "Authorization": f"Bearer {channel_token}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            print(f"LINE reply error: {resp.status_code} {resp.text}")
+        background_tasks.add_task(_handle_webhook_background, text, user_id)
     except Exception as e:
-        print(f"LINE reply exception: {e}")
+        print(f"LINE callback parse exception: {e}")
 
     return {"status": "ok"}
