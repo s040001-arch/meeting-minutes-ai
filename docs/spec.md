@@ -6,7 +6,7 @@
 
 Google Drive の固定フォルダに音声ファイルまたはテキストファイルをアップロードすると、自動で文字起こし・AI補正・不明点検出・議事録生成を行い、LINEを通じてユーザーと対話しながら議事録を完成させるシステム。
 
-Railway 上で稼働し、Google Drive / Google Docs / LINE Messaging API / Claude 3.5 Sonnet / OpenAI Whisper を利用する。
+Railway 上で稼働し、Google Drive / Google Docs / Google Sheets / LINE Messaging API / Claude 3.5 Sonnet / OpenAI Whisper を利用する。
 
 ---
 
@@ -100,11 +100,13 @@ Step⑥ Google Doc を作成、タイトル「【文字起こし】{stem}」、
 ```
 Step⑦  機械補正
         correction_dict.json の全エントリを merged_transcript.txt に適用
+        助詞重複・連続短句・明らかな言い直し残りなど、意味を変えない範囲の機械整形も行う
         → Google Doc を上書き
         → タイトルを「【機械補正完了】{stem}」に変更
 
 Step⑧  AI 補正（Claude 3.5 Sonnet）
         機械補正済みテキストに対し、推論ベースの誤変換・誤認識修正を実行
+        Google Sheets に蓄積されたナレッジメモ全件を参考知識として Claude プロンプトに含めてよい
         → Google Doc を上書き
 
 Step⑨  AI 不明点検出（Claude 3.5 Sonnet）
@@ -120,10 +122,12 @@ Step⑩  ハイブリッド不明点検出
 Step⑪  議事録生成（Claude 3.5 Sonnet）
         Google Doc を全面上書きし、セクション4のフォーマットで議事録を生成
         → タイトルを「{stem}」に変更（プレフィックスなし＝確定可能状態）
+        回答反映後の再開ループでも、最終的にタイトルはプレフィックスなしへ戻す
 
 Step⑫  質問選定
         unknown_points.json から未回答の不明点を1つ選定
-        選定基準: 議事録の正確性に最もインパクトが大きいもの
+        選定基準: 単語単位の確認に限らず、逐語録全体の文意を最も回復できる論点を優先する
+        少しでも不安が残る場合は質問するが、優先順位は「全体インパクト」を最上位とする
         不明点がゼロの場合 → Step⑬へ（完了通知）
 
 Step⑬  LINE 通知
@@ -139,15 +143,20 @@ Step⑮  Resume トリガー
         パターンA: LINE メッセージ受信 → Step⑯へ
         パターンB: 新規ファイル検出 → 現ジョブを確定終了、新ジョブの Step① へ
 
-Step⑯  LINE メッセージ分類（Claude 3.5 Sonnet）
-        受信メッセージを AI で3分類:
-        1. 質問への回答 → unknown_points.json の該当エントリを更新 → Step⑦へ
-        2. 修正依頼 → AI で辞書エントリを生成、correction_dict.json に追記 → Step⑦へ
-        3. 無関係 → 無視、Step⑭に戻る
+Step⑯  LINE メッセージ情報抽出（Claude 3.5 Sonnet）
+        受信メッセージを「回答か修正依頼か」に厳密分類するのではなく、
+        議事録補正に使える情報を抽出する:
+        1. 本文へ反映できる回答情報
+        2. correction_dict.json に入れられる置換ペア
+        3. どちらも取れない場合のみ無関係
+        回答情報と修正依頼が1通に同居している場合は、両方とも反映してよい
+        回答が含まれる場合は受信時点で unknown_points.json の該当エントリを回答済みに更新する
+        また、回答情報がある場合は Google Sheets 上のナレッジメモ全件と今回の質問・回答を Claude に渡し、
+        蓄積価値の判定と既存ナレッジの統合整理を行ったうえで、更新後ナレッジ全体をスプレッドシートへ書き戻してよい
 
 Step⑰  ループ継続
         Step⑦に戻り、補正済み merged_transcript.txt から再処理
-        ただし回答済みの不明点は除外
+        ただし回答済みの不明点、および回答により実質解決したと LLM が判断した不明点は除外
 ```
 
 ---
@@ -244,7 +253,8 @@ https://docs.google.com/document/d/xxxxx
 
 - Google Doc の URL を必ず含める
 - 質問は端的に自然語で記述
-- 仮説を提示し「合っていますか？」形式にする（Yes で済むようにする）
+- 単語確認に限らず、「この1問で全体文脈がつながる」なら大きめの質問を優先してよい
+- 仮説を提示する形式は有効だが必須ではない。必要に応じて「どの会社とどの会社が何を目的として議論しているか？」のような文脈確認質問も許容する
 
 ### 完了通知（不明点なし）
 
@@ -257,15 +267,17 @@ https://docs.google.com/document/d/xxxxx
 
 ---
 
-## 8. LINE メッセージ分類（Step⑯）
+## 8. LINE メッセージ情報抽出（Step⑯）
 
-受信した LINE メッセージを Claude 3.5 Sonnet で3分類する。
+受信した LINE メッセージから、Claude 3.5 Sonnet が補正に使える情報を抽出する。
 
-| 分類 | 説明 | 後続処理 |
+| 抽出対象 | 説明 | 後続処理 |
 |------|------|---------|
-| 1. 質問への回答 | 直前の質問に対する回答（Yes/No、訂正値など） | unknown_points.json 更新 → Step⑦ |
-| 2. 修正依頼 | 「〇〇は△△の間違い」等のフリーテキスト修正指示 | AI で辞書エントリ抽出 → correction_dict.json 追記 → Step⑦ |
-| 3. 無関係 | 会議議事録と関係ないメッセージ | 無視 → Step⑭ に戻る |
+| 1. 回答情報 | 直前の質問に対する返答として本文へ反映できる情報 | unknown_points.json を回答済みに更新し、本文反映へ回す |
+| 2. 修正依頼 | 「〇〇は△△の間違い」等の置換指示 | correction_dict.json へ追記し、Step⑦ の機械補正から反映 |
+| 3. 無関係 | 会議議事録補正に使える情報が取れないメッセージ | 無視 → Step⑭ に戻る |
+
+回答情報と修正依頼は排他的ではなく、1通のメッセージから両方抽出して同時に反映してよい。
 
 ### 修正依頼の辞書エントリ生成
 
@@ -275,6 +287,17 @@ https://docs.google.com/document/d/xxxxx
 ユーザー: 「高尾じゃなくてTAKIOです」
 → {"高尾": "TAKIO"} を辞書に追加
 ```
+
+### 回答由来ナレッジの蓄積
+
+- LINE の回答から得られた知識は、ジョブをまたいで再利用できるよう Google Sheets に蓄積してよい
+- 保存形式は「1行1件の自由記述テキスト」とし、構造化辞書にはしない
+- 例: `DCS（Dedicated Client Service）とは営業の顧客単位の責任者のこと`
+- correction_dict.json は機械補正用の置換辞書、Google Sheets 側は AI補正用の参考知識として役割を分離する
+- ユーザーがスプレッドシートを直接編集して追記・修正してよい
+- 初期実装はシンプルに全件を Claude プロンプトへ載せる方式とする
+- Claude には既存ナレッジ全件・今回の質問文・今回の回答文を渡し、蓄積価値の判定、重複整理、表現統合を任せる
+- アプリ側は Claude が返した更新後ナレッジ全体でスプレッドシートを丸ごと書き換える
 
 ---
 
@@ -312,6 +335,9 @@ https://docs.google.com/document/d/xxxxx
 処理の進行状況を Google Drive のサブフォルダ内にテキストファイルとして出力する。
 Railway のログが流れた後でも、Drive 上で処理状況を確認できるようにする目的。
 
+ローカル/Volume 側にも `processing_visible_log.txt` を出力し、
+各 Step の開始・完了・エラーが一目で分かる要約ログとして扱う。
+
 ---
 
 ## 10. 永続化（Railway Volume）
@@ -334,6 +360,14 @@ Railway のログが流れた後でも、Drive 上で処理状況を確認でき
 - ジョブをまたいで蓄積される
 - 手動修正依頼から生成されたエントリも含む
 - Step⑦ で毎回全エントリを適用
+
+### Google Sheets ナレッジメモ
+
+- 回答由来の知識をジョブ横断で蓄積する保存先とする
+- 1行1件の自由記述テキストで管理する
+- correction_dict.json とは別管理とし、置換辞書ではなく AI補正用の参考知識として扱う
+- Step⑯ で回答受信時に更新し、Step⑧ の AI補正で全件を参照する
+- ユーザーの直接編集を許容し、アプリは最新状態を都度読み込む
 
 ### unknown_points.json
 
@@ -360,6 +394,11 @@ Railway のログが流れた後でも、Drive 上で処理状況を確認でき
 ]
 ```
 
+- `status` は `open` / `answered` を基本とする
+- `answered` への更新タイミングは「LINE の回答を受信した時点」とする
+- 回答後、LLM がその回答で周辺の不明点も実質解決したと判断した場合は、追加の質問対象から外してよい
+- どの項目を周辺解決扱いにしたかの内部監査ログは必須としない
+
 ### google_doc_hub.json
 
 同一 `job_id` のジョブディレクトリに紐づく Google Doc の ID や関連メタデータを記録する。ジョブ実行中に同じ `job_id` で再出力が発生した場合、新規作成せず既存 Doc を上書き再利用する。
@@ -384,6 +423,7 @@ Railway のログが流れた後でも、Drive 上で処理状況を確認でき
 | AI 補正・検出・分類・議事録生成 | Claude 3.5 Sonnet (Anthropic API) |
 | ファイル監視 | Google Drive API v3（ポーリング） |
 | ドキュメント生成 | Google Docs API v1 |
+| ナレッジ蓄積 | Google Sheets API |
 | ユーザー通知・対話 | LINE Messaging API |
 | OAuth 管理 | Google OAuth 2.0（環境変数から JSON 復元） |
 
@@ -402,6 +442,7 @@ ANTHROPIC_API_KEY              ← Claude API キー
 OPENAI_API_KEY                 ← OpenAI API キー（Whisper + その他 OpenAI 系機能で共用）
 LINE_CHANNEL_ACCESS_TOKEN      ← LINE Messaging API アクセストークン
 LINE_USER_ID                   ← 通知先の LINE ユーザー ID
+KNOWLEDGE_SHEET_ID             ← ナレッジ蓄積用 Google Sheets のスプレッドシート ID
 ```
 
 ---

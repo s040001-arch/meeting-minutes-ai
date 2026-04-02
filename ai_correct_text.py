@@ -12,6 +12,7 @@ import urllib.request
 from typing import Callable, Optional
 
 from filename_hints import format_hints_for_prompt
+from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ def _build_system_prompt(
     *,
     aggressive_structure: bool,
     filename_hints: list[str] | None = None,
+    knowledge_memos: list[str] | None = None,
 ) -> str:
     base = (
         "あなたは議事録の可読性整形アシスタントです。"
@@ -297,6 +299,7 @@ def _build_system_prompt(
             + "軽微なフィラー削除と言いよどみ整理は許可します。"
             + "段落は文数よりも話題のまとまりを優先して調整してください。"
             + format_hints_for_prompt(filename_hints or [])
+            + format_knowledge_for_prompt(knowledge_memos or [])
         )
     return (
         base
@@ -307,10 +310,14 @@ def _build_system_prompt(
         + "フィラー（例: うん、なんか、えーと）を削除し、言いよどみや重複表現を整理してください。"
         + "語彙の推測置換は禁止です（例: 「フード改革」を別語へ置換しない）。"
         + format_hints_for_prompt(filename_hints or [])
+        + format_knowledge_for_prompt(knowledge_memos or [])
     )
 
 
-def _build_detection_system_prompt(filename_hints: list[str] | None = None) -> str:
+def _build_detection_system_prompt(
+    filename_hints: list[str] | None = None,
+    knowledge_memos: list[str] | None = None,
+) -> str:
     return (
         "あなたは議事録補正の分析アシスタントです。"
         "入力はマスク済みの日本語テキストです。"
@@ -326,6 +333,7 @@ def _build_detection_system_prompt(filename_hints: list[str] | None = None) -> s
         "location は該当箇所の前後10文字程度の短い抜粋、original は元の問題箇所そのもの、"
         "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
         + format_hints_for_prompt(filename_hints or [])
+        + format_knowledge_for_prompt(knowledge_memos or [])
     )
 
 
@@ -571,11 +579,13 @@ def _correct_full_text_legacy(
     timeout_sec: int,
     max_tokens: int,
     filename_hints: list[str] | None = None,
+    knowledge_memos: list[str] | None = None,
 ) -> str:
     masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
     system_prompt = _build_system_prompt(
         aggressive_structure=False,
         filename_hints=filename_hints,
+        knowledge_memos=knowledge_memos,
     )
     full_response, stop_reason = _stream_anthropic_text(
         api_key=api_key,
@@ -760,6 +770,12 @@ def correct_full_text(
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
     try:
+        try:
+            knowledge_memos = load_knowledge_memos()
+            print(f"correct_full_text: knowledge_memos={len(knowledge_memos)}")
+        except Exception as e:
+            knowledge_memos = []
+            print(f"correct_full_text: knowledge_memos_load_failed={e!r}")
         if on_phase:
             on_phase("masking")
         masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)
@@ -771,7 +787,10 @@ def correct_full_text(
         detection_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
             model=model,
-            system_prompt=_build_detection_system_prompt(filename_hints),
+            system_prompt=_build_detection_system_prompt(
+                filename_hints,
+                knowledge_memos=knowledge_memos,
+            ),
             user_message=masked_text,
             max_tokens=max_tokens,
             timeout_sec=timeout_sec,
@@ -791,6 +810,7 @@ def correct_full_text(
                 timeout_sec=timeout_sec,
                 max_tokens=max_tokens,
                 filename_hints=filename_hints,
+                knowledge_memos=knowledge_memos,
             )
 
         detections = _parse_detection_response(detection_response)
@@ -860,6 +880,7 @@ def correct_full_text(
                 timeout_sec=timeout_sec,
                 max_tokens=max_tokens,
                 filename_hints=filename_hints,
+                knowledge_memos=knowledge_memos,
             )
         except Exception as legacy_e:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -883,6 +904,7 @@ def correct_full_text(
                     timeout_sec=timeout_sec,
                     max_tokens=max_tokens,
                     filename_hints=filename_hints,
+                    knowledge_memos=knowledge_memos,
                 )
             except Exception as legacy_e:
                 _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True

@@ -35,6 +35,7 @@ run_job_once.py  ── 16-step pipeline
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE push通知 |
 | `LINE_USER_ID` | 質問の送信先 |
 | `DRIVE_FOLDER_ID` | 監視対象のGoogle Driveフォルダ |
+| `KNOWLEDGE_SHEET_ID` | 回答由来ナレッジを蓄積する Google Sheets |
 
 詳細は `.env.example` を参照。
 
