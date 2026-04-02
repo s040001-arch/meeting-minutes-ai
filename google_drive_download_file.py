@@ -1,48 +1,32 @@
 import argparse
 import os
-from typing import Optional
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+_SA_JSON_PATH = "credentials_service_account.json"
 
 
-def _load_credentials(credentials_json_path: str, token_json_path: str) -> Credentials:
-    creds: Optional[Credentials] = None
-    if os.path.exists(token_json_path):
-        creds = Credentials.from_authorized_user_file(token_json_path, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(credentials_json_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        os.makedirs(os.path.dirname(token_json_path) or ".", exist_ok=True)
-        with open(token_json_path, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-
-    return creds
+def _build_credentials() -> service_account.Credentials:
+    """サービスアカウントで Drive 認証情報を生成する。"""
+    return service_account.Credentials.from_service_account_file(
+        _SA_JSON_PATH, scopes=SCOPES
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Google Driveのfile_idを指定してローカルへダウンロード（Task 1-3）"
     )
-    parser.add_argument("--credentials", required=True, help="credentials.json のパス")
-    parser.add_argument("--token", default="token.json", help="token.json の保存先/読み込み先")
     parser.add_argument("--file-id", required=True, help="ダウンロード対象の Google Drive file_id")
     parser.add_argument("--output", required=True, help="保存先ファイルパス（例: data/sample_audio.wav）")
     args = parser.parse_args()
 
-    creds = _load_credentials(args.credentials, args.token)
+    creds = _build_credentials()
     service = build("drive", "v3", credentials=creds)
 
     try:

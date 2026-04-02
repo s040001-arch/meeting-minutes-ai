@@ -213,10 +213,6 @@ def run_once(args: argparse.Namespace) -> tuple[int, dict]:
     cmd = [
         sys.executable,
         os.path.join(os.getcwd(), "drive_auto_run_once.py"),
-        "--credentials",
-        args.credentials,
-        "--token",
-        args.token,
         "--folder-id",
         args.folder_id,
         "--state",
@@ -251,12 +247,6 @@ def main() -> None:
     load_dotenv_local()
     parser = argparse.ArgumentParser(
         description="Drive監視を常駐運用するために drive_auto_run_once.py を定期実行する"
-    )
-    parser.add_argument("--credentials", default="credentials.json", help="OAuthクライアントJSON")
-    parser.add_argument(
-        "--token",
-        default="token_drive.json",
-        help="Drive用OAuthトークン保存先/読込先（デフォルト: token_drive.json）",
     )
     parser.add_argument(
         "--folder-id",

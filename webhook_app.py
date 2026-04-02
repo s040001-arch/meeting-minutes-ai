@@ -1018,8 +1018,6 @@ def _maybe_launch_drive_worker_from_app_startup() -> None:
     # railway_entry.sh 相当の環境変数を可能な限り引き継ぐ
     interval_sec = int(os.getenv("DRIVE_POLL_INTERVAL_SEC", "120").strip() or "120")
 
-    credentials_path = os.getenv("GOOGLE_DRIVE_CREDENTIALS_PATH", "credentials.json").strip()
-    token_path = os.getenv("GOOGLE_DRIVE_TOKEN_PATH", "token_drive.json").strip()
     state_path = os.getenv("DRIVE_STATE_PATH", os.path.join("data", "last_seen_file_ids.json")).strip()
     download_dir = os.getenv("DRIVE_DOWNLOAD_DIR", os.path.join("data", "incoming_audio")).strip()
 
@@ -1034,10 +1032,6 @@ def _maybe_launch_drive_worker_from_app_startup() -> None:
         os.path.join(_REPO_ROOT, "drive_auto_run_forever.py"),
         "--folder-id",
         drive_folder_id,
-        "--credentials",
-        credentials_path,
-        "--token",
-        token_path,
         "--state",
         state_path,
         "--download-dir",

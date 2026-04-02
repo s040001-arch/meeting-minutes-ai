@@ -4,10 +4,7 @@ import os
 import re
 from typing import List, Tuple
 
-from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -19,6 +16,8 @@ DOCS_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
 ]
+
+_SA_JSON_PATH = "credentials_service_account.json"
 
 
 def md_to_google_docs_text(md: str) -> str:
@@ -115,34 +114,10 @@ def resolve_output_dir(job_id: str, output_root: str) -> str:
     return out_dir
 
 
-def load_or_create_google_docs_credentials(
-    credentials_json_path: str,
-    token_json_path: str,
-) -> Credentials:
-    creds: Credentials | None = None
-    if os.path.exists(token_json_path):
-        creds = Credentials.from_authorized_user_file(token_json_path, DOCS_SCOPES)
-
-    if creds and creds.valid:
-        return creds
-
-    # token が期限切れ/無効の場合、まず refresh を試す。
-    # ただし `invalid_scope` のようなスコープ不整合だと refresh できないため、
-    # その場合は再認可（外部UIが必要になり得る）へフォールバックする。
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            return creds
-        except RefreshError:
-            # scope mismatch などで refresh ができない場合は作り直す
-            creds = None
-
-    # token がない or refresh 不能の場合、Railway ではブラウザ認証が使えないためエラーで終了する。
-    # ローカルで token.json を再生成し GOOGLE_OAUTH_TOKEN_JSON 環境変数を更新すること。
-    raise RuntimeError(
-        "token.json のリフレッシュに失敗しました。"
-        " Railway ではブラウザ認証ができないため、ローカルで token.json を再生成し、"
-        " GOOGLE_OAUTH_TOKEN_JSON 環境変数を更新してください。"
+def _build_credentials() -> service_account.Credentials:
+    """サービスアカウントで Docs/Drive 認証情報を生成する。"""
+    return service_account.Credentials.from_service_account_file(
+        _SA_JSON_PATH, scopes=DOCS_SCOPES
     )
 
 
@@ -433,16 +408,6 @@ def main() -> None:
         help="dry-runを無効にし、Google Docs APIへ書き込む",
     )
     parser.add_argument(
-        "--credentials",
-        default="credentials.json",
-        help="Google OAuthクライアントJSON（デフォルト: credentials.json）",
-    )
-    parser.add_argument(
-        "--token",
-        default="token.json",
-        help="OAuthトークン保存先/読み込み先（デフォルト: token.json）",
-    )
-    parser.add_argument(
         "--model",
         default=None,
         help="（互換用）未使用。将来拡張用のため残す",
@@ -520,11 +485,8 @@ def main() -> None:
         print(f"saved_text={out_text_path}")
         return
 
-    # push モード：外部APIアクセス＆OAuth認可が必要になり得る
-    creds = load_or_create_google_docs_credentials(
-        credentials_json_path=args.credentials,
-        token_json_path=args.token,
-    )
+    # push モード：サービスアカウントで認証
+    creds = _build_credentials()
     docs_service = build("docs", "v1", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
 

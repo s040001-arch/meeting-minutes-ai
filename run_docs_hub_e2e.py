@@ -59,8 +59,6 @@ def _export_cmd(
     *,
     push: bool,
     chunk_size: int,
-    credentials: str,
-    token: str,
     drive_parent: str | None,
     drive_subfolder: str | None,
     title: str | None,
@@ -76,10 +74,6 @@ def _export_cmd(
         input_root,
         "--chunk-size",
         str(chunk_size),
-        "--credentials",
-        credentials,
-        "--token",
-        token,
         "--write-doc-meta-json",
         meta,
     ]
@@ -117,8 +111,6 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
             args.input_root,
             push=args.push,
             chunk_size=args.chunk_size,
-            credentials=args.credentials,
-            token=args.token,
             drive_parent=args.drive_parent_folder_id,
             drive_subfolder=args.drive_subfolder_name,
             title=args.title,
@@ -213,8 +205,6 @@ def main() -> None:
         help="Google Docs へ実際に書き込む（未指定時は export の dry-run のみ）",
     )
     parser.add_argument("--chunk-size", type=int, default=5000)
-    parser.add_argument("--credentials", default="credentials.json")
-    parser.add_argument("--token", default="token.json")
     parser.add_argument("--drive-parent-folder-id", default=None)
     parser.add_argument("--drive-subfolder-name", default=None)
     parser.add_argument("--title", default=None, help="Docs タイトル（未指定時は job_id）")

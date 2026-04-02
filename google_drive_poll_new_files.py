@@ -5,48 +5,21 @@ from typing import Any, Dict, List, Optional, Set
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+_SA_JSON_PATH = "credentials_service_account.json"
 
 
-def _load_credentials(
-    credentials_json_path: str,
-    token_json_path: str,
-) -> Credentials:
-    creds: Optional[Credentials] = None
-    if os.path.exists(token_json_path):
-        creds = Credentials.from_authorized_user_file(token_json_path, SCOPES)
-
-    if creds and creds.valid:
-        return creds
-
-    # 既存tokenのrefreshを試みるが、スコープ不整合(invalid_scope)なら再認可へフォールバック
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            return creds
-        except RefreshError:
-            creds = None
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        credentials_json_path,
-        SCOPES,
+def _build_credentials() -> service_account.Credentials:
+    """サービスアカウントで Drive 認証情報を生成する。"""
+    return service_account.Credentials.from_service_account_file(
+        _SA_JSON_PATH, scopes=SCOPES
     )
-    creds = flow.run_local_server(port=0)
-
-    os.makedirs(os.path.dirname(token_json_path) or ".", exist_ok=True)
-    with open(token_json_path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
-
-    return creds
 
 
-def build_drive_service(creds: Credentials):
+def build_drive_service(creds: service_account.Credentials):
     return build("drive", "v3", credentials=creds)
 
 
@@ -103,16 +76,6 @@ def main():
         description="Google Driveの指定フォルダから新規ファイル検出（Task 1-2）"
     )
     parser.add_argument(
-        "--credentials",
-        required=True,
-        help="OAuthクライアント設定（credentials.json）のパス",
-    )
-    parser.add_argument(
-        "--token",
-        default="token.json",
-        help="アクセストークン保存先（未設定ならローカルtoken.json）",
-    )
-    parser.add_argument(
         "--folder-id",
         required=True,
         help="対象Google DriveフォルダID",
@@ -137,7 +100,7 @@ def main():
 
     last_seen_ids = load_last_seen_ids(args.state)
 
-    creds = _load_credentials(args.credentials, args.token)
+    creds = _build_credentials()
     service = build_drive_service(creds)
 
     try:

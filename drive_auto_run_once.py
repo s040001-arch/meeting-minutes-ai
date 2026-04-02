@@ -6,10 +6,7 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List
 
-from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
@@ -24,33 +21,18 @@ from repo_env import load_dotenv_local
 SUPPORTED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".txt"}
 DOCS_EDITOR_PREFIX = "application/vnd.google-apps."
 DRIVE_AUTO_SCOPES = ["https://www.googleapis.com/auth/drive"]
+_SA_JSON_PATH = "credentials_service_account.json"
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def load_drive_credentials(credentials_json_path: str, token_json_path: str) -> Credentials:
-    creds: Credentials | None = None
-    if os.path.exists(token_json_path):
-        creds = Credentials.from_authorized_user_file(token_json_path, DRIVE_AUTO_SCOPES)
-
-    if creds and creds.valid:
-        return creds
-
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            return creds
-        except RefreshError:
-            creds = None
-
-    flow = InstalledAppFlow.from_client_secrets_file(credentials_json_path, DRIVE_AUTO_SCOPES)
-    creds = flow.run_local_server(port=0)
-    os.makedirs(os.path.dirname(token_json_path) or ".", exist_ok=True)
-    with open(token_json_path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
-    return creds
+def _build_credentials() -> service_account.Credentials:
+    """サービスアカウントで Drive 認証情報を生成する。"""
+    return service_account.Credentials.from_service_account_file(
+        _SA_JSON_PATH, scopes=DRIVE_AUTO_SCOPES
+    )
 
 
 def log_line(log_path: str, message: str) -> None:
@@ -238,12 +220,6 @@ def main() -> None:
             "ダウンロードして run_job_once.py を起動する"
         )
     )
-    parser.add_argument("--credentials", default="credentials.json", help="OAuthクライアントJSON")
-    parser.add_argument(
-        "--token",
-        default="token_drive.json",
-        help="Drive用OAuthトークン保存先/読込先（デフォルト: token_drive.json）",
-    )
     parser.add_argument(
         "--folder-id",
         default=None,
@@ -302,7 +278,7 @@ def main() -> None:
 
     try:
         known_ids = load_last_seen_ids(args.state)
-        creds = load_drive_credentials(args.credentials, args.token)
+        creds = _build_credentials()
         service = build("drive", "v3", credentials=creds)
 
         try:
