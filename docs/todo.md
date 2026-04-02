@@ -1,4 +1,4 @@
-# 改善タスク一覧（2026-04-02 更新）
+# 改善タスク一覧（2026-04-02 更新②）
 
 現行パイプラインに対する改善計画。
 実装の正はコード、要件の正は `spec.md`。本ファイルは優先度と進捗の目安。
@@ -123,7 +123,26 @@
 ### spec.md / ドキュメント整備（Opus 移行対応）
 
 - [x] 実装: `docs/spec.md` を Opus 移行・非同期化・パイプライン簡素化・品質目標 85% に合わせて更新
+- [x] 実装: `docs/spec.md` に Step⑰ ナレッジ蓄積・Step⑨ 重複防止・Knowledge Sheet A/B 列仕様を追記
 - [ ] 検証: 実装との差分が残っていないか棚卸し確認
+
+### Step⑨ AI不明点検出の本格実装
+
+- [x] 実装: `detect_unknown_points.py` を新設し、Claude 4 Opus で補正済みテキストから不明点を最大10件検出
+- [x] 実装: `run_job_once.py` で Step 4.35 として `detect_unknown_points()` を呼び出し（従来の空リストを置き換え）
+- [x] 実装: `run_resume_from_step7.py` で Step 9 として `detect_unknown_points()` を呼び出し
+- [x] 実装: 過去の回答済み不明点（`answered_items`）をプロンプトに含め、重複質問を抑制
+- [ ] 検証: 実データで過検出・取りこぼしの傾向を確認（旧 Regex 専用時との比較）
+- [ ] 検証: 回答済み情報が正しく「既知情報」としてプロンプトに反映されることを確認
+
+### 質問重複送信防止・ステータス保全
+
+- [x] 実装: `run_question_cycle_once.py` で LINE 送信後に選定した不明点を `status: asked` にマーク
+- [x] 実装: `_filter_pending_unknown_points()` を `asked` 項目も除外するよう拡張（回答待ち質問の再送防止）
+- [x] 実装: `restore_known_statuses()` を `run_job_once.py` に追加し、再補正サイクルで `answered`/`asked` ステータスを保全
+- [x] 実装: `run_resume_from_step7.py` で Regex マージ後に `restore_known_statuses()` を適用
+- [ ] 検証: 送信済み質問が次サイクルで再送されないことを確認
+- [ ] 検証: LINE 回答後の再補正サイクルで、回答済みフラグが `unknown_points.json` に引き継がれることを確認
 
 ### ドキュメント・構成整理
 
@@ -149,6 +168,37 @@
 ---
 
 ## 未実装
+
+### Step⑰ ナレッジ蓄積のパイプライン組み込み（最優先）
+
+spec.md では Step⑪完了直後に Step⑰ ナレッジ蓄積を実行する仕様だが、現在パイプラインには組み込まれていない。
+
+- [ ] 実装: ナレッジ蓄積ロジックを専用関数 or モジュール（`accumulate_knowledge_step17.py` 等）に切り出す
+  - Knowledge Sheet 全件読み込み → Claude Opus に回答群と渡して統合判断 → Sheets 全体書き戻し
+  - 既存の `knowledge_sheet_store.py` の `merge_answer_into_knowledge_store()` を参考にするか、統合を検討
+- [ ] 実装: `run_job_once.py` の Step⑪完了直後（議事録生成後）に Step⑰ 呼び出しを追加
+- [ ] 実装: `run_resume_from_step7.py` の Step⑪相当完了直後にも同様に Step⑰ 呼び出しを追加
+- [ ] 検証: ナレッジ蓄積が実行されること、かつ Knowledge Sheet に整合のとれた内容が書き戻されることを確認
+- [ ] 検証: Step⑰ が失敗しても以降のパイプライン（Step⑫〜）が止まらないことを確認
+
+### answers.json の設計と実装（Step⑰ の前提）
+
+spec.md では「answers.json（現在のジョブで得られた回答の蓄積）」を Step⑰ が参照するが、この仕組みが未実装。現在は `unknown_points.json` の `answered` エントリが唯一の回答記録。
+
+- [ ] 実装: ジョブディレクトリに `answers.json`（ジョブ内回答の累積ログ）を設計・定義する
+  - 例: `[{"question_text": "...", "answer_text": "...", "answered_at": "..."}]`
+- [ ] 実装: `webhook_app.py` の回答受信時に `answers.json` へ追記する
+- [ ] 実装: `detect_unknown_points.py` が `unknown_points.json` の `answered` 項目と合わせて `answers.json` も参照するよう更新（またはどちらか一方に統一）
+- [ ] 検証: 複数回の Q&A を経た後、`answers.json` に全回答が記録されていることを確認
+
+### Knowledge Sheet B列（カテゴリ）の読み書き対応
+
+spec.md で A列（自由記述）・B列（カテゴリ）の2列構造を定義したが、現在の実装は A列のみを使用している。
+
+- [ ] 実装: `knowledge_sheet_store.py` の読み込み処理で B列（カテゴリ）も取得するよう更新
+- [ ] 実装: ナレッジ蓄積時（Step⑰）に Claude がカテゴリを返す場合、B列にも書き込む
+- [ ] 実装: AI補正（Step⑧）・不明点検出（Step⑨）のプロンプトでカテゴリ情報を活用する（任意）
+- [ ] 検証: B列が正しく読み書きされ、既存の A列処理に影響が出ないことを確認
 
 ### Phase 1: 基盤整備（最優先）
 
@@ -295,3 +345,4 @@
 - **2026-04-01:** `todo.md` を「実装」と「検証」を分けて管理する形式へ再構成。
 - **2026-04-01:** LINE 受信を「3分類」から「回答情報 / 修正依頼の情報抽出」前提へ整理。可視ログ、質問文改善、機械補正強化、再開時の Docs タイトル戻しを反映。
 - **2026-04-02:** Opus 移行 Phase 1（LINE webhook 非同期化・push API 切替）および Phase 2（Step⑧ Opus 一括補正・マスキング多段処理廃止）の実装完了を反映。`knowledge_sheet_store.py`・`job_context.py`・`seed_knowledge.py` の追加、`railway_bootstrap.py` の service account 対応、`spec.md` の Opus 移行・非同期化仕様への更新を反映。「未実装」から完了済み項目を「実装済み・検証待ち」に移動。
+- **2026-04-02②:** Step⑨ AI不明点検出の本格実装（`detect_unknown_points.py` 新設・パイプライン組み込み）、質問重複送信防止（`asked` ステータス管理）、再補正サイクルでの回答済みステータス保全（`restore_known_statuses()`）の実装完了を反映。`spec.md` の Step⑰ ナレッジ蓄積・Knowledge Sheet A/B 列仕様・Step⑨ 重複防止仕様を更新。Step⑰ パイプライン組み込み・answers.json・B列対応を新規「未実装」として追加。
