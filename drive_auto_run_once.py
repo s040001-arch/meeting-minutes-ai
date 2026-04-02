@@ -1,399 +1,392 @@
-import argparse
+import json
+import logging
 import os
-import re
 import subprocess
 import sys
+import time
 from datetime import datetime
-from typing import Any, Dict, List
+from pathlib import Path
 
-from google.oauth2 import service_account
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-from google_drive_poll_new_files import (
-    list_files_in_folder,
-    load_last_seen_ids,
-    save_last_seen_ids,
+# ──────────────────────────────────────────────
+# 定数
+# ──────────────────────────────────────────────
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+SERVICE_ACCOUNT_FILE = "service_account.json"
+WATCH_FOLDER_ID = os.environ.get("WATCH_FOLDER_ID", "")
+STATE_FILE = "data/last_seen_file_ids.json"
+LOCK_FILE = "logs/drive_auto_run_once.lock"
+LOG_FILE = "logs/drive_auto_run_once.log"
+
+# ★ 変更点①: テキストとオーディオでダウンロード先を分離
+INCOMING_AUDIO_DIR = "data/incoming_audio"
+INCOMING_TEXT_DIR = "data/incoming_text"           # ← 追加
+
+AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav"}
+TEXT_EXTENSIONS = {".txt"}                          # ← 追加
+SUPPORTED_EXTENSIONS = AUDIO_EXTENSIONS | TEXT_EXTENSIONS
+
+MIME_TYPE_FOLDER = "mimeType = 'application/vnd.google-apps.folder'"
+MIME_TYPE_GOOGLE_DOC = "application/vnd.google-apps.document"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
-from repo_env import load_dotenv_local
-
-SUPPORTED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".txt"}
-DOCS_EDITOR_PREFIX = "application/vnd.google-apps."
-DRIVE_AUTO_SCOPES = ["https://www.googleapis.com/auth/drive"]
-_SA_JSON_PATH = "credentials_service_account.json"
+logger = logging.getLogger(__name__)
 
 
-def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _build_credentials() -> service_account.Credentials:
-    """サービスアカウントで Drive 認証情報を生成する。"""
-    return service_account.Credentials.from_service_account_file(
-        _SA_JSON_PATH, scopes=DRIVE_AUTO_SCOPES
+# ──────────────────────────────────────────────
+# Google Drive ヘルパー
+# ──────────────────────────────────────────────
+def get_drive_service():
+    creds = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
+    return build("drive", "v3", credentials=creds)
 
 
-def log_line(log_path: str, message: str) -> None:
-    line = f"[{now_iso()}] {message}"
-    print(line)
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+def list_files_in_folder(service, folder_id: str) -> list[dict]:
+    """指定フォルダ直下のファイル一覧を取得（フォルダ自体は除外）"""
+    results = []
+    page_token = None
+    query = (
+        f"'{folder_id}' in parents"
+        f" and mimeType != 'application/vnd.google-apps.folder'"
+        f" and trashed = false"
+    )
+    while True:
+        resp = (
+            service.files()
+            .list(
+                q=query,
+                fields="nextPageToken, files(id, name, mimeType, parents)",
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        results.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return results
 
 
-def acquire_lock(lock_path: str) -> bool:
-    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(f"pid={os.getpid()}\n")
-        f.write(f"started_at={now_iso()}\n")
-    return True
+def create_subfolder(service, parent_id: str, name: str) -> str:
+    """parent_id 配下にサブフォルダを作成し、そのIDを返す"""
+    body = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = service.files().create(body=body, fields="id").execute()
+    return folder["id"]
 
 
-def release_lock(lock_path: str) -> None:
-    try:
-        os.remove(lock_path)
-    except FileNotFoundError:
-        pass
+def move_file_to_folder(service, file_id: str, new_parent_id: str) -> None:
+    """ファイルを新しいフォルダに移動"""
+    file_meta = (
+        service.files().get(fileId=file_id, fields="parents").execute()
+    )
+    old_parents = ",".join(file_meta.get("parents", []))
+    service.files().update(
+        fileId=file_id,
+        addParents=new_parent_id,
+        removeParents=old_parents,
+        fields="id, parents",
+    ).execute()
 
 
-def sanitize_name_for_job(raw: str) -> str:
-    s = re.sub(r"\W+", "_", raw, flags=re.UNICODE).strip("_")
-    return s[:40] if s else "audio"
+def download_file(service, file_id: str, dest_path: str) -> None:
+    """Drive からファイルをダウンロード"""
+    import io
 
-
-def build_job_id(file_name: str) -> str:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = os.path.splitext(file_name)[0]
-    return f"job_{stamp}_{sanitize_name_for_job(stem)}"
-
-
-def select_one_new_file(files: List[Dict[str, Any]], known_ids: set[str]) -> Dict[str, Any] | None:
-    candidates: List[Dict[str, Any]] = []
-    for f in files:
-        file_id = str(f.get("id") or "")
-        if not file_id or file_id in known_ids:
-            continue
-        mime_type = str(f.get("mimeType") or "")
-        if mime_type == "application/vnd.google-apps.folder":
-            continue
-        if mime_type.startswith(DOCS_EDITOR_PREFIX):
-            continue
-        ext = os.path.splitext(str(f.get("name") or ""))[1].lower()
-        # Drive上で拡張子が付かない text/plain があるため、mimeType でも判定する
-        is_supported_ext = ext in SUPPORTED_EXTENSIONS
-        is_supported_mime = mime_type == "text/plain" or mime_type.startswith("audio/")
-        if not (is_supported_ext or is_supported_mime):
-            continue
-        candidates.append(f)
-    if not candidates:
-        return None
-    # modifiedTime -> name の順で最古を先に処理（FIFO寄り）
-    candidates.sort(key=lambda x: (str(x.get("modifiedTime", "")), str(x.get("name", ""))))
-    return candidates[0]
-
-
-def find_incomplete_job(service, root_folder_id: str) -> Dict[str, Any] | None:
-    """サブフォルダを走査し、Google Doc未作成の未完了ジョブを1件返す（古い順）。"""
-    q = (f"'{root_folder_id}' in parents and "
-         "mimeType='application/vnd.google-apps.folder' and trashed=false")
-    folders = service.files().list(
-        q=q, spaces="drive",
-        fields="files(id,name,createdTime)", pageSize=200
-    ).execute().get("files", [])
-
-    folders.sort(key=lambda x: x.get("createdTime", ""))
-
-    for folder in folders:
-        fid = folder["id"]
-        children = service.files().list(
-            q=f"'{fid}' in parents and trashed=false",
-            spaces="drive",
-            fields="files(id,name,mimeType)", pageSize=50
-        ).execute().get("files", [])
-
-        has_source = False
-        has_doc = False
-        source_file = None
-
-        for c in children:
-            mime = c.get("mimeType", "")
-            ext = os.path.splitext(c.get("name", ""))[1].lower()
-            if mime == "application/vnd.google-apps.document":
-                has_doc = True
-            elif ext in SUPPORTED_EXTENSIONS or mime == "text/plain" or mime.startswith("audio/"):
-                has_source = True
-                source_file = c
-
-        if has_source and not has_doc:
-            return {
-                "file": source_file,
-                "subfolder_id": fid,
-                "subfolder_name": folder["name"],
-            }
-
-    return None
-
-
-def download_drive_file(service, file_id: str, output_path: str) -> None:
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     request = service.files().get_media(fileId=file_id)
-    with open(output_path, "wb") as f:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with open(dest_path, "wb") as f:
         downloader = MediaIoBaseDownload(f, request)
         done = False
         while not done:
             _, done = downloader.next_chunk()
 
 
-def ensure_extension_by_mime(file_name: str, mime_type: str) -> str:
-    ext = os.path.splitext(file_name)[1].lower()
-    if ext:
-        return file_name
-    if mime_type == "text/plain":
-        return f"{file_name}.txt"
-    if mime_type in {"audio/mpeg"}:
-        return f"{file_name}.mp3"
-    if mime_type in {"audio/wav", "audio/x-wav"}:
-        return f"{file_name}.wav"
-    if mime_type in {"audio/mp4", "audio/x-m4a"}:
-        return f"{file_name}.m4a"
-    return file_name
+# ★ 変更点②: テキストファイルはダウンロードではなく内容を直接取得して保存
+def fetch_text_content(service, file_id: str, dest_path: str) -> None:
+    """Drive 上のテキストファイルの内容を API で取得しローカルに保存"""
+    import io
+
+    request = service.files().get_media(fileId=file_id)
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    text = buffer.getvalue().decode("utf-8", errors="replace")
+    with open(dest_path, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
-def ensure_drive_subfolder(service, parent_folder_id: str, subfolder_name: str) -> str:
-    safe_name = subfolder_name.strip()
-    if not safe_name:
-        raise ValueError("subfolder name is empty.")
-    escaped = safe_name.replace("\\", "\\\\").replace("'", "\\'")
+def subfolder_has_google_doc(service, subfolder_id: str) -> bool:
+    """サブフォルダ内に Google Doc が存在するか"""
     query = (
-        f"'{parent_folder_id}' in parents and "
-        "mimeType='application/vnd.google-apps.folder' and "
-        f"name='{escaped}' and trashed=false"
+        f"'{subfolder_id}' in parents"
+        f" and mimeType = '{MIME_TYPE_GOOGLE_DOC}'"
+        f" and trashed = false"
     )
-    result = (
+    resp = (
         service.files()
-        .list(q=query, spaces="drive", fields="files(id,name)", pageSize=10)
+        .list(q=query, fields="files(id)", pageSize=1)
         .execute()
     )
-    files = result.get("files", [])
-    if files:
-        return str(files[0]["id"])
-    created = (
-        service.files()
-        .create(
-            body={
-                "name": safe_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent_folder_id],
-            },
-            fields="id,name",
-        )
-        .execute()
-    )
-    return str(created["id"])
+    return len(resp.get("files", [])) > 0
 
 
-def move_drive_file_to_folder(service, file_id: str, folder_id: str) -> None:
-    file_meta = service.files().get(fileId=file_id, fields="id,parents").execute()
-    prev_parents = ",".join(file_meta.get("parents", []))
-    service.files().update(
-        fileId=file_id,
-        addParents=folder_id,
-        removeParents=prev_parents,
-        fields="id,parents",
-    ).execute()
+# ──────────────────────────────────────────────
+# 状態管理
+# ──────────────────────────────────────────────
+def load_seen_ids() -> set[str]:
+    if not os.path.isfile(STATE_FILE):
+        return set()
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return set(data) if isinstance(data, list) else set()
 
 
-def run_pipeline(
-    repo_root: str,
-    job_id: str,
-    input_audio_path: str,
-    docs_chunk_size: int,
-    max_chunks: int | None,
-    log_path: str,
-    docs_parent_folder_id: str | None = None,
-    docs_subfolder_name: str | None = None,
+def save_seen_ids(seen: set[str]) -> None:
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
+
+
+# ──────────────────────────────────────────────
+# ロック
+# ──────────────────────────────────────────────
+def acquire_lock() -> bool:
+    os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    if os.path.isfile(LOCK_FILE):
+        logger.warning("Lock file exists: %s — skipping run", LOCK_FILE)
+        return False
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def release_lock() -> None:
+    if os.path.isfile(LOCK_FILE):
+        os.remove(LOCK_FILE)
+
+
+# ──────────────────────────────────────────────
+# ★ 変更点③: ファイル種別に応じた取得処理を分離
+# ──────────────────────────────────────────────
+def resolve_local_path(file_name: str) -> tuple[str, str]:
+    """
+    ファイル名から (保存先ディレクトリ, ローカルパス) を返す。
+    テキストは incoming_text、音声は incoming_audio に振り分ける。
+    """
+    ext = Path(file_name).suffix.lower()
+    if ext in TEXT_EXTENSIONS:
+        dest_dir = INCOMING_TEXT_DIR
+    else:
+        dest_dir = INCOMING_AUDIO_DIR
+    local_path = os.path.join(dest_dir, file_name)
+    return dest_dir, local_path
+
+
+def acquire_file_locally(
+    service, file_id: str, file_name: str, local_path: str
 ) -> None:
+    """
+    ファイル種別に応じてローカルに取得する。
+    - テキスト: UTF-8テキストとして保存（バイナリダウンロード不要）
+    - 音声: バイナリダウンロード
+    """
+    ext = Path(file_name).suffix.lower()
+    if ext in TEXT_EXTENSIONS:
+        logger.info("テキストファイルを直接取得: %s", file_name)
+        fetch_text_content(service, file_id, local_path)
+    else:
+        logger.info("音声ファイルをダウンロード: %s", file_name)
+        download_file(service, file_id, local_path)
+
+
+# ──────────────────────────────────────────────
+# ★ 変更点④: 新規ファイル処理を関数に切り出し
+# ──────────────────────────────────────────────
+def process_new_file(
+    service, file_id: str, file_name: str, seen_ids: set[str]
+) -> None:
+    """新規ファイル1件を処理する"""
+    stem = Path(file_name).stem
+
+    # (a) Drive 上にサブフォルダ作成 & ファイル移動
+    subfolder_id = create_subfolder(service, WATCH_FOLDER_ID, stem)
+    logger.info("サブフォルダ作成: %s (id=%s)", stem, subfolder_id)
+
+    move_file_to_folder(service, file_id, subfolder_id)
+    logger.info("ファイル移動完了: %s → %s/", file_name, stem)
+
+    # (b) ローカルに取得（テキスト/音声で処理を分岐）
+    _, local_path = resolve_local_path(file_name)
+    acquire_file_locally(service, file_id, file_name, local_path)
+    logger.info("ローカル取得完了: %s", local_path)
+
+    # (c) run_job_once.py を実行
+    job_id = stem
     cmd = [
         sys.executable,
-        os.path.join(repo_root, "run_job_once.py"),
+        "run_job_once.py",
         "--job-id",
         job_id,
         "--input-audio",
-        input_audio_path,
+        local_path,
         "--docs-push",
-        "--docs-chunk-size",
-        str(docs_chunk_size),
+        "--docs-parent-folder-id",
+        WATCH_FOLDER_ID,
+        "--docs-subfolder-name",
+        stem,
     ]
-    if docs_parent_folder_id:
-        cmd.extend(["--docs-parent-folder-id", docs_parent_folder_id])
-    if docs_subfolder_name:
-        cmd.extend(["--docs-subfolder-name", docs_subfolder_name])
-    # Drive 上の元ファイルは処理後に move で案件サブフォルダへ移すため、
-    # ここでローカルから同内容を再アップロードしない（手動 run_job_once は従来どおり）。
-    cmd.append("--no-docs-upload-source")
-    if max_chunks is not None:
-        cmd.extend(["--max-chunks", str(max_chunks)])
+    logger.info("ジョブ実行開始: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
-    log_line(log_path, f"run_job_once_start cmd={' '.join(cmd)}")
-    completed = subprocess.run(cmd, capture_output=True, text=True)
-    if completed.stdout.strip():
-        log_line(log_path, f"run_job_once_stdout\n{completed.stdout.rstrip()}")
-        # Railway ログにも出力して遠隔デバッグを可能にする
-        print(f"[run_pipeline] run_job_once stdout:\n{completed.stdout.rstrip()}", flush=True)
-    if completed.stderr.strip():
-        log_line(log_path, f"run_job_once_stderr\n{completed.stderr.rstrip()}")
-        # Railway ログにも出力して遠隔デバッグを可能にする
-        print(f"[run_pipeline] run_job_once stderr:\n{completed.stderr.rstrip()}", flush=True)
-    if completed.returncode != 0:
-        raise RuntimeError(f"run_job_once failed: exit_code={completed.returncode}")
-    log_line(log_path, "run_job_once_success")
+    if result.returncode == 0:
+        logger.info("ジョブ成功: job_id=%s", job_id)
+    else:
+        logger.error(
+            "ジョブ失敗: job_id=%s returncode=%d\nstderr=%s",
+            job_id,
+            result.returncode,
+            result.stderr[:500] if result.stderr else "(empty)",
+        )
+
+    # (d) 処理済みとして記録
+    seen_ids.add(file_id)
+    save_seen_ids(seen_ids)
 
 
+# ──────────────────────────────────────────────
+# ★ 変更点⑤: リカバリ処理を関数に切り出し
+# ──────────────────────────────────────────────
+def recover_incomplete_jobs(service) -> None:
+    """
+    Drive上のサブフォルダを走査し、Google Docが未生成のものを再処理する
+    """
+    query = (
+        f"'{WATCH_FOLDER_ID}' in parents"
+        f" and mimeType = 'application/vnd.google-apps.folder'"
+        f" and trashed = false"
+    )
+    resp = (
+        service.files()
+        .list(q=query, fields="files(id, name)", pageSize=100)
+        .execute()
+    )
+    subfolders = resp.get("files", [])
+
+    for sf in subfolders:
+        sf_id = sf["id"]
+        sf_name = sf["name"]
+
+        if subfolder_has_google_doc(service, sf_id):
+            continue
+
+        logger.info("未完了ジョブ検出: %s (id=%s)", sf_name, sf_id)
+
+        # サブフォルダ内のファイルを探す
+        files_in_sub = list_files_in_folder(service, sf_id)
+        target = None
+        for f in files_in_sub:
+            ext = Path(f["name"]).suffix.lower()
+            if ext in SUPPORTED_EXTENSIONS:
+                target = f
+                break
+
+        if not target:
+            logger.warning(
+                "リカバリスキップ: 対象ファイルなし folder=%s", sf_name
+            )
+            continue
+
+        file_name = target["name"]
+        _, local_path = resolve_local_path(file_name)
+
+        # ローカルになければ再取得
+        if not os.path.isfile(local_path):
+            acquire_file_locally(service, target["id"], file_name, local_path)
+            logger.info("リカバリ: ファイル再取得 %s", local_path)
+
+        job_id = sf_name
+        cmd = [
+            sys.executable,
+            "run_job_once.py",
+            "--job-id",
+            job_id,
+            "--input-audio",
+            local_path,
+            "--docs-push",
+            "--docs-parent-folder-id",
+            WATCH_FOLDER_ID,
+            "--docs-subfolder-name",
+            sf_name,
+        ]
+        logger.info("リカバリ実行: %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            logger.info("リカバリ成功: job_id=%s", job_id)
+        else:
+            logger.error(
+                "リカバリ失敗: job_id=%s returncode=%d",
+                job_id,
+                result.returncode,
+            )
+
+
+# ──────────────────────────────────────────────
+# メイン
+# ──────────────────────────────────────────────
 def main() -> None:
-    load_dotenv_local()
-    parser = argparse.ArgumentParser(
-        description=(
-            "監視フォルダ直下の新規ファイル1件を検知し、Drive上でstem名サブフォルダへ移動後に "
-            "ダウンロードして run_job_once.py を起動する"
-        )
-    )
-    parser.add_argument(
-        "--folder-id",
-        default=None,
-        help="監視対象のGoogle DriveフォルダID（未指定時は環境変数 DRIVE_FOLDER_ID）",
-    )
-    parser.add_argument(
-        "--state",
-        default="data/last_seen_file_ids.json",
-        help="既知file_id保存先（デフォルト: data/last_seen_file_ids.json）",
-    )
-    parser.add_argument(
-        "--download-dir",
-        default=os.path.join("data", "incoming_audio"),
-        help="Driveファイルのダウンロード先",
-    )
-    parser.add_argument(
-        "--docs-chunk-size",
-        type=int,
-        default=5000,
-        help="run_job_once.py へ渡す Docs 分割サイズ",
-    )
-    parser.add_argument(
-        "--max-chunks",
-        type=int,
-        default=None,
-        help="run_job_once.py へ渡す max-chunks（検証用）",
-    )
-    parser.add_argument(
-        "--update-state",
-        action="store_true",
-        help="検知後に state を更新する（同一ファイル再処理防止）",
-    )
-    parser.add_argument(
-        "--lock-file",
-        default=os.path.join("logs", "drive_auto_run_once.lock"),
-        help="二重実行防止ロックファイル（デフォルト: logs/drive_auto_run_once.lock）",
-    )
-    args = parser.parse_args()
+    if not WATCH_FOLDER_ID:
+        logger.error("環境変数 WATCH_FOLDER_ID が未設定です")
+        sys.exit(1)
 
-    folder_id = (args.folder_id or os.getenv("DRIVE_FOLDER_ID", "").strip())
-    if not folder_id:
-        raise SystemExit(
-            "監視フォルダが未指定です。--folder-id または環境変数 DRIVE_FOLDER_ID を設定してください。"
-        )
-    args.folder_id = folder_id
-
-    repo_root = os.getcwd()
-    os.makedirs("logs", exist_ok=True)
-    log_path = os.path.join("logs", "drive_auto_run_once.log")
-    log_line(log_path, "drive_auto_run_once_start")
-    if not acquire_lock(args.lock_file):
-        log_line(log_path, f"skip_locked lock_file={args.lock_file}")
-        print("status=skipped_locked")
-        print(f"lock_file={args.lock_file}")
-        return
+    if not acquire_lock():
+        sys.exit(0)
 
     try:
-        known_ids = load_last_seen_ids(args.state)
-        creds = _build_credentials()
-        service = build("drive", "v3", credentials=creds)
+        service = get_drive_service()
+        seen_ids = load_seen_ids()
 
-        try:
-            files = list_files_in_folder(service, args.folder_id)
-        except HttpError as e:
-            raise RuntimeError(f"Drive API error: {e}") from e
+        # ── 新規ファイル処理 ──
+        all_files = list_files_in_folder(service, WATCH_FOLDER_ID)
+        new_files = [
+            f
+            for f in all_files
+            if f["id"] not in seen_ids
+            and Path(f["name"]).suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
 
-        selected = select_one_new_file(files, known_ids)
-
-        if selected:
-            # === 通常フロー: ルートに新規ファイルあり ===
-            file_id = str(selected.get("id"))
-            file_name = str(selected.get("name") or f"{file_id}.bin")
-            mime_type = str(selected.get("mimeType") or "")
-            file_name = ensure_extension_by_mime(file_name, mime_type)
-            drive_subfolder_name = os.path.splitext(file_name)[0]
-            target_folder_id = ensure_drive_subfolder(
-                service=service,
-                parent_folder_id=args.folder_id,
-                subfolder_name=drive_subfolder_name,
-            )
-            move_drive_file_to_folder(service, file_id=file_id, folder_id=target_folder_id)
-            log_line(
-                log_path,
-                f"source_file_moved_to_stem_folder file_id={file_id} target_folder_id={target_folder_id}",
-            )
+        if not new_files:
+            logger.info("新規ファイルなし")
         else:
-            # === リカバリフロー: サブフォルダの未完了ジョブを探す ===
-            incomplete = find_incomplete_job(service, args.folder_id)
-            if incomplete:
-                log_line(log_path, f"found_incomplete_job subfolder={incomplete['subfolder_name']}")
-                file_id = str(incomplete["file"]["id"])
-                file_name = str(incomplete["file"]["name"])
-                mime_type = str(incomplete["file"].get("mimeType", ""))
-                file_name = ensure_extension_by_mime(file_name, mime_type)
-                drive_subfolder_name = incomplete["subfolder_name"]
-                target_folder_id = incomplete["subfolder_id"]
-            else:
-                log_line(log_path, "no_new_files")
-                print("status=no_new_files")
-                return
+            logger.info("新規ファイル %d 件検出", len(new_files))
 
-        safe_name = re.sub(r"[\\/:*?\"<>|]", "_", file_name)
-        downloaded_path = os.path.join(args.download_dir, safe_name)
-        log_line(log_path, f"selected_file id={file_id} name={file_name}")
-        download_drive_file(service, file_id, downloaded_path)
-        log_line(log_path, f"downloaded_to={downloaded_path}")
+        for f in new_files:
+            process_new_file(service, f["id"], f["name"], seen_ids)
 
-        job_id = build_job_id(file_name)
-        run_pipeline(
-            repo_root=repo_root,
-            job_id=job_id,
-            input_audio_path=downloaded_path,
-            docs_chunk_size=args.docs_chunk_size,
-            max_chunks=args.max_chunks,
-            log_path=log_path,
-            docs_parent_folder_id=args.folder_id,
-            docs_subfolder_name=drive_subfolder_name,
-        )
+        # ── 未完了ジョブのリカバリ ──
+        recover_incomplete_jobs(service)
 
-        if args.update_state:
-            current_ids = {str(f.get("id")) for f in files if f.get("id")}
-            save_last_seen_ids(args.state, current_ids)
-            log_line(log_path, f"updated_state={args.state}")
-
-        print(f"status=success")
-        print(f"job_id={job_id}")
-        print(f"processed_file_id={file_id}")
-        print(f"processed_file_name={file_name}")
-        print(f"target_folder_id={target_folder_id}")
-        print(f"log={log_path}")
     finally:
-        release_lock(args.lock_file)
+        release_lock()
 
 
 if __name__ == "__main__":
