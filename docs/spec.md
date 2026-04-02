@@ -84,18 +84,38 @@ YYYY_MMDD_顧客名_会議種別.{拡張子}
 
 ### Phase A: 初期処理（Step①〜⑥）
 
+Step①〜⑥ は **`drive_auto_run_once.py` が一気通貫で実行する**。
+
 ```
-Step① ポーリングで Google Drive ルート直下の新規ファイルを検出
-Step② サブフォルダを作成（ファイル名の拡張子なし）
-Step③ ファイルをサブフォルダに移動
-Step④ 音声ファイルの場合 → Whisper で文字起こし（チャンク分割対応）
-       テキストファイルの場合 → そのまま使用
-       ※ filename_hints.py により、ファイル名から顧客名・会議種別を抽出し、
-         Whisper の initial_prompt および後続 AI 処理のコンテキストとして使用する
-Step⑤ merged_transcript.txt をサブフォルダに保存
-Step⑥ Google Doc を作成、タイトル「【文字起こし】{stem}」、
+Step① Google Drive の監視フォルダ（DRIVE_FOLDER_ID）直下をポーリングし、新規ファイルを検出
+       対応拡張子（音声）: .m4a, .mp3, .wav, .ogg, .webm
+       対応拡張子（テキスト）: .txt
+       ※ 既にサブフォルダ内にあるファイルは対象外（ルート直下のみを検知）
+
+Step② ファイル名（拡張子なし）と同名のサブフォルダを監視フォルダ直下に作成
+       例: 「2025_0610_ABC商事_定例会議.m4a」→「2025_0610_ABC商事_定例会議/」を作成
+
+Step③ 検出したファイルをそのサブフォルダへ移動（Drive上で move）
+       ※ この時点でルート直下からファイルが消えるが、処理はまだ完了していない
+
+Step④ ファイルをローカルにダウンロードし、種別に応じて分岐
+       音声ファイルの場合  → OpenAI Whisper API で文字起こし（チャンク分割対応）
+                            filename_hints.py でファイル名から顧客名・会議種別を抽出し、
+                            Whisper の initial_prompt および後続 AI 処理のコンテキストとして使用する
+       テキストファイルの場合 → Whisper をスキップし、テキスト内容をそのまま使用
+       ※ どちらの場合も「テキスト内容が確定した状態」になる
+
+Step⑤ テキストを merged_transcript.txt としてローカルのジョブディレクトリに保存
+
+Step⑥ Google Doc を新規作成し、タイトルを「【文字起こし】{stem}」とする
        merged_transcript.txt の内容を書き込み
+       → Doc ID を google_doc_hub.json に保存（以降のステップで同一 Doc を再利用）
 ```
+
+#### 注意事項
+
+- **「ルート直下にファイルがない ≠ 処理済み」**: Step③ でファイルがサブフォルダへ移動した後もパイプラインは継続中。ルートが空でも処理が途中の場合がある。
+- **リカバリ方法**: Step①〜⑥ の途中で失敗した場合、対象ファイルはサブフォルダ内に残る（ルート直下には戻らない）。手動でリカバリするには `run_job_once.py --job-id <job_id> --input-audio <path>` を直接実行する。
 
 ### Phase B: 補正ループ（Step⑦〜⑰）
 
@@ -506,18 +526,14 @@ Railway のログが流れた後でも、Drive 上で処理状況を確認でき
 | ドキュメント生成 | Google Docs API v1 |
 | ナレッジ蓄積 | Google Sheets API |
 | ユーザー通知・対話 | LINE Messaging API |
-| OAuth 管理 | Google OAuth 2.0（環境変数から JSON 復元） |
+| 認証 | Google サービスアカウント（`GOOGLE_SERVICE_ACCOUNT_JSON` から復元） |
 
 ---
 
 ## 12. 環境変数
 
 ```
-GOOGLE_OAUTH_CLIENT_JSON       ← OAuth クライアント JSON（環境変数から復元）
-GOOGLE_OAUTH_TOKEN_JSON        ← OAuth トークン JSON（環境変数から復元）
-GOOGLE_OAUTH_TOKEN_DRIVE_JSON  ← Google Drive 用 OAuth トークン JSON（環境変数から復元）
-GOOGLE_DRIVE_CREDENTIALS_PATH  ← 復元済み OAuth クレデンシャルファイルのパス
-GOOGLE_DRIVE_TOKEN_PATH        ← 復元済み OAuth トークンファイルのパス
+GOOGLE_SERVICE_ACCOUNT_JSON    ← サービスアカウント JSON（Drive / Docs / Sheets 共通）
 DRIVE_FOLDER_ID                ← Google Drive の監視対象フォルダ ID
 ANTHROPIC_API_KEY              ← Claude API キー
 OPENAI_API_KEY                 ← OpenAI API キー（Whisper + その他 OpenAI 系機能で共用）
@@ -532,7 +548,7 @@ KNOWLEDGE_SHEET_ID             ← ナレッジ蓄積用 Google Sheets のスプ
 
 ```
 railway_entry.sh
-  → railway_bootstrap.py（環境変数から OAuth JSON ファイルを復元）
+  → railway_bootstrap.py（GOOGLE_SERVICE_ACCOUNT_JSON からサービスアカウントファイルを復元）
   → drive_auto_run_forever.py（メインループ起動）
 ```
 
