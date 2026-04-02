@@ -24,7 +24,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 
-from knowledge_sheet_store import merge_answer_into_knowledge_store
+
 from progress_tracker import read_job_progress, read_last_job_progress, update_job_progress
 
 app = FastAPI()
@@ -879,7 +879,6 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
     effective_answer_text = answer_text or str(text or "").strip()
     answer_save_ok = False
     answered_updates = 0
-    knowledge_result: dict[str, object] = {}
     if has_answer and qtext_for_save:
         state["answers"][question_id] = text
         print("unknown_answer_received=")
@@ -911,53 +910,15 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 answer_text=effective_answer_text,
             )
             _record_job_visible_log(job_id_for_save, f"Step 16: answers.json に追記 question_id={question_id}")
-        _record_job_visible_log(job_id_for_save, "Step 16: ナレッジ蓄積: 開始")
-        try:
-            knowledge_result = merge_answer_into_knowledge_store(
-                question_text=qtext_for_save,
-                answer_text=effective_answer_text,
-            )
-        except Exception as e:
-            knowledge_result = {
-                "enabled": True,
-                "updated": False,
-                "reason": f"knowledge_update_failed:{e!r}",
-            }
-            print(f"knowledge_store_update_failed={e!r}")
-            _record_job_visible_log(
-                job_id_for_save,
-                f"Step 16: ナレッジ蓄積: エラー → {e!r}",
-            )
         print(
             "unknown_points_answered_update="
             f"job_id={job_id_for_save!r} updated_count={answered_updates}"
         )
-        print(f"knowledge_store_update={knowledge_result}")
         if job_id_for_save:
             _record_job_visible_log(
                 job_id_for_save,
-                f"Step 17: 回答受信済みとして記録 answered_updates={answered_updates}",
+                f"Step 16: 回答受信済みとして記録 answered_updates={answered_updates}",
             )
-            if not knowledge_result.get("enabled"):
-                _record_job_visible_log(
-                    job_id_for_save,
-                    "Step 16: ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_ID未設定）",
-                )
-            elif knowledge_result.get("updated"):
-                before = knowledge_result.get("knowledge_count_before", 0)
-                after = knowledge_result.get("knowledge_count_after", 0)
-                reason = str(knowledge_result.get("reason") or "").strip() or "-"
-                _record_job_visible_log(
-                    job_id_for_save,
-                    f"Step 16: ナレッジ蓄積: updated（{before}件→{after}件）/ 理由: {reason}",
-                )
-            else:
-                before = knowledge_result.get("knowledge_count_before", 0)
-                reason = str(knowledge_result.get("reason") or "").strip() or "-"
-                _record_job_visible_log(
-                    job_id_for_save,
-                    f"Step 16: ナレッジ蓄積: unchanged（{before}件）/ 理由: {reason}",
-                )
 
     correction_save_ok = False
     added = 0
