@@ -551,9 +551,13 @@ def main() -> None:
         )
 
     # 見出しスタイルを適用（Title / Heading 2）
+    # 失敗してもテキスト挿入済みなので続行する（スタイルなしで Docs に残る）
     heading_map = _parse_heading_map(md)
     if heading_map:
-        apply_heading_styles(docs_service, doc_id, heading_map)
+        try:
+            apply_heading_styles(docs_service, doc_id, heading_map)
+        except Exception as _heading_err:
+            print(f"apply_heading_styles_failed={_heading_err!r} (non-fatal, continuing)")
 
     actual_text = fetch_google_doc_text(docs_service, doc_id)
     expected_chars = len(text)
