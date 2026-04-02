@@ -398,7 +398,16 @@ def move_file_to_folder(drive_service, file_id: str, folder_id: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Task 6-3: 発言録をGoogle Docsへ出力")
-    parser.add_argument("--job-id", required=True, help="対象ジョブID")
+    parser.add_argument("--job-id", required=False, default=None, help="対象ジョブID")
+    parser.add_argument(
+        "--auth-only",
+        action="store_true",
+        help=(
+            "認証だけ行い token.json を再生成して終了。"
+            "ブラウザが開くのでローカルPCで実行すること。"
+            "生成後に token.json の中身を Railway の GOOGLE_OAUTH_TOKEN_JSON へ貼り付ける。"
+        ),
+    )
     parser.add_argument(
         "--input-root",
         default="data/transcriptions",
@@ -488,8 +497,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.auth_only:
+        # ローカルでブラウザ認証を走らせて token.json を再生成する専用モード
+        from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: PLC0415
+
+        flow = InstalledAppFlow.from_client_secrets_file(args.credentials, DOCS_SCOPES)
+        creds = flow.run_local_server(port=0)
+        token_path = args.token
+        os.makedirs(os.path.dirname(token_path) or ".", exist_ok=True)
+        with open(token_path, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+        print(f"token.json を再生成しました: {os.path.abspath(token_path)}")
+        print("--- token.json の中身（Railway の GOOGLE_OAUTH_TOKEN_JSON へ貼り付けてください）---")
+        with open(token_path, "r", encoding="utf-8") as f:
+            print(f.read())
+        return
+
     if args.update_doc_id and not args.push:
         raise ValueError("--update-doc-id requires --push (replace body is only meaningful when uploading)")
+
+    if not args.job_id:
+        parser.error("--job-id は --auth-only なしの場合に必須です")
 
     in_path = resolve_input(args.input, args.job_id, args.input_root)
     if not os.path.isfile(in_path):
