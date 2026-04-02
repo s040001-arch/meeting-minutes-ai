@@ -1,23 +1,43 @@
+#!/usr/bin/env python3
+"""
+export_minutes_to_google_docs.py
+────────────────────────────────
+Google Docs へ議事録をエクスポートする。
+"""
+
 import argparse
 import json
 import os
 import re
-from typing import List, Tuple
+import sys
+import textwrap
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
 
-from googleapiclient.errors import HttpError
-
-
-# Google Docs作成 + Drive上で配置変更するためのスコープ
 DOCS_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
 ]
 
 _SA_JSON_PATH = "credentials_service_account.json"
+
+
+def _get_credentials():
+    """環境変数またはファイルからサービスアカウント認証情報を取得"""
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        info = json.loads(sa_json)
+        return service_account.Credentials.from_service_account_info(
+            info, scopes=DOCS_SCOPES
+        )
+    if os.path.exists(_SA_JSON_PATH):
+        return service_account.Credentials.from_service_account_file(
+            _SA_JSON_PATH, scopes=DOCS_SCOPES
+        )
+    raise FileNotFoundError(
+        "サービスアカウント認証情報が見つかりません"
+    )
 
 
 def md_to_google_docs_text(md: str) -> str:
@@ -116,9 +136,8 @@ def resolve_output_dir(job_id: str, output_root: str) -> str:
 
 def _build_credentials() -> service_account.Credentials:
     """サービスアカウントで Docs/Drive 認証情報を生成する。"""
-    return service_account.Credentials.from_service_account_file(
-        _SA_JSON_PATH, scopes=DOCS_SCOPES
-    )
+    return _get_credentials()
+
 
 
 def create_google_doc_and_insert_text(
