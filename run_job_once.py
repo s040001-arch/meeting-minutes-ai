@@ -70,9 +70,15 @@ def run_cmd(log_path: str, args: list[str], step: str) -> None:
         log_line(log_path, f"{step}: stdout\n{completed.stdout.rstrip()}")
     if completed.stderr.strip():
         log_line(log_path, f"{step}: stderr\n{completed.stderr.rstrip()}")
-        # Railway ログにも出力して遠隔デバッグを可能にする
         print(f"[run_cmd][{step}] stderr:\n{completed.stderr.rstrip()}", flush=True)
     if completed.returncode != 0:
+        print(
+            f"[run_cmd][{step}] FAILED rc={completed.returncode} "
+            f"stdout_len={len(completed.stdout)} stderr_len={len(completed.stderr)}\n"
+            f"STDOUT>>>{completed.stdout[:2000]}<<<\n"
+            f"STDERR>>>{completed.stderr[:2000]}<<<",
+            flush=True,
+        )
         raise RuntimeError(f"{step} failed: exit_code={completed.returncode}")
     log_line(log_path, f"{step}: success")
 
