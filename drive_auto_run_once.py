@@ -15,8 +15,8 @@ from googleapiclient.http import MediaIoBaseDownload
 # 定数
 # ──────────────────────────────────────────────
 SCOPES = ["https://www.googleapis.com/auth/drive"]
-SERVICE_ACCOUNT_FILE = "service_account.json"
-WATCH_FOLDER_ID = os.environ.get("WATCH_FOLDER_ID", "")
+SERVICE_ACCOUNT_FILE = "credentials_service_account.json"
+WATCH_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 STATE_FILE = "data/last_seen_file_ids.json"
 LOCK_FILE = "logs/drive_auto_run_once.lock"
 LOG_FILE = "logs/drive_auto_run_once.log"
@@ -32,6 +32,7 @@ SUPPORTED_EXTENSIONS = AUDIO_EXTENSIONS | TEXT_EXTENSIONS
 MIME_TYPE_FOLDER = "mimeType = 'application/vnd.google-apps.folder'"
 MIME_TYPE_GOOGLE_DOC = "application/vnd.google-apps.document"
 
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
