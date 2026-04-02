@@ -13,6 +13,30 @@ import re
 # - NEVER remove: はい / ま
 FILLERS_TO_REMOVE = ["えー", "あー", "うーん", "お疲れ様です", "なんか", "ええ"]
 DEFAULT_CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
+PARTICLE_PAIR_REPLACEMENTS = {
+    "をに": "に",
+    "がが": "が",
+    "をを": "を",
+    "にに": "に",
+    "でで": "で",
+    "とと": "と",
+    "のの": "の",
+}
+COMMON_NOISE_REPLACEMENTS = {
+    "ご質問をに": "ご質問に",
+    "をにお答え": "にお答え",
+    "何かえっと": "えっと",
+    "なんかえっと": "えっと",
+    "お願いしま す": "お願いします",
+}
+REPEATED_SHORT_PHRASES = [
+    "ありがとうございます",
+    "ありがとうございました",
+    "お願いします",
+    "すいません",
+    "すみません",
+    "はい",
+]
 
 
 def normalize_punctuation(text: str) -> str:
@@ -167,14 +191,39 @@ def apply_dictionary_replacements(text: str, replacements: dict[str, str]) -> st
     return s
 
 
+def cleanup_common_noise(text: str) -> str:
+    s = text
+    for wrong, correct in COMMON_NOISE_REPLACEMENTS.items():
+        s = s.replace(wrong, correct)
+    for wrong, correct in PARTICLE_PAIR_REPLACEMENTS.items():
+        s = s.replace(wrong, correct)
+    s = re.sub(r"[。．\.]{2,}", "。", s)
+    s = re.sub(r"[、,]{2,}", "、", s)
+    s = re.sub(r"([!?！？]){2,}", r"\1", s)
+    s = re.sub(r"([。!?！？]\s*)(はい|すいません|すみません)([。!?！？]\s*)\2([。!?！？])", r"\1\2\4", s)
+    return s
+
+
+def compress_repeated_short_phrases(text: str) -> str:
+    s = text
+    for phrase in REPEATED_SHORT_PHRASES:
+        esc = re.escape(phrase)
+        pattern = rf"(?:{esc}[、。!?！？\s]*){{2,}}"
+        s = re.sub(pattern, f"{phrase}。", s)
+    return s
+
+
 def apply_mechanical_corrections(
     text: str,
     correction_dict_path: str = DEFAULT_CORRECTION_DICT_PATH,
 ) -> str:
     replacements = load_correction_dict(correction_dict_path)
     s = apply_dictionary_replacements(text, replacements)
+    s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)
     s = remove_fillers(s)
+    s = compress_repeated_short_phrases(s)
+    s = cleanup_common_noise(s)
     # Newline normalization last (user-specified output format)
     s = normalize_spaces_and_newlines(s)
     return s
@@ -228,7 +277,11 @@ def main() -> None:
     print(f"after_length={len(corrected)}")
     print(f"correction_dict={args.correction_dict}")
     print(f"correction_dict_entries={len(replacements)}")
-    print("rules=normalize_spaces_and_newlines,normalize_punctuation,remove_fillers")
+    print(
+        "rules=apply_dictionary_replacements,cleanup_common_noise,"
+        "normalize_spaces_and_newlines,normalize_punctuation,remove_fillers,"
+        "compress_repeated_short_phrases"
+    )
 
 
 if __name__ == "__main__":
