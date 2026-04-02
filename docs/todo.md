@@ -1,4 +1,4 @@
-# 改善タスク一覧（2026-04-01 更新）
+# 改善タスク一覧（2026-04-02 更新）
 
 現行パイプラインに対する改善計画。
 実装の正はコード、要件の正は `spec.md`。本ファイルは優先度と進捗の目安。
@@ -81,13 +81,54 @@
 - [x] 実装: 回答反映後の再開ループで Google Docs タイトルを最終的にプレフィックスなしへ戻すよう更新
 - [ ] 検証: 再開完了後に `【議事録生成中】` などの状態が残らないことを確認
 
+### ナレッジ蓄積 / Google Sheets 連携
+
+- [x] 実装: `knowledge_sheet_store.py` を新設し、Google Sheets API（サービスアカウント認証）で知識メモを読み書き
+- [ ] 検証: 手動編集を含めて最新ナレッジを安定して読み書きできることを確認
+
+- [x] 実装: LINE 回答受信時に Claude を呼び出し、ナレッジの蓄積価値判定・既存ナレッジ統合・Sheets 全体更新を実装
+- [ ] 検証: 回答内容が意図どおり Google Sheets のナレッジメモへ統合されることを確認
+
+- [x] 実装: `seed_knowledge.py` で初期ナレッジ（Precena 関連60件）を Sheets に投入
+- [ ] 検証: Sheets 上のナレッジが AI 補正で意図どおり参照されることを確認
+
+- [x] 実装: Step⑧ の AI 補正プロンプトに Google Sheets のナレッジメモ全件を参考知識として注入
+- [ ] 検証: ナレッジ注入により補正精度が改善することを確認
+
+### job_context / per-job コンテキスト注入
+
+- [x] 実装: `job_context.py` を新設し、ジョブディレクトリの `context.json`（参加者・企業名・議題）を AI 補正プロンプトへ注入
+- [ ] 検証: context.json を置いたジョブで固有名詞補正精度が改善することを確認
+
+### railway_bootstrap / 認証情報管理
+
+- [x] 実装: `railway_bootstrap.py` に `GOOGLE_SERVICE_ACCOUNT_JSON` → `credentials_service_account.json` の復元処理を追加
+- [ ] 検証: Railway デプロイ後に Sheets API 認証が正常に通ることを確認
+
+### LINE webhook 非同期化
+
+- [x] 実装: `/callback` を即座に HTTP 200 返却する構成に変更（FastAPI BackgroundTasks）
+- [x] 実装: `handle_user_input()` を BackgroundTasks で非同期実行
+- [x] 実装: LINE 応答を reply API（replyToken）から push message API（LINE_USER_ID）に切り替え
+- [ ] 検証: Opus 呼び出しを含む処理が reply token 失効（30秒）の制約を受けないことを確認
+
+### AI補正パイプライン Opus 一括補正（Step⑧）
+
+- [x] 実装: マスキング→JSON検出→str.replace の多段処理を廃止
+- [x] 実装: 機械補正後テキストを Claude 4 Opus に一括で渡す単一呼び出しに置き換え
+- [x] 実装: `_build_opus_correction_system_prompt()` に補正ルール・context.json・ナレッジメモ・filename_hints を一括注入
+- [x] 実装: モデルを `claude-opus-4-20250514` に更新（`ANTHROPIC_CORRECTION_MODEL` 環境変数でオーバーライド可）
+- [ ] 検証: 実データで補正品質 85% 以上を確認
+
+### spec.md / ドキュメント整備（Opus 移行対応）
+
+- [x] 実装: `docs/spec.md` を Opus 移行・非同期化・パイプライン簡素化・品質目標 85% に合わせて更新
+- [ ] 検証: 実装との差分が残っていないか棚卸し確認
+
 ### ドキュメント・構成整理
 
 - [x] 実装: `review_risky_terms.py` をコードベースから削除
 - [ ] 検証: 参照残りや運用影響がないことを最終確認
-
-- [x] 実装: `docs/spec.md` を現行仕様に合わせて更新
-- [ ] 検証: 実装との差分が残っていないか棚卸し確認
 
 - [x] 実装: `README.md` と設計メモの残存言及を整理
 - [ ] 検証: 古い前提の記述が残っていないか確認
@@ -160,25 +201,12 @@
 - [x] 実装: Resume トリガーとの連携
 - [ ] 検証: 回答受信後の自動再開が安定することを確認
 
-- [ ] 実装: LINE回答受信時に Claude を呼び出し、ナレッジの蓄積価値判定・既存ナレッジ整理・Google Sheets 全体更新を行うモジュールを作成する
-- [ ] 検証: 回答内容が意図どおり Google Sheets のナレッジメモへ統合されることを確認
-
 #### 3-2. LINE 通知フォーマット改善
 
 - [x] 実装: 高インパクト質問 + Docs リンク付き送信フォーマット整備
 - [ ] 検証: ユーザーが答えやすい文面になっているか確認
 
-#### 3-3. ナレッジ蓄積
-
-- [ ] 実装: Google Sheets にナレッジ蓄積用スプレッドシートを作成し、Sheets API で読み書きできるようにする
-- [ ] 検証: 手動編集を含めて最新ナレッジを安定して読み書きできることを確認
-
 ### 中優先度（Phase 1-3 完了後）
-
-#### `ai_correct_text.py`
-
-- [ ] 実装: Step⑧（AI補正）のプロンプトに、Google Sheets から読み込んだ全ナレッジを参考知識として含める
-- [ ] 検証: ナレッジ注入により補正品質が改善し、プロンプト長も許容範囲に収まることを確認
 
 #### `run_question_cycle_once.py`
 
@@ -241,32 +269,15 @@
 
 ## Opus 移行計画
 
-Spec.md が固まったため、以下の順序で実装を進める。
-
-| Phase | 内容 | 理由 |
+| Phase | 内容 | 状態 |
 |-------|------|------|
-| Phase 1 | LINE webhook 非同期化 | Opus の前提条件。これがないとテスト自体できない |
-| Phase 2 | AI補正パイプライン簡素化（Opus 一発補正） | 音声処理側。既に非同期なので Phase 1 と独立 |
-| Phase 3 | 品質テスト | 同じ音声データで Sonnet vs Opus 比較 |
-
-### Phase 1: LINE webhook 非同期化
-
-- [x] 実装: `/callback` を即座に HTTP 200 を返す構成に変更
-- [x] 実装: `handle_user_input()` を FastAPI `BackgroundTasks` で非同期実行
-- [x] 実装: LINE への応答を reply API（replyToken）から push message API（LINE_USER_ID）に切り替え
-- [ ] 検証: Opus 呼び出しを含む処理が LINE reply token 失効（30 秒）の制約を受けないことを確認
-
-### Phase 2: AI補正パイプライン簡素化（Opus 一発補正）
-
-- [x] 実装: `ai_correct_text.py` のマスキング→検出→str.replace 多段処理を廃止
-- [x] 実装: 機械補正後のテキストを Opus に一括で渡す単一 Claude 呼び出しに置き換え
-- [x] 実装: プロンプトにコンテキスト情報（参加者・企業名・ナレッジメモ・補正ルール）を一括注入
-- [x] 実装: `run_job_once.py` / `run_resume_from_step7.py` の PHASE_LABELS を Opus 一括方式に整理
-- [ ] 検証: 実データで補正品質 85% 以上を確認
+| Phase 1 | LINE webhook 非同期化 | 実装完了・検証待ち |
+| Phase 2 | AI補正パイプライン簡素化（Opus 一発補正） | 実装完了・検証待ち |
+| Phase 3 | 品質テスト | 未実施 |
 
 ### Phase 3: 品質テスト
 
-- [ ] 検証: 同一音声データで Sonnet（旧）vs Opus（新）の補正結果を比較
+- [ ] 検証: 同一音声データで補正結果を評価し、品質 85% 以上を確認
 - [ ] 検証: 処理時間・コスト・品質のトレードオフを記録
 
 ---
@@ -283,3 +294,4 @@ Spec.md が固まったため、以下の順序で実装を進める。
 - **2026-04-01:** 中間生成物の保存ルール整理タスクを追加。Docs dry-run 出力と再生成可能ファイルの削除方針を今後詰める。
 - **2026-04-01:** `todo.md` を「実装」と「検証」を分けて管理する形式へ再構成。
 - **2026-04-01:** LINE 受信を「3分類」から「回答情報 / 修正依頼の情報抽出」前提へ整理。可視ログ、質問文改善、機械補正強化、再開時の Docs タイトル戻しを反映。
+- **2026-04-02:** Opus 移行 Phase 1（LINE webhook 非同期化・push API 切替）および Phase 2（Step⑧ Opus 一括補正・マスキング多段処理廃止）の実装完了を反映。`knowledge_sheet_store.py`・`job_context.py`・`seed_knowledge.py` の追加、`railway_bootstrap.py` の service account 対応、`spec.md` の Opus 移行・非同期化仕様への更新を反映。「未実装」から完了済み項目を「実装済み・検証待ち」に移動。
