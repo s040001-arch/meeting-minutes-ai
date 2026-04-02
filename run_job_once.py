@@ -12,6 +12,7 @@ from ai_correct_text import (
     get_last_correct_full_text_meta,
     resolve_openai_api_key,
 )
+from detect_unknown_points import detect_unknown_points
 from filename_hints import extract_filename_hints, format_hints_for_prompt
 from job_context import load_job_context
 from progress_tracker import (
@@ -489,6 +490,40 @@ def merge_unknown_points(
     return merged
 
 
+def restore_known_statuses(
+    new_items: list[dict],
+    old_items: list[dict],
+) -> list[dict]:
+    """新しい検出結果に対して、旧リストの回答済み/送信済みステータスを復元する。
+    
+    再補正サイクルでunknown_points.jsonが上書きされても、
+    過去のQ&A回答やaskedステータスを失わないようにする。
+    """
+    old_by_text: dict[str, dict] = {}
+    for item in old_items:
+        status = str(item.get("status", "")).strip().lower()
+        if status in {"answered", "done", "closed", "resolved", "asked"}:
+            text_key = str(item.get("text", "")).strip()
+            if text_key:
+                old_by_text[text_key] = item
+
+    result: list[dict] = []
+    for item in new_items:
+        text_key = str(item.get("text", "")).strip()
+        old = old_by_text.get(text_key)
+        if old:
+            item = dict(item)
+            item["status"] = old.get("status")
+            if old.get("answer"):
+                item["answer"] = old["answer"]
+            if old.get("answered_by_question_id"):
+                item["answered_by_question_id"] = old["answered_by_question_id"]
+            if old.get("answered_at"):
+                item["answered_at"] = old["answered_at"]
+        result.append(item)
+    return result
+
+
 def main() -> None:
     load_dotenv_local()
     parser = argparse.ArgumentParser(
@@ -908,22 +943,45 @@ def main() -> None:
         stop_reason = correction_meta.get("stop_reason")
         fallback_reason = correction_meta.get("fallback_reason")
         stop_label = fallback_reason or stop_reason or "unknown"
-        ai_unknown_points_raw = correction_meta.get("ai_unknown_points")
-        ai_unknown_points = (
-            [item for item in ai_unknown_points_raw if isinstance(item, dict)]
-            if isinstance(ai_unknown_points_raw, list)
-            else []
-        )
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
             message=f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
         )
+
+        # Step 4.35: AI不明点検出（Claude Opus）
+        # 既存の回答済み不明点を読み込んで重複質問防止に利用する
+        existing_unknowns = _load_unknown_points_file(unknowns_path)
+        answered_items = [
+            item for item in existing_unknowns
+            if str(item.get("status", "")).strip().lower() in {"answered", "done", "closed", "resolved"}
+        ]
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_4_35_ai_unknowns",
+            status="running",
+            detail={},
+        )
+        ai_unknown_points = detect_unknown_points(
+            ai_text,
+            filename_hints=hints,
+            job_context=job_context if job_context else None,
+            answered_items=answered_items if answered_items else None,
+            visible_log_path=visible_log_path,
+        )
         _save_unknown_points_file(unknowns_path, ai_unknown_points)
         log_line(
             log_path,
             f"step_4_35_ai_unknowns: saved path={unknowns_path} count={len(ai_unknown_points)}",
+        )
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_4_35_ai_unknowns",
+            status="success",
+            detail={"ai_unknowns": len(ai_unknown_points)},
         )
         record_visible_progress(
             log_path=log_path,

@@ -81,19 +81,31 @@ def _is_answered_unknown(item: dict) -> bool:
     return False
 
 
+def _is_asked_unknown(item: dict) -> bool:
+    """質問を送信済み（回答待ち）の不明点かどうかを判定する。"""
+    status = str(item.get("status", "")).strip().lower()
+    return status == "asked"
+
+
 def _filter_pending_unknown_points(unknown_points: list[dict]) -> tuple[list[dict], dict]:
     pending: list[dict] = []
     answered_count = 0
+    asked_count = 0
     for item in unknown_points:
         if not isinstance(item, dict):
             continue
         if _is_answered_unknown(item):
             answered_count += 1
             continue
+        if _is_asked_unknown(item):
+            # 送信済みで回答待ちの質問は再送しない
+            asked_count += 1
+            continue
         pending.append(item)
     meta = {
         "unknown_points_count_before_filter": len(unknown_points),
         "answered_unknown_points_count": answered_count,
+        "asked_unknown_points_count": asked_count,
         "pending_unknown_points_count": len(pending),
     }
     return pending, meta
@@ -272,6 +284,50 @@ def build_user_friendly_question(selected: dict) -> str:
         "suspicious_word": "語句の誤変換がありそうです。正しい表現を教えてください。",
     }.get(target_type, "この部分の正しい表現を教えてください。")
     return ask_line
+
+
+def _mark_unknown_point_asked(
+    unknowns_path: str,
+    selected_unknown: dict | None,
+    question_id: str,
+) -> int:
+    """選定された不明点に status='asked' をマークする（同一質問の重複送信防止）。"""
+    if not selected_unknown or not os.path.isfile(unknowns_path):
+        return 0
+    target_text = str(selected_unknown.get("text") or "").strip()
+    target_type = str(selected_unknown.get("type") or "").strip()
+    if not target_text:
+        return 0
+
+    try:
+        with open(unknowns_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        unknown_points = [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+    except Exception:
+        return 0
+
+    updated = 0
+    for item in unknown_points:
+        status = str(item.get("status", "")).strip().lower()
+        if status in {"answered", "done", "closed", "resolved", "asked"}:
+            continue
+        item_text = str(item.get("text") or "").strip()
+        item_type = str(item.get("type") or "").strip()
+        if item_text != target_text:
+            continue
+        if target_type and item_type and item_type != target_type:
+            continue
+        item["status"] = "asked"
+        item["asked_by_question_id"] = question_id
+        updated += 1
+
+    if updated > 0:
+        try:
+            with open(unknowns_path, "w", encoding="utf-8") as f:
+                json.dump(unknown_points, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return updated
 
 
 def _normalize_question_text(text: str) -> str:
@@ -490,6 +546,12 @@ def main() -> None:
         )
         if result_payload.get("question_status") == "generated":
             line_push = "sent_question"
+            # 送信済みとしてマーク（同一質問の重複送信防止）
+            _mark_unknown_point_asked(
+                unknowns_path=unknowns_path,
+                selected_unknown=result_payload.get("selected_unknown"),
+                question_id=str(result_payload.get("question_id") or ""),
+            )
         else:
             line_push = "sent_completion"
 

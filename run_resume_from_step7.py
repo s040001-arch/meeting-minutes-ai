@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from ai_correct_text import correct_full_text, get_last_correct_full_text_meta
+from detect_unknown_points import detect_unknown_points
 from filename_hints import extract_filename_hints
 from job_context import load_job_context
 from progress_tracker import finalize_job_progress, update_job_progress
@@ -17,6 +18,7 @@ from run_job_once import (
     _save_unknown_points_file,
     merge_unknown_points,
     record_visible_progress,
+    restore_known_statuses,
     update_doc_title_from_hub,
 )
 
@@ -191,25 +193,34 @@ def main() -> None:
         shutil.copyfile(ai_path, after_qa_path)
         correction_meta = get_last_correct_full_text_meta()
         stop_reason = correction_meta.get("fallback_reason") or correction_meta.get("stop_reason") or "unknown"
-        ai_unknown_points_raw = correction_meta.get("ai_unknown_points")
-        ai_unknown_points = (
-            [item for item in ai_unknown_points_raw if isinstance(item, dict)]
-            if isinstance(ai_unknown_points_raw, list)
-            else []
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=f"Step 8: AI補正完了 output={len(ai_text)} stop_reason={stop_reason}",
         )
-        _save_unknown_points_file(unknowns_path, ai_unknown_points)
+
+        # Step 9: AI不明点検出（Claude Opus）
+        # 再補正サイクルでも過去の回答済み不明点のステータスを保全するため、
+        # 検出前に既存ファイルを読み込む
+        old_unknown_points = _load_unknown_points_file(unknowns_path)
+        answered_items = [
+            item for item in old_unknown_points
+            if str(item.get("status", "")).strip().lower() in {"answered", "done", "closed", "resolved"}
+        ]
+        ai_unknown_points = detect_unknown_points(
+            ai_text,
+            filename_hints=hints,
+            job_context=job_context if job_context else None,
+            answered_items=answered_items if answered_items else None,
+            visible_log_path=visible_log_path,
+        )
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
             phase=current_phase,
             status="success",
             detail={"output_chars": len(ai_text), "ai_unknowns": len(ai_unknown_points)},
-        )
-        record_visible_progress(
-            log_path=log_path,
-            visible_log_path=visible_log_path,
-            job_id=args.job_id,
-            message=f"Step 8: AI補正完了 output={len(ai_text)} stop_reason={stop_reason}",
         )
         record_visible_progress(
             log_path=log_path,
@@ -251,6 +262,9 @@ def main() -> None:
             ai_unknowns=ai_unknown_points,
             regex_unknowns=regex_unknown_points,
         )
+        # 再補正サイクルでも過去のQ&A回答・askedステータスを失わないよう復元する
+        if old_unknown_points:
+            merged_unknown_points = restore_known_statuses(merged_unknown_points, old_unknown_points)
         _save_unknown_points_file(unknowns_path, merged_unknown_points)
         update_job_progress(
             input_root=args.input_root,
