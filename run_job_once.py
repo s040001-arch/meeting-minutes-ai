@@ -152,8 +152,9 @@ def relocate_input_into_stem_subfolder(input_path: str) -> str:
         return str(p)
     dest_dir.mkdir(parents=True, exist_ok=True)
     if dest_file.exists():
-        p.unlink()
-        return str(dest_file)
+        raise RuntimeError(
+            f"移動先に既にファイルがあります（上書きしません）: {dest_file}"
+        )
     shutil.move(str(p), str(dest_file))
     return str(dest_file)
 
