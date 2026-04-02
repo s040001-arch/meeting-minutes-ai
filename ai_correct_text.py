@@ -12,7 +12,7 @@ import urllib.request
 from typing import Callable, Optional
 
 from filename_hints import format_hints_for_prompt
-from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
+from knowledge_sheet_store import format_knowledge_for_detection_prompt, format_knowledge_for_prompt, load_knowledge_memos
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,10 @@ _MASK_PATTERN_SPECS: list[tuple[str, re.Pattern[str], int]] = [
     (
         "COMPANY",
         re.compile(
-            r"(?:株式会社[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}|[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}(?:社|グループ|ホールディングス))"
+            # Require 2+ chars before 社/グループ/ホールディングス to avoid masking
+            # single-kanji pronouns like 古社 / 同社 / 当社 / 御社 which would
+            # prevent Claude from detecting misrecognitions such as 古社→子会社.
+            r"(?:株式会社[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{1,24}|[\u4E00-\u9FFF\u3040-\u30FFA-Za-z0-9・&＆\-]{2,24}(?:社|グループ|ホールディングス))"
         ),
         40,
     ),
@@ -345,7 +348,7 @@ def _build_detection_system_prompt(
         "location は該当箇所の前後10文字程度の短い抜粋、original は元の問題箇所そのもの、"
         "suggestion は修正候補、issue は何が問題か、guess_level は整数です。"
         + format_hints_for_prompt(filename_hints or [])
-        + format_knowledge_for_prompt(knowledge_memos or [])
+        + format_knowledge_for_detection_prompt(knowledge_memos or [])
     )
 
 
@@ -554,6 +557,9 @@ def _apply_low_guess_replacements(
     updated = masked_text
     auto_applied = 0
     skipped = 0
+    # Track already-applied pairs to avoid double-counting when Claude returns
+    # the same (original, suggestion) pair multiple times for different occurrences.
+    applied_pairs: set[tuple[str, str]] = set()
     for item in detections:
         original = str(item.get("original", ""))
         suggestion = str(item.get("suggestion", ""))
@@ -574,12 +580,20 @@ def _apply_low_guess_replacements(
             )
             skipped += 1
             continue
-        pos = updated.find(original)
-        if pos < 0:
+        pair = (original, suggestion)
+        if pair in applied_pairs:
+            # Already replaced all occurrences in a prior iteration; skip duplicate detection.
             skipped += 1
             continue
-        updated = updated[:pos] + suggestion + updated[pos + len(original):]
-        auto_applied += 1
+        count = updated.count(original)
+        if count == 0:
+            skipped += 1
+            continue
+        # Replace ALL occurrences at once — if we are confident (guess_level < 40)
+        # the correction is correct, every occurrence should be fixed, not just the first.
+        updated = updated.replace(original, suggestion)
+        auto_applied += count
+        applied_pairs.add(pair)
     return updated, auto_applied, skipped
 
 

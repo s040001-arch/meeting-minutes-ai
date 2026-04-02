@@ -186,7 +186,12 @@ def load_correction_dict(path: str) -> dict[str, str]:
 
 def apply_dictionary_replacements(text: str, replacements: dict[str, str]) -> str:
     s = text
-    for wrong, correct in replacements.items():
+    # Apply longest keys first so shorter keys cannot accidentally match inside
+    # a longer key that has already been (or will be) corrected.
+    # Example: if both "HR"→"A" and "THR"→"B" existed, applying "HR" first would
+    # turn "THR" into "TA", which then wouldn't match "THR"→"B".
+    for wrong in sorted(replacements, key=len, reverse=True):
+        correct = replacements[wrong]
         s = s.replace(wrong, correct)
     return s
 

@@ -227,6 +227,7 @@ def merge_answer_into_knowledge_store(
 
 
 def format_knowledge_for_prompt(memos: list[str]) -> str:
+    """補正プロンプト（全文整形）用のナレッジ注入。"""
     normalized = _normalize_knowledge_memos(memos)
     if not normalized:
         return ""
@@ -234,5 +235,23 @@ def format_knowledge_for_prompt(memos: list[str]) -> str:
     return (
         "\n\n【参考ナレッジ】以下は過去の確認回答から蓄積された補足知識です。\n"
         "文脈理解の参考にしてよいですが、入力本文にない事実を創作して補わないでください。\n"
+        f"{lines}"
+    )
+
+
+def format_knowledge_for_detection_prompt(memos: list[str]) -> str:
+    """検出プロンプト専用のナレッジ注入。
+    ナレッジに記載された誤認識パターンを積極的に活用させるため、
+    補正プロンプト用とは異なる指示文を使用する。
+    """
+    normalized = _normalize_knowledge_memos(memos)
+    if not normalized:
+        return ""
+    lines = "\n".join(f"- {item}" for item in normalized)
+    return (
+        "\n\n【補正用ナレッジ】以下は、このドキュメントに関連する用語・誤認識パターンの知識です。\n"
+        "ナレッジに「〜と誤認識されることがある」と記載されている表現が入力テキストに出現した場合は、\n"
+        "積極的に検出対象として扱い、guess_level を 0〜15 に設定してください。\n"
+        "ナレッジに正しい表記が明記されている場合は、それを suggestion として使用してください。\n"
         f"{lines}"
     )
