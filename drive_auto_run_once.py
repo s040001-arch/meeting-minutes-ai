@@ -97,6 +97,48 @@ def select_one_new_file(files: List[Dict[str, Any]], known_ids: set[str]) -> Dic
     return candidates[0]
 
 
+def find_incomplete_job(service, root_folder_id: str) -> Dict[str, Any] | None:
+    """サブフォルダを走査し、Google Doc未作成の未完了ジョブを1件返す（古い順）。"""
+    q = (f"'{root_folder_id}' in parents and "
+         "mimeType='application/vnd.google-apps.folder' and trashed=false")
+    folders = service.files().list(
+        q=q, spaces="drive",
+        fields="files(id,name,createdTime)", pageSize=200
+    ).execute().get("files", [])
+
+    folders.sort(key=lambda x: x.get("createdTime", ""))
+
+    for folder in folders:
+        fid = folder["id"]
+        children = service.files().list(
+            q=f"'{fid}' in parents and trashed=false",
+            spaces="drive",
+            fields="files(id,name,mimeType)", pageSize=50
+        ).execute().get("files", [])
+
+        has_source = False
+        has_doc = False
+        source_file = None
+
+        for c in children:
+            mime = c.get("mimeType", "")
+            ext = os.path.splitext(c.get("name", ""))[1].lower()
+            if mime == "application/vnd.google-apps.document":
+                has_doc = True
+            elif ext in SUPPORTED_EXTENSIONS or mime == "text/plain" or mime.startswith("audio/"):
+                has_source = True
+                source_file = c
+
+        if has_source and not has_doc:
+            return {
+                "file": source_file,
+                "subfolder_id": fid,
+                "subfolder_name": folder["name"],
+            }
+
+    return None
+
+
 def download_drive_file(service, file_id: str, output_path: str) -> None:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     request = service.files().get_media(fileId=file_id)
@@ -287,27 +329,39 @@ def main() -> None:
             raise RuntimeError(f"Drive API error: {e}") from e
 
         selected = select_one_new_file(files, known_ids)
-        if not selected:
-            log_line(log_path, "no_new_files")
-            print("status=no_new_files")
-            return
 
-        file_id = str(selected.get("id"))
-        file_name = str(selected.get("name") or f"{file_id}.bin")
-        mime_type = str(selected.get("mimeType") or "")
-        file_name = ensure_extension_by_mime(file_name, mime_type)
-        drive_subfolder_name = os.path.splitext(file_name)[0]
-        target_folder_id = ensure_drive_subfolder(
-            service=service,
-            parent_folder_id=args.folder_id,
-            subfolder_name=drive_subfolder_name,
-        )
-        # Drive 上で先に stem 名フォルダへ移動してから取得・処理する（監視直下のみ新規検知）。
-        move_drive_file_to_folder(service, file_id=file_id, folder_id=target_folder_id)
-        log_line(
-            log_path,
-            f"source_file_moved_to_stem_folder file_id={file_id} target_folder_id={target_folder_id}",
-        )
+        if selected:
+            # === 通常フロー: ルートに新規ファイルあり ===
+            file_id = str(selected.get("id"))
+            file_name = str(selected.get("name") or f"{file_id}.bin")
+            mime_type = str(selected.get("mimeType") or "")
+            file_name = ensure_extension_by_mime(file_name, mime_type)
+            drive_subfolder_name = os.path.splitext(file_name)[0]
+            target_folder_id = ensure_drive_subfolder(
+                service=service,
+                parent_folder_id=args.folder_id,
+                subfolder_name=drive_subfolder_name,
+            )
+            move_drive_file_to_folder(service, file_id=file_id, folder_id=target_folder_id)
+            log_line(
+                log_path,
+                f"source_file_moved_to_stem_folder file_id={file_id} target_folder_id={target_folder_id}",
+            )
+        else:
+            # === リカバリフロー: サブフォルダの未完了ジョブを探す ===
+            incomplete = find_incomplete_job(service, args.folder_id)
+            if incomplete:
+                log_line(log_path, f"found_incomplete_job subfolder={incomplete['subfolder_name']}")
+                file_id = str(incomplete["file"]["id"])
+                file_name = str(incomplete["file"]["name"])
+                mime_type = str(incomplete["file"].get("mimeType", ""))
+                file_name = ensure_extension_by_mime(file_name, mime_type)
+                drive_subfolder_name = incomplete["subfolder_name"]
+                target_folder_id = incomplete["subfolder_id"]
+            else:
+                log_line(log_path, "no_new_files")
+                print("status=no_new_files")
+                return
 
         safe_name = re.sub(r"[\\/:*?\"<>|]", "_", file_name)
         downloaded_path = os.path.join(args.download_dir, safe_name)
