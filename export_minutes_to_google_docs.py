@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import textwrap
+from typing import List, Tuple
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
