@@ -16,10 +16,7 @@ KNOWLEDGE_UPDATER_MODEL = "claude-sonnet-4-20250514"
 
 
 def _service_account_json_path() -> str:
-    return os.getenv(
-        GOOGLE_SERVICE_ACCOUNT_JSON_ENV,
-        DEFAULT_SERVICE_ACCOUNT_JSON_PATH,
-    ).strip()
+    return DEFAULT_SERVICE_ACCOUNT_JSON_PATH
 
 
 def _knowledge_sheet_id() -> str:
