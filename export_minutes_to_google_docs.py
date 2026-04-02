@@ -137,19 +137,13 @@ def load_or_create_google_docs_credentials(
             # scope mismatch などで refresh ができない場合は作り直す
             creds = None
 
-    # refresh できない（または token が無い）場合は OAuth フローを実行
-    flow = InstalledAppFlow.from_client_secrets_file(
-        credentials_json_path,
-        DOCS_SCOPES,
+    # token がない or refresh 不能の場合、Railway ではブラウザ認証が使えないためエラーで終了する。
+    # ローカルで token.json を再生成し GOOGLE_OAUTH_TOKEN_JSON 環境変数を更新すること。
+    raise RuntimeError(
+        "token.json のリフレッシュに失敗しました。"
+        " Railway ではブラウザ認証ができないため、ローカルで token.json を再生成し、"
+        " GOOGLE_OAUTH_TOKEN_JSON 環境変数を更新してください。"
     )
-    # 初回 or 再認可はローカルサーバでブラウザ認可が必要になる可能性あり
-    creds = flow.run_local_server(port=0)
-
-    os.makedirs(os.path.dirname(token_json_path) or ".", exist_ok=True)
-    with open(token_json_path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
-
-    return creds
 
 
 def create_google_doc_and_insert_text(

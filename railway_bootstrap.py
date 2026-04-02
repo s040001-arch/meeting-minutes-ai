@@ -27,8 +27,7 @@ def write_google_oauth_files_from_env() -> list[str]:
         raw = os.getenv(env_name, "").strip()
         if not raw:
             return
-        if os.path.isfile(path):
-            return
+        # 破損した token.json が残るケースを防ぐため、常に環境変数の値で上書きする
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(raw)
