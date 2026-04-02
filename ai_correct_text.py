@@ -735,12 +735,27 @@ def get_last_correct_full_text_meta() -> dict[str, object]:
     return dict(_LAST_CORRECT_FULL_TEXT_META)
 
 
+def _append_visible_log(visible_log_path: str | None, message: str) -> None:
+    if not visible_log_path:
+        return
+    from datetime import datetime
+    ts = datetime.now().isoformat(timespec="seconds")
+    line = f"[{ts}] {message}\n"
+    try:
+        os.makedirs(os.path.dirname(visible_log_path) or ".", exist_ok=True)
+        with open(visible_log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
 def correct_full_text(
     text: str,
     model: str = "claude-sonnet-4-20250514",
     timeout_sec: int = 900,
     on_phase: Optional[Callable[[str], None]] = None,
     filename_hints: list[str] | None = None,
+    visible_log_path: str | None = None,
 ) -> str:
     """
     全文を一括でAI補正する。チャンク分割なし。
@@ -773,9 +788,23 @@ def correct_full_text(
         try:
             knowledge_memos = load_knowledge_memos()
             print(f"correct_full_text: knowledge_memos={len(knowledge_memos)}")
+            if knowledge_memos:
+                _append_visible_log(
+                    visible_log_path,
+                    f"Step 8: ナレッジ読み込み: {len(knowledge_memos)}件をプロンプトに注入",
+                )
+            else:
+                _append_visible_log(
+                    visible_log_path,
+                    "Step 8: ナレッジ読み込み: 0件（スキップ）",
+                )
         except Exception as e:
             knowledge_memos = []
             print(f"correct_full_text: knowledge_memos_load_failed={e!r}")
+            _append_visible_log(
+                visible_log_path,
+                f"Step 8: ナレッジ読み込み: エラー → {e!r}",
+            )
         if on_phase:
             on_phase("masking")
         masked_text, placeholder_mapping, expected_placeholders = _mask_protected_tokens(text)

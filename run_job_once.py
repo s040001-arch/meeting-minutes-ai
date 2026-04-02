@@ -884,6 +884,7 @@ def main() -> None:
             text=mechanical_text,
             on_phase=_on_ai_phase,
             filename_hints=hints,
+            visible_log_path=visible_log_path,
         )
 
         with open(ai_path, "w", encoding="utf-8") as f:

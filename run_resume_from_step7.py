@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +36,25 @@ def _line_push_env_ready() -> bool:
     user_id = os.getenv("LINE_USER_ID", "").strip()
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     return bool(user_id and token)
+
+
+def _strip_status_prefix(title: str) -> str:
+    s = str(title or "").strip()
+    return re.sub(r"^【[^】]+】", "", s).strip()
+
+
+def _load_final_doc_title(hub_meta_path: str, fallback: str) -> str:
+    if not os.path.isfile(hub_meta_path):
+        return fallback
+    try:
+        with open(hub_meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return fallback
+        title = _strip_status_prefix(str(data.get("title") or "").strip())
+        return title or fallback
+    except (OSError, json.JSONDecodeError):
+        return fallback
 
 
 def main() -> None:
@@ -74,6 +95,7 @@ def main() -> None:
     repo_root = os.path.dirname(os.path.abspath(__file__))
     py = sys.executable
     stem = Path(args.job_id).name
+    final_doc_title = _load_final_doc_title(hub_meta_path, fallback=stem)
 
     current_phase = "step_7_mechanical_correct"
     current_step_label = "Step 7: 機械補正"
@@ -163,6 +185,7 @@ def main() -> None:
             text=mechanical_text,
             on_phase=_on_ai_phase,
             filename_hints=hints,
+            visible_log_path=visible_log_path,
         )
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)
@@ -410,6 +433,8 @@ def main() -> None:
             args.input_root,
             "--answers-json",
             args.answers_json,
+            "--title",
+            final_doc_title,
         ]
         if args.push:
             sync_cmd.append("--push")

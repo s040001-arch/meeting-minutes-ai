@@ -859,6 +859,7 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
             answer_text=effective_answer_text,
             question_id=question_id,
         )
+        _record_job_visible_log(job_id_for_save, "Step 16: ナレッジ蓄積: 開始")
         try:
             knowledge_result = merge_answer_into_knowledge_store(
                 question_text=qtext_for_save,
@@ -871,6 +872,10 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 "reason": f"knowledge_update_failed:{e!r}",
             }
             print(f"knowledge_store_update_failed={e!r}")
+            _record_job_visible_log(
+                job_id_for_save,
+                f"Step 16: ナレッジ蓄積: エラー → {e!r}",
+            )
         print(
             "unknown_points_answered_update="
             f"job_id={job_id_for_save!r} updated_count={answered_updates}"
@@ -881,14 +886,25 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 job_id_for_save,
                 f"Step 17: 回答受信済みとして記録 answered_updates={answered_updates}",
             )
-            if knowledge_result.get("enabled"):
+            if not knowledge_result.get("enabled"):
                 _record_job_visible_log(
                     job_id_for_save,
-                    "Step 16: ナレッジ蓄積更新 "
-                    f"updated={bool(knowledge_result.get('updated'))} "
-                    f"before={knowledge_result.get('knowledge_count_before', 0)} "
-                    f"after={knowledge_result.get('knowledge_count_after', 0)} "
-                    f"reason={str(knowledge_result.get('reason') or '-').strip() or '-'}",
+                    "Step 16: ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_ID未設定）",
+                )
+            elif knowledge_result.get("updated"):
+                before = knowledge_result.get("knowledge_count_before", 0)
+                after = knowledge_result.get("knowledge_count_after", 0)
+                reason = str(knowledge_result.get("reason") or "").strip() or "-"
+                _record_job_visible_log(
+                    job_id_for_save,
+                    f"Step 16: ナレッジ蓄積: updated（{before}件→{after}件）/ 理由: {reason}",
+                )
+            else:
+                before = knowledge_result.get("knowledge_count_before", 0)
+                reason = str(knowledge_result.get("reason") or "").strip() or "-"
+                _record_job_visible_log(
+                    job_id_for_save,
+                    f"Step 16: ナレッジ蓄積: unchanged（{before}件）/ 理由: {reason}",
                 )
 
     correction_save_ok = False
