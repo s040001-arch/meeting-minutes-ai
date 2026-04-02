@@ -193,6 +193,99 @@ def _merge_knowledge_memos_with_claude(
     }
 
 
+def _merge_knowledge_memos_with_all_answers(
+    *,
+    existing_memos: list[str],
+    answers: list[dict],
+    model: str = KNOWLEDGE_UPDATER_MODEL,
+) -> dict:
+    """複数の Q&A ペアをまとめて1回の Claude 呼び出しで整理する（Step⑰用）。"""
+    client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
+    system_prompt = (
+        "あなたは議事録AIの再利用ナレッジ管理アシスタントです。"
+        "入力として、既存のナレッジメモ一覧と、今回のジョブで蓄積された複数の質問・回答ペアが与えられます。"
+        "目的は、各回答にジョブ横断で再利用価値があるかを判断し、"
+        "既存ナレッジと重複・類似があれば統合整理したうえで、更新後のナレッジ一覧全体を返すことです。"
+        "correction_dict のような置換辞書は作らず、1行1件の自由記述メモだけを管理してください。"
+        "会議固有の一時的な yes/no 回答や、その場限りの数字確認のように再利用価値が低いものは追加しないでください。"
+        "一方で、用語説明、役割定義、社内固有の呼称、サービス説明、関係性の説明などは蓄積対象にしてください。"
+        "既存メモの意味が変わらない範囲で、より自然で再利用しやすい表現に統合して構いません。"
+        "出力は JSON オブジェクトのみ。"
+        '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
+    )
+    qa_pairs = [
+        {
+            "question": str(a.get("question_text") or "").strip(),
+            "answer": str(a.get("answer_text") or "").strip(),
+        }
+        for a in answers
+        if str(a.get("question_text") or "").strip() and str(a.get("answer_text") or "").strip()
+    ]
+    payload = {
+        "existing_knowledge": existing_memos,
+        "qa_pairs": qa_pairs,
+    }
+    resp = client.messages.create(
+        model=model,
+        max_tokens=3000,
+        temperature=0,
+        system=system_prompt,
+        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+    )
+    parsed = _extract_json_object(_extract_text_from_anthropic(resp))
+    updated = _normalize_knowledge_memos(parsed.get("updated_knowledge"))
+    if not updated and existing_memos:
+        updated = list(existing_memos)
+    return {
+        "updated_knowledge": updated,
+        "action": str(parsed.get("action") or "").strip() or "unchanged",
+        "reason": str(parsed.get("reason") or "").strip(),
+    }
+
+
+def merge_all_answers_into_knowledge_store(answers: list[dict]) -> dict:
+    """複数の Q&A ペアをまとめて Knowledge Sheet に反映する（Step⑰用）。
+
+    answers は [{"question_text": "...", "answer_text": "..."}] 形式のリスト。
+    失敗時は例外を raise する（呼び出し側でキャッチして対処すること）。
+    """
+    if not answers:
+        return {
+            "enabled": True,
+            "updated": False,
+            "skipped": True,
+            "reason": "no_answers",
+            "knowledge_count_before": 0,
+            "knowledge_count_after": 0,
+        }
+    if not knowledge_store_enabled():
+        return {
+            "enabled": False,
+            "updated": False,
+            "reason": "knowledge_sheet_id_missing",
+            "knowledge_count_before": 0,
+            "knowledge_count_after": 0,
+        }
+    existing = load_knowledge_memos()
+    merged = _merge_knowledge_memos_with_all_answers(
+        existing_memos=existing,
+        answers=answers,
+    )
+    updated = _normalize_knowledge_memos(merged.get("updated_knowledge"))
+    changed = updated != existing
+    if changed:
+        save_knowledge_memos(updated)
+    return {
+        "enabled": True,
+        "updated": changed,
+        "reason": str(merged.get("reason") or "").strip(),
+        "action": str(merged.get("action") or "").strip() or ("updated" if changed else "unchanged"),
+        "knowledge_count_before": len(existing),
+        "knowledge_count_after": len(updated),
+        "answers_count": len(answers),
+    }
+
+
 def merge_answer_into_knowledge_store(
     *,
     question_text: str,

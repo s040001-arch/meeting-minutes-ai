@@ -12,6 +12,7 @@ from ai_correct_text import (
     get_last_correct_full_text_meta,
     resolve_openai_api_key,
 )
+from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
 from filename_hints import extract_filename_hints, format_hints_for_prompt
 from job_context import load_job_context
@@ -1266,6 +1267,23 @@ def main() -> None:
                 job_id=args.job_id,
                 message="Step 6.3: Googleドキュメント出力完了",
             )
+
+        # Step⑰: ナレッジ蓄積（議事録生成完了後）
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17_knowledge_accumulation",
+            status="running",
+            detail={},
+        )
+        accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17_knowledge_accumulation",
+            status="success",
+            detail={},
+        )
 
         log_line(log_path, "pipeline_status=success")
         current_phase = "done"

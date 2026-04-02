@@ -71,6 +71,50 @@ def _job_visible_log_path(job_id: str | None) -> str | None:
     return os.path.join("data", "transcriptions", jid, "processing_visible_log.txt")
 
 
+ANSWERS_JSON_FILENAME = "answers.json"
+
+
+def _answers_json_path(job_id: str | None) -> str | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    return os.path.join("data", "transcriptions", jid, ANSWERS_JSON_FILENAME)
+
+
+def _append_to_answers_json(
+    job_id: str | None,
+    *,
+    question_id: str,
+    question_text: str,
+    answer_text: str,
+) -> None:
+    """回答内容を answers.json に追記する。Step⑰ ナレッジ蓄積の入力として使用する。"""
+    path = _answers_json_path(job_id)
+    if not path:
+        return
+    existing: list[dict] = []
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                existing = [x for x in data if isinstance(x, dict)]
+        except Exception:
+            pass
+    existing.append({
+        "question_id": question_id,
+        "question_text": question_text,
+        "answer_text": answer_text,
+        "answered_at": now_iso(),
+    })
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"append_to_answers_json_failed={exc!r}")
+
+
 def _record_job_visible_log(job_id: str | None, message: str) -> None:
     ts = now_iso()
     line = f"[{ts}] {message}"
@@ -859,6 +903,14 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
             answer_text=effective_answer_text,
             question_id=question_id,
         )
+        if qtext_for_save and effective_answer_text and job_id_for_save:
+            _append_to_answers_json(
+                job_id_for_save,
+                question_id=question_id,
+                question_text=qtext_for_save,
+                answer_text=effective_answer_text,
+            )
+            _record_job_visible_log(job_id_for_save, f"Step 16: answers.json に追記 question_id={question_id}")
         _record_job_visible_log(job_id_for_save, "Step 16: ナレッジ蓄積: 開始")
         try:
             knowledge_result = merge_answer_into_knowledge_store(

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from ai_correct_text import correct_full_text, get_last_correct_full_text_meta
+from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
 from filename_hints import extract_filename_hints
 from job_context import load_job_context
@@ -464,6 +465,23 @@ def main() -> None:
             visible_log_path=visible_log_path,
             job_id=args.job_id,
             message="Step 11: 議事録生成とDocs更新完了",
+        )
+
+        # Step⑰: ナレッジ蓄積（議事録生成完了後）
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17_knowledge_accumulation",
+            status="running",
+            detail={},
+        )
+        accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17_knowledge_accumulation",
+            status="success",
+            detail={},
         )
 
         current_phase = "done"
