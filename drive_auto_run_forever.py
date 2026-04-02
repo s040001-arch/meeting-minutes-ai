@@ -21,6 +21,29 @@ def _read_lock_pid(lock_path: str) -> int | None:
     return None
 
 
+def _read_lock_start_ticks(lock_path: str) -> float | None:
+    """ロックファイルに書かれた proc_start_ticks を読む（PID 再利用検出用）。"""
+    try:
+        with open(lock_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("proc_start_ticks="):
+                    return float(line.split("=", 1)[1].strip())
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _get_process_start_ticks(pid: int) -> float | None:
+    """Linux /proc/{pid}/stat からプロセス開始時刻（clock ticks）を取得する。"""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            fields = f.read().split()
+        return float(fields[21])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -45,21 +68,57 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-def clear_stale_lock(lock_path: str) -> None:
+def clear_stale_lock(lock_path: str, max_lock_age_sec: int = 1800) -> None:
     """
     ロックファイルだけ残りプロセスが死んでいる場合に削除する。
-    二重起動防止のロジックは変えず、起動前の救済のみ。
+    以下の3段階で検出する:
+      1. 年齢チェック: max_lock_age_sec（デフォルト30分）より古ければ無条件削除
+         → コンテナ再起動後の PID 再利用による誤判定を防ぐ
+      2. PID 存在チェック: PID が存在しなければ削除
+      3. PID 再利用チェック: PID は存在するが /proc start_ticks が異なれば削除
+         → 同じ PID を別プロセスが再利用しているケース
     """
     if not os.path.isfile(lock_path):
         return
-    pid = _read_lock_pid(lock_path)
-    if pid is not None and _pid_exists(pid):
-        return
+
+    # 1. 年齢チェック（Railway コンテナ再起動後の残存ロック対策）
     try:
-        os.remove(lock_path)
-        print(f"[{now_iso()}] removed_stale_lock path={lock_path} reason=pid_dead_or_invalid pid={pid}")
-    except OSError as e:
-        print(f"[{now_iso()}] stale_lock_remove_failed path={lock_path} error={e}")
+        age_sec = time.time() - os.path.getmtime(lock_path)
+        if age_sec > max_lock_age_sec:
+            os.remove(lock_path)
+            print(
+                f"[{now_iso()}] removed_stale_lock path={lock_path} "
+                f"reason=too_old age_sec={int(age_sec)}"
+            )
+            return
+    except OSError:
+        pass
+
+    pid = _read_lock_pid(lock_path)
+
+    # 2. PID 存在チェック
+    if pid is None or not _pid_exists(pid):
+        try:
+            os.remove(lock_path)
+            print(f"[{now_iso()}] removed_stale_lock path={lock_path} reason=pid_dead pid={pid}")
+        except OSError as e:
+            print(f"[{now_iso()}] stale_lock_remove_failed path={lock_path} error={e}")
+        return
+
+    # 3. PID 再利用チェック（Linux のみ）
+    lock_ticks = _read_lock_start_ticks(lock_path)
+    if lock_ticks is not None:
+        actual_ticks = _get_process_start_ticks(pid)
+        if actual_ticks is not None and abs(actual_ticks - lock_ticks) > 1.0:
+            try:
+                os.remove(lock_path)
+                print(
+                    f"[{now_iso()}] removed_stale_lock path={lock_path} "
+                    f"reason=pid_reuse pid={pid} "
+                    f"lock_ticks={lock_ticks} actual_ticks={actual_ticks}"
+                )
+            except OSError as e:
+                print(f"[{now_iso()}] stale_lock_remove_failed path={lock_path} error={e}")
 
 
 def now_iso() -> str:
@@ -72,9 +131,13 @@ def acquire_lock(lock_path: str) -> bool:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
+    my_pid = os.getpid()
+    my_ticks = _get_process_start_ticks(my_pid)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(f"pid={os.getpid()}\n")
+        f.write(f"pid={my_pid}\n")
         f.write(f"started_at={now_iso()}\n")
+        if my_ticks is not None:
+            f.write(f"proc_start_ticks={my_ticks}\n")
     return True
 
 
