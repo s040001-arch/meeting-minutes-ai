@@ -3,9 +3,10 @@ Railway 等の PaaS ではリポジトリに credentials / token をコミット
 環境変数から OAuth 用ファイルを生成する（ファイルが既にあれば上書きしない）。
 
 設定例（Railway の Variables）:
-  GOOGLE_OAUTH_CLIENT_JSON   … credentials.json の全文（JSON）
+  GOOGLE_OAUTH_CLIENT_JSON      … credentials.json の全文（JSON）
   GOOGLE_OAUTH_TOKEN_DRIVE_JSON … token_drive.json の全文（Drive ポーリング用）
-  GOOGLE_OAUTH_TOKEN_JSON    … token.json の全文（Google Docs 書き込み用・任意）
+  GOOGLE_OAUTH_TOKEN_JSON       … token.json の全文（Google Docs 書き込み用・任意）
+  GOOGLE_SERVICE_ACCOUNT_JSON   … credentials_service_account.json の全文（Sheets ナレッジ蓄積用）
 """
 
 from __future__ import annotations
@@ -44,6 +45,10 @@ def write_google_oauth_files_from_env() -> list[str]:
     write_if_env(
         os.path.join(root, "token.json"),
         "GOOGLE_OAUTH_TOKEN_JSON",
+    )
+    write_if_env(
+        os.path.join(root, "credentials_service_account.json"),
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
     )
     return written
 
