@@ -538,20 +538,34 @@ Railway のログが流れた後でも、Drive 上で処理状況を確認でき
 | ドキュメント生成 | Google Docs API v1 |
 | ナレッジ蓄積 | Google Sheets API |
 | ユーザー通知・対話 | LINE Messaging API |
-| 認証 | Google サービスアカウント（`GOOGLE_SERVICE_ACCOUNT_JSON` から復元） |
+| Docs API 認証 | **OAuth 2.0**（`GOOGLE_OAUTH_TOKEN_JSON` / `GOOGLE_OAUTH_CREDENTIALS_JSON` から復元） |
+| Drive / Sheets API 認証 | Google サービスアカウント（`GOOGLE_SERVICE_ACCOUNT_JSON` から復元） |
+
+### 認証方式に関する制約（重要）
+
+**Google Docs API には OAuth 2.0 を使用すること。サービスアカウントは不可。**
+
+個人 Google アカウントではサービスアカウントに Google Docs の作成・編集権限を付与できない（Google Workspace のドメイン全体委任が必要だが、個人アカウントでは利用不可）。2026-04-03 に実際にサービスアカウントで `HttpError 403: The caller does not have permission` が発生し、OAuth に戻すことで解決した。
+
+将来、Drive API の MIME type conversion upload（`mimeType=application/vnd.google-apps.document`）方式など、サービスアカウントでも動作する代替手段が確認できた場合は移行を検討してよい。ただし、**現時点では OAuth が唯一の動作実績のある方式**であり、変更する場合は十分なテストを経ること。
 
 ---
 
 ## 12. 環境変数
 
 ```
-GOOGLE_SERVICE_ACCOUNT_JSON    ← サービスアカウント JSON（Drive / Docs / Sheets 共通）
-DRIVE_FOLDER_ID                ← Google Drive の監視対象フォルダ ID
-ANTHROPIC_API_KEY              ← Claude API キー
-OPENAI_API_KEY                 ← OpenAI API キー（Whisper + その他 OpenAI 系機能で共用）
-LINE_CHANNEL_ACCESS_TOKEN      ← LINE Messaging API アクセストークン
-LINE_USER_ID                   ← 通知先の LINE ユーザー ID
-KNOWLEDGE_SHEET_ID             ← ナレッジ蓄積用 Google Sheets のスプレッドシート ID
+# ── Google 認証 ──
+GOOGLE_SERVICE_ACCOUNT_JSON       ← サービスアカウント JSON（Drive / Sheets で使用）
+GOOGLE_OAUTH_TOKEN_JSON           ← OAuth トークン JSON（Docs API で使用。token.json の全文）
+GOOGLE_OAUTH_CREDENTIALS_JSON     ← OAuth クライアント定義 JSON（credentials.json の全文。トークン更新時に必要）
+
+# ── サービス設定 ──
+DRIVE_FOLDER_ID                   ← Google Drive の監視対象フォルダ ID
+ANTHROPIC_API_KEY                 ← Claude API キー
+OPENAI_API_KEY                    ← OpenAI API キー（Whisper + その他 OpenAI 系機能で共用）
+LINE_CHANNEL_ACCESS_TOKEN         ← LINE Messaging API アクセストークン
+LINE_USER_ID                      ← 通知先の LINE ユーザー ID
+KNOWLEDGE_SHEET_ID                ← ナレッジ蓄積用 Google Sheets のスプレッドシート ID
 ```
 
 ---
@@ -560,7 +574,10 @@ KNOWLEDGE_SHEET_ID             ← ナレッジ蓄積用 Google Sheets のスプ
 
 ```
 railway_entry.sh
-  → railway_bootstrap.py（GOOGLE_SERVICE_ACCOUNT_JSON からサービスアカウントファイルを復元）
+  → railway_bootstrap.py（環境変数から認証ファイルを復元）
+      GOOGLE_SERVICE_ACCOUNT_JSON       → credentials_service_account.json
+      GOOGLE_OAUTH_TOKEN_JSON           → token.json
+      GOOGLE_OAUTH_CREDENTIALS_JSON     → credentials.json
   → drive_auto_run_forever.py（メインループ起動）
 ```
 
@@ -595,7 +612,16 @@ while True:
 - **正常に動作している関数・フローを変更しない。** 新機能の追加や不具合修正の際は、既存関数の内部ロジックを書き換えるのではなく、新しい関数を追加して分岐で呼び出す設計とすること。
 - 変更対象ファイルが明示されている場合、それ以外のファイルには一切手を加えない。
 
-### Phase A の設計上の落とし穴（実際のインシデント記録）
+### 認証方式の変更禁止（実際のインシデント記録: 2026-04-03）
+
+Google Docs API の認証をサービスアカウントに切り替えたところ、個人アカウントでは権限不足（403）で Docs を作成できなかった。復旧に長時間を要した。
+
+**ルール:**
+- `export_minutes_to_google_docs.py` は **OAuth 2.0 認証を使用する。サービスアカウントに変更してはならない。**
+- OAuth 以外の方式を採用する場合は、事前にテスト環境で Docs 作成・編集・Drive 移動の全フローが動作することを確認してからコードに反映する。
+- `drive_auto_run_once.py`（Drive API）と `knowledge_sheet_store.py`（Sheets API）はサービスアカウントで問題なく動作している。これらも動作中の認証方式を変更しない。
+
+### Phase A の設計上の落とし穴（実際のインシデント記録: 2026-04-03）
 
 Step③ でソースファイルをサブフォルダへ移動した直後に処理が失敗すると、ファイルはルート直下から消えているためポーリングで再検出されない。一方サブフォルダ内にはソースファイルだけが残り Google Doc は未作成のまま放置される。
 
