@@ -507,8 +507,8 @@ def main() -> None:
 
     # push モード：サービスアカウントで認証
     creds = _build_credentials()
-    docs_service = build("docs", "v1", credentials=creds)
-    drive_service = build("drive", "v3", credentials=creds)
+    docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
+    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if args.update_doc_id:
         doc_id = args.update_doc_id.strip()

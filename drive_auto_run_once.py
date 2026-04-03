@@ -321,7 +321,7 @@ def main() -> None:
     try:
         known_ids = load_last_seen_ids(args.state)
         creds = _build_credentials()
-        service = build("drive", "v3", credentials=creds)
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
         try:
             files = list_files_in_folder(service, args.folder_id)
