@@ -13,32 +13,51 @@ import sys
 import textwrap
 from typing import List, Tuple
 
-from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 
 DOCS_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
 ]
 
-_SA_JSON_PATH = "credentials_service_account.json"
 
+def load_or_create_google_docs_credentials(
+    credentials_json_path: str,
+    token_json_path: str,
+) -> Credentials:
+    creds: Credentials | None = None
+    if os.path.exists(token_json_path):
+        creds = Credentials.from_authorized_user_file(token_json_path, DOCS_SCOPES)
 
-def _get_credentials():
-    """環境変数またはファイルからサービスアカウント認証情報を取得"""
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if sa_json:
-        info = json.loads(sa_json)
-        return service_account.Credentials.from_service_account_info(
-            info, scopes=DOCS_SCOPES
-        )
-    if os.path.exists(_SA_JSON_PATH):
-        return service_account.Credentials.from_service_account_file(
-            _SA_JSON_PATH, scopes=DOCS_SCOPES
-        )
-    raise FileNotFoundError(
-        "サービスアカウント認証情報が見つかりません"
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            with open(token_json_path, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+            return creds
+        except RefreshError:
+            creds = None
+
+    flow = InstalledAppFlow.from_client_secrets_file(
+        credentials_json_path,
+        DOCS_SCOPES,
     )
+    creds = flow.run_local_server(port=0)
+
+    os.makedirs(os.path.dirname(token_json_path) or ".", exist_ok=True)
+    with open(token_json_path, "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
+
+    return creds
 
 
 def md_to_google_docs_text(md: str) -> str:
@@ -134,10 +153,6 @@ def resolve_output_dir(job_id: str, output_root: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     return out_dir
 
-
-def _build_credentials() -> service_account.Credentials:
-    """サービスアカウントで Docs/Drive 認証情報を生成する。"""
-    return _get_credentials()
 
 
 
@@ -428,6 +443,16 @@ def main() -> None:
         help="dry-runを無効にし、Google Docs APIへ書き込む",
     )
     parser.add_argument(
+        "--credentials",
+        default="credentials.json",
+        help="Google OAuthクライアントJSON（デフォルト: credentials.json）",
+    )
+    parser.add_argument(
+        "--token",
+        default="token.json",
+        help="OAuthトークン保存先/読み込み先（デフォルト: token.json）",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="（互換用）未使用。将来拡張用のため残す",
@@ -505,8 +530,11 @@ def main() -> None:
         print(f"saved_text={out_text_path}")
         return
 
-    # push モード：サービスアカウントで認証
-    creds = _build_credentials()
+    # push モード：OAuth で認証
+    creds = load_or_create_google_docs_credentials(
+        credentials_json_path=args.credentials,
+        token_json_path=args.token,
+    )
     docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
