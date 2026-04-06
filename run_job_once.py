@@ -1283,13 +1283,35 @@ def main() -> None:
             status="running",
             detail={},
         )
-        accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 17: ナレッジ蓄積開始",
+        )
+        kr = accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
+        if not kr.get("enabled"):
+            kr_msg = "Step 17: ナレッジ蓄積スキップ（KNOWLEDGE_SHEET_ID未設定）"
+        elif kr.get("error"):
+            kr_msg = f"Step 17: ナレッジ蓄積エラー: {kr.get('error')}"
+        elif kr.get("skipped"):
+            kr_msg = f"Step 17: ナレッジ蓄積スキップ reason={kr.get('reason', '-')}"
+        elif kr.get("updated"):
+            kr_msg = f"Step 17: ナレッジ蓄積完了 {kr.get('knowledge_count_before', 0)}件→{kr.get('knowledge_count_after', 0)}件"
+        else:
+            kr_msg = f"Step 17: ナレッジ蓄積完了 unchanged reason={kr.get('reason', '-')}"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=kr_msg,
+        )
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
             phase="step_17_knowledge_accumulation",
             status="success",
-            detail={},
+            detail=kr,
         )
 
         log_line(log_path, "pipeline_status=success")
