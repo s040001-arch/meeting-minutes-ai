@@ -181,6 +181,17 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     if send_line_enabled:
         qcycle_cmd.append("--send-line")
     _run(qcycle_cmd)
+    _run(
+        [
+            _py(),
+            os.path.join(REPO_ROOT, "generate_minutes_other_sections.py"),
+            "--job-id",
+            args.job_id,
+            "--input-root",
+            args.input_root,
+        ]
+    )
+    args.skip_compose = True
     cmd_sync_docs(args)
 
 

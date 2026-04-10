@@ -254,7 +254,7 @@ def run_transcription_stage_docs_export(
             status="success",
             detail={"title": title},
         )
-    except Exception:
+    except Exception as e:
         update_job_progress(
             input_root=input_root,
             job_id=job_id,
@@ -262,7 +262,10 @@ def run_transcription_stage_docs_export(
             status="error",
             detail={"title": title},
         )
-        raise
+        log_line(
+            log_path,
+            f"step_4_0_transcription_docs: non-fatal error, pipeline continues: {e}",
+        )
 
 
 def load_google_doc_hub_doc_id(hub_meta_path: str) -> str | None:

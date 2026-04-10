@@ -38,14 +38,42 @@ def load_or_create_google_docs_credentials(
     if creds and creds.valid:
         return creds
 
-    if creds and creds.expired and creds.refresh_token:
+    # refresh_token があれば常にリフレッシュを試行する。
+    # expiry が未設定（None）の場合 creds.expired=False となりスキップされていた問題を修正。
+    if creds and creds.refresh_token:
         try:
             creds.refresh(Request())
             with open(token_json_path, "w", encoding="utf-8") as f:
                 f.write(creds.to_json())
             return creds
-        except RefreshError:
+        except RefreshError as e:
+            print(
+                f"[OAuth] RefreshError: {e!r} — "
+                "リフレッシュトークンが無効です。ローカルで再認可し "
+                "GOOGLE_OAUTH_TOKEN_JSON を更新してください。",
+                file=sys.stderr,
+                flush=True,
+            )
             creds = None
+        except Exception as e:
+            print(
+                f"[OAuth] token refresh failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            creds = None
+
+    # Railway 等ヘッドレス環境ではブラウザ認可不可 → 明確なエラーを出す
+    if not sys.stdin.isatty():
+        has_token = os.path.exists(token_json_path)
+        has_creds = os.path.exists(credentials_json_path)
+        raise RuntimeError(
+            "OAuth token is unavailable or refresh failed. "
+            "Interactive auth is not possible in this environment. "
+            f"token_exists={has_token} credentials_exists={has_creds} "
+            "Please regenerate the token locally and update "
+            "GOOGLE_OAUTH_TOKEN_JSON on Railway."
+        )
 
     flow = InstalledAppFlow.from_client_secrets_file(
         credentials_json_path,
