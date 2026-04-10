@@ -42,9 +42,13 @@ def log_line(log_path: str, message: str) -> None:
 
 
 def append_visible_step_log(visible_log_path: str, message: str) -> None:
-    line = f"[{now_iso()}] {message}"
+    ts = datetime.now().strftime("%H:%M:%S")
+    lines = message.split("\n")
+    first = f"[{ts}] {lines[0]}"
+    rest = [f"           {l}" for l in lines[1:] if l.strip()]
+    formatted = "\n".join([first] + rest)
     with open(visible_log_path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        f.write(formatted + "\n")
 
 
 def record_visible_progress(
@@ -63,7 +67,7 @@ def record_visible_progress(
     append_log_to_drive(job_id, message)
 
 
-def run_cmd(log_path: str, args: list[str], step: str) -> None:
+def run_cmd(log_path: str, args: list[str], step: str) -> str:
     cmd_text = " ".join(args)
     log_line(log_path, f"{step}: start cmd={cmd_text}")
     completed = subprocess.run(args, capture_output=True, text=True)
@@ -82,6 +86,7 @@ def run_cmd(log_path: str, args: list[str], step: str) -> None:
         )
         raise RuntimeError(f"{step} failed: exit_code={completed.returncode}")
     log_line(log_path, f"{step}: success")
+    return completed.stdout
 
 
 def run_cmd_with_timeout_retry(
@@ -436,8 +441,11 @@ def append_log_to_drive(job_id: str, message: str) -> None:
         )
         files = result.get("files", [])
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{timestamp}] {message}"
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        lines = message.split("\n")
+        first = f"[{timestamp}] {lines[0]}"
+        rest = [f"           {l}" for l in lines[1:] if l.strip()]
+        line = "\n".join([first] + rest)
         existing_text = ""
 
         if files:
@@ -702,7 +710,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 2.1: WAV変換開始",
+                message="音声ファイルをWAV形式に変換しています...",
             )
             run_cmd(
                 log_path,
@@ -713,7 +721,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 2.1: WAV変換完了",
+                message="WAV変換が完了しました",
             )
             split_cmd = [
                 py,
@@ -733,7 +741,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 2.2: チャンク分割開始 chunk_seconds={args.chunk_seconds}",
+                message=f"音声を{args.chunk_seconds}秒ごとに分割しています...",
             )
             run_cmd(log_path, split_cmd, "step_2_2_split_chunks")
 
@@ -745,7 +753,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 2.2: チャンク分割完了 count={len(chunk_files)}",
+                message=f"音声の分割が完了しました（{len(chunk_files)}個のチャンクに分割）",
             )
 
             current_phase = "step_3_transcribe"
@@ -754,7 +762,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 3: 文字起こし開始 chunks={len(chunk_files)}",
+                message=f"文字起こしを開始します（{len(chunk_files)}チャンク、完了まで数分かかります）",
             )
             for i, chunk_path in enumerate(chunk_files):
                 chunk_id = chunk_path.stem
@@ -792,7 +800,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 3: 文字起こし完了 chunks={len(chunk_files)}",
+                message=f"文字起こしが完了しました（全{len(chunk_files)}チャンク処理済み）",
             )
 
             current_phase = "step_4_1_merge_chunks"
@@ -801,7 +809,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 4.1: 文字起こし結合開始",
+                message="文字起こし結果を1つのテキストにまとめています...",
             )
             run_cmd(
                 log_path,
@@ -812,7 +820,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 4.1: 文字起こし結合完了",
+                message="文字起こし結果の結合が完了しました",
             )
         else:
             raise ValueError(f"unsupported input extension: {input_ext}")
@@ -838,8 +846,9 @@ def main() -> None:
             visible_log_path=visible_log_path,
             job_id=args.job_id,
             message=(
-                f"Step 4.0: 処理開始 file={Path(args.input_audio).name} "
-                f"mode={'txt' if input_ext in TEXT_EXTENSIONS else 'audio'}"
+                f"===== 議事録の作成を開始します =====\n"
+                f"  対象ファイル: {Path(args.input_audio).name}\n"
+                f"  処理モード: {'テキスト入力（文字起こし済み）' if input_ext in TEXT_EXTENSIONS else '音声入力（文字起こしから実施）'}"
             ),
         )
 
@@ -857,7 +866,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 4.2: 機械補正開始",
+            message="機械補正を実行中...（フィラー除去・句読点整理・相槌圧縮）",
         )
         run_cmd(
             log_path,
@@ -888,7 +897,10 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 4.2: 機械補正完了 input={len(raw_text)} → output={len(corrected_text)}",
+            message=(
+                f"機械補正が完了しました（{len(raw_text):,}文字 → {len(corrected_text):,}文字、"
+                f"{len(raw_text) - len(corrected_text):,}文字削減）"
+            ),
         )
 
         # --- Step 4.3: AI correction (full-text, Claude) ---
@@ -914,7 +926,9 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 4.3: AI補正開始 input={len(mechanical_text)}",
+            message=(
+                f"AIによるテキスト補正を開始します（{len(mechanical_text):,}文字を処理、数分〜十数分かかります）"
+            ),
         )
 
         PHASE_LABELS = {
@@ -925,7 +939,10 @@ def main() -> None:
             label = PHASE_LABELS.get(phase, phase)
             title = f"【AI補正中：{label}】{stem}"
             update_doc_title_from_hub(hub_meta_path, title, log_path)
-            append_log_to_drive(args.job_id, f"Step 4.3: {label}開始")
+            append_log_to_drive(args.job_id, f"  AI処理中...（{label}を実行しています）")
+
+        def _on_ai_stream_progress(msg: str):
+            append_log_to_drive(args.job_id, msg)
 
         ai_text = correct_full_text(
             text=mechanical_text,
@@ -933,6 +950,7 @@ def main() -> None:
             filename_hints=hints,
             visible_log_path=visible_log_path,
             job_context=job_context if job_context else None,
+            on_stream_progress=_on_ai_stream_progress,
         )
 
         with open(ai_path, "w", encoding="utf-8") as f:
@@ -959,7 +977,9 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
+            message=(
+                f"AI補正が完了しました（{len(mechanical_text):,}文字 → {len(ai_text):,}文字）"
+            ),
         )
 
         # --- Step 4.4: 話者識別・ターン分割 ---
@@ -978,7 +998,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 4.4: 話者識別・ターン分割開始",
+            message="話者の識別とターン分割を実行中...（誰が何を話したか推定します）",
         )
         try:
             diarized_text = diarize_transcript(
@@ -1004,7 +1024,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 4.4: 話者識別完了 output={len(diarized_text)}",
+                message=f"話者識別が完了しました（{len(diarized_text):,}文字）",
             )
         except Exception as e:
             log_line(log_path, f"step_4_4_diarize: non-fatal error: {e}")
@@ -1019,7 +1039,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 4.4: 話者識別スキップ（非致命的エラー: {e}）",
+                message=f"話者識別をスキップしました（処理は継続します。原因: {e}）",
             )
 
         # Step 4.35: AI不明点検出（Claude Opus）
@@ -1059,7 +1079,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 4.35: AI不明点検出完了 count={len(ai_unknown_points)}",
+            message=f"AIによる不明点の検出が完了しました（{len(ai_unknown_points)}件の不明箇所を発見）",
         )
         update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
 
@@ -1069,7 +1089,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 4.4: ハイブリッド不明点検出開始",
+            message="パターン照合で追加の不明点を検出しています...",
         )
         run_cmd(
             log_path,
@@ -1092,7 +1112,10 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 4.4: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
+            message=(
+                f"不明点検出が完了しました（AI検出: {len(ai_unknown_points)}件 + パターン検出: {len(regex_unknown_points)}件"
+                f" → 統合後: {len(merged_unknown_points)}件）"
+            ),
         )
         update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
         qcycle_cmd = [
@@ -1130,7 +1153,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 5: 質問選定開始",
+            message="不明点からLINE質問を選定しています...",
         )
         run_cmd(log_path, qcycle_cmd, "step_5_question_cycle_prepare")
         update_job_progress(
@@ -1144,7 +1167,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 5: 質問選定完了",
+            message="質問の選定が完了しました（LINEで送信済み or 質問なし）",
         )
 
         line_answers = os.path.join("data", "line_answers.json")
@@ -1159,7 +1182,7 @@ def main() -> None:
                         log_path=log_path,
                         visible_log_path=visible_log_path,
                         job_id=args.job_id,
-                        message="Step 5.4: 回答反映開始",
+                        message="LINE回答を逐語録に反映しています...",
                     )
                     run_cmd_with_timeout_retry(
                         log_path,
@@ -1172,7 +1195,7 @@ def main() -> None:
                         log_path=log_path,
                         visible_log_path=visible_log_path,
                         job_id=args.job_id,
-                        message="Step 5.4: 回答反映完了",
+                        message="LINE回答の反映が完了しました",
                     )
                 else:
                     ensure_after_qa_exists(job_dir, log_path)
@@ -1202,8 +1225,9 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 6.1: 議事録生成開始",
+            message="議事録ドラフトを作成中...（逐語録から発言録を構成します、数分かかります）",
         )
+        append_log_to_drive(args.job_id, "  AIが逐語録を要約・構成しています...")
         run_cmd(
             log_path,
             [py, os.path.join(repo, "generate_minutes_transcript.py"), "--job-id", args.job_id, "--input-root", args.input_root],
@@ -1220,7 +1244,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 6.1: 議事録生成完了",
+            message="議事録ドラフトが完了しました",
         )
         update_job_progress(
             input_root=args.input_root,
@@ -1235,8 +1259,9 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 6.2: 議事録整形開始",
+            message="議事録を整形中...（参加者・議題・決定事項・Next Actionを抽出）",
         )
+        append_log_to_drive(args.job_id, "  AIが議事録の各セクションを生成しています...")
         run_cmd(
             log_path,
             [py, os.path.join(repo, "generate_minutes_other_sections.py"), "--job-id", args.job_id, "--input-root", args.input_root],
@@ -1253,7 +1278,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 6.2: 議事録整形完了",
+            message="議事録の整形が完了しました（全セクションを構成済み）",
         )
 
         if args.skip_export_docs:
@@ -1271,7 +1296,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 6.3: Googleドキュメント出力スキップ",
+                message="Googleドキュメントへの出力はスキップされました",
             )
         else:
             update_job_progress(
@@ -1283,11 +1308,13 @@ def main() -> None:
             )
             current_phase = "step_6_3_export_docs"
             current_step_label = "Step 6.3: Googleドキュメント出力"
+            hub_doc_id = load_google_doc_hub_doc_id(hub_meta_path) if args.docs_push else None
+            docs_mode_label = "既存ドキュメントを更新" if hub_doc_id else "新規ドキュメントを作成"
             record_visible_progress(
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 6.3: Googleドキュメント出力開始",
+                message=f"Googleドキュメントに出力中...（{docs_mode_label}します）",
             )
             docs_cmd = [
                 py,
@@ -1307,7 +1334,6 @@ def main() -> None:
                 docs_cmd.extend(["--drive-subfolder-name", subfolder_name])
             if args.docs_push:
                 docs_cmd.append("--push")
-                hub_doc_id = load_google_doc_hub_doc_id(hub_meta_path)
                 if hub_doc_id:
                     docs_cmd.extend(["--update-doc-id", hub_doc_id])
                     log_line(
@@ -1324,7 +1350,16 @@ def main() -> None:
                 docs_cmd.extend(["--upload-local-file", os.path.abspath(args.input_audio)])
                 if not args.docs_keep_local_source:
                     docs_cmd.append("--delete-local-after-upload")
-            run_cmd(log_path, docs_cmd, "step_6_3_export_docs")
+            append_log_to_drive(args.job_id, "  Google認証 → ドキュメント書き込み中...")
+            docs_stdout = run_cmd(log_path, docs_cmd, "step_6_3_export_docs")
+            docs_output = {}
+            for ln in docs_stdout.strip().splitlines():
+                if "=" in ln:
+                    k, _, v = ln.partition("=")
+                    docs_output[k.strip()] = v.strip()
+            docs_url = docs_output.get("doc_url", "")
+            docs_chars = docs_output.get("expected_chars", "?")
+            docs_verified = docs_output.get("full_write_verified", "?")
             update_job_progress(
                 input_root=args.input_root,
                 job_id=args.job_id,
@@ -1332,11 +1367,17 @@ def main() -> None:
                 status="success",
                 detail={"docs_cmd": " ".join(docs_cmd[:6]) + " ..."},
             )
+            verified_label = "検証OK" if docs_verified == "True" else "検証結果: " + docs_verified
             record_visible_progress(
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 6.3: Googleドキュメント出力完了",
+                message=(
+                    f"Googleドキュメントへの出力が完了しました（{docs_chars}文字、{verified_label}）\n"
+                    f"  ドキュメントURL: {docs_url}"
+                    if docs_url
+                    else f"Googleドキュメントへの出力が完了しました（{docs_chars}文字、{verified_label}）"
+                ),
             )
 
         # Step⑰: ナレッジ蓄積（議事録生成完了後）
@@ -1351,19 +1392,21 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 17: ナレッジ蓄積開始",
+            message="ナレッジの蓄積を確認中...（用語・人名等をスプレッドシートに反映）",
         )
         kr = accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
         if not kr.get("enabled"):
-            kr_msg = "Step 17: ナレッジ蓄積スキップ（KNOWLEDGE_SHEET_ID未設定）"
+            kr_msg = "ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_IDが未設定のため）"
         elif kr.get("error"):
-            kr_msg = f"Step 17: ナレッジ蓄積エラー: {kr.get('error')}"
+            kr_msg = f"ナレッジ蓄積でエラーが発生しました: {kr.get('error')}"
         elif kr.get("skipped"):
-            kr_msg = f"Step 17: ナレッジ蓄積スキップ reason={kr.get('reason', '-')}"
+            kr_msg = f"ナレッジ蓄積: スキップ（{kr.get('reason', '対象なし')}）"
         elif kr.get("updated"):
-            kr_msg = f"Step 17: ナレッジ蓄積完了 {kr.get('knowledge_count_before', 0)}件→{kr.get('knowledge_count_after', 0)}件"
+            before = kr.get('knowledge_count_before', 0)
+            after = kr.get('knowledge_count_after', 0)
+            kr_msg = f"ナレッジ蓄積が完了しました（{before}件 → {after}件、{after - before}件の新規知識を追加）"
         else:
-            kr_msg = f"Step 17: ナレッジ蓄積完了 unchanged reason={kr.get('reason', '-')}"
+            kr_msg = f"ナレッジ蓄積: 変更なし（{kr.get('reason', '新規知識なし')}）"
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -1385,7 +1428,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="処理完了",
+            message="===== 全ての処理が完了しました =====",
         )
         print(f"job_id={args.job_id}")
         print(f"log={log_path}")
@@ -1405,7 +1448,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"{current_step_label}でエラー: {str(e)}",
+            message=f"エラーが発生しました（{current_step_label}）: {str(e)}",
         )
         raise
 

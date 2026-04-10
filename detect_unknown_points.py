@@ -123,7 +123,7 @@ def detect_unknown_points(
     try:
         api_key = _resolve_detection_api_key()
     except RuntimeError as e:
-        _append_visible_log(visible_log_path, f"Step 9: AI不明点検出: APIキー未設定 → {e!r}")
+        _append_visible_log(visible_log_path, f"  AI不明点検出: APIキーが未設定のためスキップ")
         return []
 
     knowledge_memos: list[str] = []
@@ -132,14 +132,14 @@ def detect_unknown_points(
         if knowledge_memos:
             _append_visible_log(
                 visible_log_path,
-                f"Step 9: ナレッジ読み込み: {len(knowledge_memos)}件",
+                f"  ナレッジシートから{len(knowledge_memos)}件の知識を参照",
             )
     except Exception as e:
-        _append_visible_log(visible_log_path, f"Step 9: ナレッジ読み込み: エラー → {e!r}")
+        _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
 
     _append_visible_log(
         visible_log_path,
-        f"Step 9: AI不明点検出開始 input={len(text)}文字 model={resolved_model}",
+        f"  AIに不明点の検出を依頼中...（{len(text):,}文字を分析）",
     )
 
     system_prompt = _build_detection_system_prompt(
@@ -165,7 +165,7 @@ def detect_unknown_points(
     except Exception as e:
         _append_visible_log(
             visible_log_path,
-            f"Step 9: AI不明点検出: APIエラー → 空リスト返却 {e!r}",
+            f"  AI不明点検出: APIエラーが発生しました（0件として続行）",
         )
         return []
 
@@ -186,20 +186,20 @@ def detect_unknown_points(
             except json.JSONDecodeError:
                 _append_visible_log(
                     visible_log_path,
-                    "Step 9: AI不明点検出: JSONパース失敗 → 空リスト返却",
+                    "  AI不明点検出: 応答の解析に失敗しました（0件として続行）",
                 )
                 return []
         else:
             _append_visible_log(
                 visible_log_path,
-                "Step 9: AI不明点検出: JSON未検出 → 空リスト返却",
+                "  AI不明点検出: 応答にデータが含まれていませんでした（0件として続行）",
             )
             return []
 
     if not isinstance(result, list):
         _append_visible_log(
             visible_log_path,
-            "Step 9: AI不明点検出: 非配列レスポンス → 空リスト返却",
+            "  AI不明点検出: 想定外の応答形式（0件として続行）",
         )
         return []
 
@@ -226,6 +226,6 @@ def detect_unknown_points(
     normalized = normalized[:10]
     _append_visible_log(
         visible_log_path,
-        f"Step 9: AI不明点検出完了 count={len(normalized)} stop_reason={stop_reason}",
+        f"  AI不明点検出が完了しました（{len(normalized)}件を検出）",
     )
     return normalized

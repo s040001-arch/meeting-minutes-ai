@@ -28,6 +28,8 @@ import httpx
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from repo_env import load_dotenv_local
+
 from knowledge_sheet_store import (
     load_knowledge_memos,
     save_knowledge_memos,
@@ -422,6 +424,7 @@ def merge_knowledge_lists(
 
 def main() -> None:
     global _LOG_FILE
+    load_dotenv_local()
 
     parser = argparse.ArgumentParser(
         description="既存 Google Docs 議事録からナレッジを一括抽出し Knowledge Sheet に追加する"

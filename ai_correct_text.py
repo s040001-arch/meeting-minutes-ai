@@ -102,6 +102,9 @@ def _stream_chunk_preview(text: str) -> str:
     return preview
 
 
+_VISIBLE_PROGRESS_INTERVAL_SEC = 30.0
+
+
 def _stream_anthropic_text(
     *,
     api_key: str,
@@ -111,6 +114,8 @@ def _stream_anthropic_text(
     max_tokens: int,
     timeout_sec: int,
     log_label: str,
+    on_visible_progress: Optional[Callable[[str], None]] = None,
+    input_chars: int = 0,
 ) -> tuple[str, object | None]:
     max_attempts = _STREAM_MAX_RETRIES + 1
     for attempt in range(1, max_attempts + 1):
@@ -127,6 +132,7 @@ def _stream_anthropic_text(
         chunk_count = 0
         next_log_len = _STREAM_LOG_EVERY_CHARS
         last_progress_log_at = started_at
+        last_visible_progress_at = started_at
         try:
             with client.messages.stream(
                 model=model,
@@ -151,6 +157,15 @@ def _stream_anthropic_text(
                         while next_log_len <= len(full_response):
                             next_log_len += _STREAM_LOG_EVERY_CHARS
                         last_progress_log_at = now
+                    if on_visible_progress and (now - last_visible_progress_at) >= _VISIBLE_PROGRESS_INTERVAL_SEC:
+                        elapsed_sec = int(now - started_at)
+                        elapsed_m, elapsed_s = divmod(elapsed_sec, 60)
+                        pct = len(full_response) / max(input_chars, 1) * 100 if input_chars else 0
+                        pct_str = f"約{min(pct, 99):.0f}%" if input_chars else f"{len(full_response):,}文字受信"
+                        on_visible_progress(
+                            f"  AI応答を受信中...（{elapsed_m}分{elapsed_s:02d}秒経過、{pct_str}）"
+                        )
+                        last_visible_progress_at = now
                 final_message = stream.get_final_message()
             elapsed = time.monotonic() - started_at
             logger.info(
@@ -165,6 +180,10 @@ def _stream_anthropic_text(
                 f"partial_len={len(full_response)} chunks={chunk_count} "
                 f"elapsed={elapsed:.1f}s error={e!r}"
             )
+            if on_visible_progress and attempt < max_attempts and _is_retryable_stream_error(e):
+                on_visible_progress(
+                    f"  AI通信エラー → 再試行します（{attempt}/{max_attempts}回目）"
+                )
             if attempt >= max_attempts or not _is_retryable_stream_error(e):
                 raise
             backoff_idx = min(attempt - 1, len(_STREAM_RETRY_BACKOFF_SEC) - 1)
@@ -184,12 +203,15 @@ def _stream_anthropic_text(
 def _append_visible_log(visible_log_path: str | None, message: str) -> None:
     if not visible_log_path:
         return
-    ts = datetime.now().isoformat(timespec="seconds")
-    line = f"[{ts}] {message}\n"
+    ts = datetime.now().strftime("%H:%M:%S")
+    lines = message.split("\n")
+    first = f"[{ts}] {lines[0]}"
+    rest = [f"           {l}" for l in lines[1:] if l.strip()]
+    formatted = "\n".join([first] + rest)
     try:
         os.makedirs(os.path.dirname(visible_log_path) or ".", exist_ok=True)
         with open(visible_log_path, "a", encoding="utf-8") as f:
-            f.write(line)
+            f.write(formatted + "\n")
     except OSError:
         pass
 
@@ -260,6 +282,7 @@ def correct_full_text(
     filename_hints: list[str] | None = None,
     visible_log_path: str | None = None,
     job_context: dict | None = None,
+    on_stream_progress: Optional[Callable[[str], None]] = None,
 ) -> str:
     """機械補正済みテキストを Claude 4 Opus に一括で渡し補正済み全文を返す。
 
@@ -305,31 +328,36 @@ def correct_full_text(
             if knowledge_memos:
                 _append_visible_log(
                     visible_log_path,
-                    f"Step 8: ナレッジ読み込み: {len(knowledge_memos)}件をプロンプトに注入",
+                    f"  ナレッジシートから{len(knowledge_memos)}件の知識を読み込みました",
                 )
             else:
                 _append_visible_log(
                     visible_log_path,
-                    "Step 8: ナレッジ読み込み: 0件（スキップ）",
+                    "  ナレッジシート: 該当する知識なし（スキップ）",
                 )
         except Exception as e:
             knowledge_memos = []
             print(f"correct_full_text: knowledge_memos_load_failed={e!r}")
             _append_visible_log(
                 visible_log_path,
-                f"Step 8: ナレッジ読み込み: エラー → {e!r}",
+                f"  ナレッジシート読み込みエラー（補正は続行します）: {e!r}",
             )
 
         # ── Opus 一括補正 ─────────────────────────────────────────────────
         if on_phase:
             on_phase("ai_correct")
-        _append_visible_log(visible_log_path, "Step 8: AI補正開始（Opus一括）")
+        _append_visible_log(visible_log_path, "  AIにテキストを送信しました（応答を待っています...）")
 
         system_prompt = _build_opus_correction_system_prompt(
             filename_hints=filename_hints,
             knowledge_memos=knowledge_memos,
             job_context=job_context,
         )
+
+        def _on_stream_visible(msg: str) -> None:
+            _append_visible_log(visible_log_path, msg)
+            if on_stream_progress:
+                on_stream_progress(msg)
 
         full_response, stop_reason = _stream_anthropic_text(
             api_key=api_key,
@@ -339,6 +367,8 @@ def correct_full_text(
             max_tokens=max_tokens,
             timeout_sec=timeout_sec,
             log_label="AI correction streaming",
+            on_visible_progress=_on_stream_visible if (visible_log_path or on_stream_progress) else None,
+            input_chars=len(text),
         )
         _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
 
@@ -349,7 +379,7 @@ def correct_full_text(
                 f"[WARNING] correct_full_text: fallback to original. "
                 f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
             )
-            _append_visible_log(visible_log_path, "Step 8: AI補正: max_tokens 到達 → 元テキスト返却")
+            _append_visible_log(visible_log_path, "  AI補正: トークン上限に到達したため元テキストを使用")
             return text
 
         corrected = full_response.strip()
@@ -360,7 +390,7 @@ def correct_full_text(
                 f"[WARNING] correct_full_text: fallback to original. "
                 f"reason=anthropic_text_missing input_chars={len(text)}"
             )
-            _append_visible_log(visible_log_path, "Step 8: AI補正: 空レスポンス → 元テキスト返却")
+            _append_visible_log(visible_log_path, "  AI補正: 空の応答が返されたため元テキストを使用")
             return text
 
         _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected)
@@ -370,7 +400,7 @@ def correct_full_text(
         )
         _append_visible_log(
             visible_log_path,
-            f"Step 8: AI補正完了 output={len(corrected)} stop_reason={stop_reason}",
+            f"  AIからの応答を受信しました（{len(corrected):,}文字）",
         )
         return corrected
 
@@ -381,7 +411,7 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=timeout:{e!r} timeout_sec={timeout_sec} input_chars={len(text)}"
         )
-        _append_visible_log(visible_log_path, f"Step 8: AI補正: タイムアウト → 元テキスト返却")
+        _append_visible_log(visible_log_path, "  AI補正: タイムアウトのため元テキストを使用")
         return text
     except httpx.HTTPError as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -390,7 +420,7 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=http_error:{e!r} input_chars={len(text)}"
         )
-        _append_visible_log(visible_log_path, f"Step 8: AI補正: HTTP エラー → 元テキスト返却")
+        _append_visible_log(visible_log_path, "  AI補正: 通信エラーのため元テキストを使用")
         return text
     except Exception as e:
         _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
@@ -399,7 +429,7 @@ def correct_full_text(
             f"[WARNING] correct_full_text: fallback to original. "
             f"reason=exception:{e!r} input_chars={len(text)}"
         )
-        _append_visible_log(visible_log_path, f"Step 8: AI補正: 例外 → 元テキスト返却 → {e!r}")
+        _append_visible_log(visible_log_path, f"  AI補正: エラーが発生したため元テキストを使用 → {e!r}")
         return text
 
 

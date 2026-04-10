@@ -51,43 +51,43 @@ def accumulate_knowledge(
     """
     answers = load_job_answers(job_dir)
     if not answers:
-        _append_visible_log(visible_log_path, "Step 17: ナレッジ蓄積: 回答なし → スキップ")
+        _append_visible_log(visible_log_path, "  回答データなし → ナレッジ蓄積をスキップ")
         return {"skipped": True, "reason": "no_answers", "enabled": True, "updated": False}
 
     _append_visible_log(
         visible_log_path,
-        f"Step 17: ナレッジ蓄積開始 answers={len(answers)}件",
+        f"  {len(answers)}件の回答をナレッジシートに反映中...",
     )
 
     try:
         result = merge_all_answers_into_knowledge_store(answers)
     except Exception as e:
-        _append_visible_log(visible_log_path, f"Step 17: ナレッジ蓄積: エラー → {e!r}")
+        _append_visible_log(visible_log_path, f"  ナレッジ蓄積でエラーが発生しました: {e!r}")
         return {"error": str(e), "enabled": True, "updated": False}
 
     if result.get("skipped"):
         reason = str(result.get("reason") or "").strip() or "-"
         _append_visible_log(
             visible_log_path,
-            f"Step 17: ナレッジ蓄積: スキップ reason={reason}",
+            f"  ナレッジ蓄積: スキップ（{reason}）",
         )
     elif not result.get("enabled"):
         _append_visible_log(
             visible_log_path,
-            "Step 17: ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_ID未設定）",
+            "  ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_IDが未設定のため）",
         )
     elif result.get("updated"):
         before = result.get("knowledge_count_before", 0)
         after = result.get("knowledge_count_after", 0)
         _append_visible_log(
             visible_log_path,
-            f"Step 17: ナレッジ蓄積完了 updated({before}件→{after}件)",
+            f"  ナレッジ蓄積が完了しました（{before}件 → {after}件、{after - before}件追加）",
         )
     else:
         reason = str(result.get("reason") or "").strip() or "-"
         _append_visible_log(
             visible_log_path,
-            f"Step 17: ナレッジ蓄積完了 unchanged reason={reason}",
+            f"  ナレッジ蓄積: 変更なし（{reason}）",
         )
 
     return result

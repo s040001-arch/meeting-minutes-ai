@@ -17,6 +17,7 @@ from repo_env import load_dotenv_local
 from run_job_once import (
     _load_unknown_points_file,
     _save_unknown_points_file,
+    append_log_to_drive,
     merge_unknown_points,
     record_visible_progress,
     restore_known_statuses,
@@ -117,7 +118,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 7: 機械補正開始",
+            message="再補正: 機械補正を実行中...（フィラー除去・句読点整理・相槌圧縮）",
         )
         _run_cmd(
             log_path,
@@ -146,7 +147,10 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 7: 機械補正完了 input={len(raw_text)} → output={len(mechanical_text)}",
+            message=(
+                f"再補正: 機械補正が完了しました（{len(raw_text):,}文字 → {len(mechanical_text):,}文字、"
+                f"{len(raw_text) - len(mechanical_text):,}文字削減）"
+            ),
         )
 
         current_phase = "step_8_9_ai_correct_and_unknowns"
@@ -163,7 +167,9 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 8: AI補正開始 input={len(mechanical_text)}",
+            message=(
+                f"再補正: AIによるテキスト補正を開始します（{len(mechanical_text):,}文字を処理、数分〜十数分かかります）"
+            ),
         )
 
         phase_labels = {
@@ -177,8 +183,11 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"Step 8: {label}開始",
+                message=f"  AI処理中...（{label}を実行しています）",
             )
+
+        def _on_ai_stream_progress(msg: str) -> None:
+            append_log_to_drive(args.job_id, msg)
 
         hints = extract_filename_hints(args.job_id)
         job_context = load_job_context(job_dir)
@@ -188,6 +197,7 @@ def main() -> None:
             filename_hints=hints,
             visible_log_path=visible_log_path,
             job_context=job_context if job_context else None,
+            on_stream_progress=_on_ai_stream_progress,
         )
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)
@@ -198,7 +208,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 8: AI補正完了 output={len(ai_text)} stop_reason={stop_reason}",
+            message=f"再補正: AI補正が完了しました（{len(mechanical_text):,}文字 → {len(ai_text):,}文字）",
         )
 
         # Step 9: AI不明点検出（Claude Opus）
@@ -227,7 +237,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 9: AI不明点検出完了 count={len(ai_unknown_points)}",
+            message=f"再補正: AIによる不明点の検出が完了しました（{len(ai_unknown_points)}件を発見）",
         )
         update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
 
@@ -244,7 +254,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 10: ハイブリッド不明点検出開始",
+            message="再補正: パターン照合で追加の不明点を検出しています...",
         )
         _run_cmd(
             log_path,
@@ -278,7 +288,10 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message=f"Step 10: ハイブリッド不明点検出完了 total={len(merged_unknown_points)}",
+            message=(
+                f"再補正: 不明点検出が完了しました（AI: {len(ai_unknown_points)}件 + パターン: {len(regex_unknown_points)}件"
+                f" → 統合: {len(merged_unknown_points)}件）"
+            ),
         )
         update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
 
@@ -296,7 +309,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 16: 最新回答の本文反映開始",
+                message="LINE回答の内容を逐語録に反映しています...",
             )
             _run_cmd(
                 log_path,
@@ -347,7 +360,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message="Step 17: 回答内容反映と不明点再評価完了",
+                message="回答内容の反映と不明点の再評価が完了しました",
             )
 
         current_phase = "step_12_13_question_cycle"
@@ -363,7 +376,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 12: 質問選定開始",
+            message="不明点からLINE質問を選定しています...",
         )
         qcycle_cmd = [
             py,
@@ -393,7 +406,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 13: LINE通知まで完了",
+            message="質問の選定とLINE通知が完了しました",
         )
 
         current_phase = "step_11_minutes_generation"
@@ -410,7 +423,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 11: 議事録生成開始",
+            message="議事録を再生成中...（発言録・議題・決定事項・Next Actionを構成）",
         )
         _run_cmd(
             log_path,
@@ -465,7 +478,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 11: 議事録生成とDocs更新完了",
+            message="議事録の再生成とGoogleドキュメント更新が完了しました",
         )
 
         # Step⑰: ナレッジ蓄積（議事録生成完了後）
@@ -480,19 +493,21 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 17: ナレッジ蓄積開始",
+            message="ナレッジの蓄積を確認中...（用語・人名等をスプレッドシートに反映）",
         )
         kr = accumulate_knowledge(job_dir=job_dir, visible_log_path=visible_log_path)
         if not kr.get("enabled"):
-            kr_msg = "Step 17: ナレッジ蓄積スキップ（KNOWLEDGE_SHEET_ID未設定）"
+            kr_msg = "ナレッジ蓄積: スキップ（KNOWLEDGE_SHEET_IDが未設定のため）"
         elif kr.get("error"):
-            kr_msg = f"Step 17: ナレッジ蓄積エラー: {kr.get('error')}"
+            kr_msg = f"ナレッジ蓄積でエラーが発生しました: {kr.get('error')}"
         elif kr.get("skipped"):
-            kr_msg = f"Step 17: ナレッジ蓄積スキップ reason={kr.get('reason', '-')}"
+            kr_msg = f"ナレッジ蓄積: スキップ（{kr.get('reason', '対象なし')}）"
         elif kr.get("updated"):
-            kr_msg = f"Step 17: ナレッジ蓄積完了 {kr.get('knowledge_count_before', 0)}件→{kr.get('knowledge_count_after', 0)}件"
+            before = kr.get('knowledge_count_before', 0)
+            after = kr.get('knowledge_count_after', 0)
+            kr_msg = f"ナレッジ蓄積が完了しました（{before}件 → {after}件、{after - before}件の新規知識を追加）"
         else:
-            kr_msg = f"Step 17: ナレッジ蓄積完了 unchanged reason={kr.get('reason', '-')}"
+            kr_msg = f"ナレッジ蓄積: 変更なし（{kr.get('reason', '新規知識なし')}）"
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -513,7 +528,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="Step 17: ループ再開完了",
+            message="===== 再補正サイクルが完了しました =====",
         )
         finalize_job_progress(input_root=args.input_root, job_id=args.job_id, overall_status="success")
         print(f"job_id={args.job_id}")
