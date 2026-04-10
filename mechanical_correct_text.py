@@ -9,9 +9,11 @@ import re
 # - limited, deterministic filler/newline handling for AI-main pipeline
 #
 # IMPORTANT (per user spec):
-# - REMOVE targets: えー / あー / うーん / お疲れ様です / なんか / ええ
+# - REMOVE targets: えー / あー / うーん / お疲れ様です / なんか / ええ / えっと
 # - NEVER remove: はい / ま
-FILLERS_TO_REMOVE = ["えー", "あー", "うーん", "お疲れ様です", "なんか", "ええ"]
+FILLERS_TO_REMOVE = ["えー", "あー", "うーん", "お疲れ様です", "なんか", "ええ", "えっと"]
+# 相槌語: 単体では残すが、連続出現（3回以上）は異常パターンとして圧縮・除去する
+AIZUCHI_WORDS = ["うん", "はい", "ええ", "ああ"]
 DEFAULT_CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
 PARTICLE_PAIR_REPLACEMENTS = {
     "をに": "に",
@@ -135,6 +137,42 @@ def _compress_or_delete_consecutive_fillers(text: str, filler: str) -> str:
     return pattern.sub(repl, text)
 
 
+def compress_consecutive_aizuchi(text: str) -> str:
+    """
+    相槌語（うん、はい等）の異常な連続出現を圧縮・除去する。
+    - 2回連続: 1回に圧縮
+    - 3回以上連続: 完全に除去
+    単体の出現は残す（AI補正で文脈判断させる）。
+    """
+    s = text
+    for word in AIZUCHI_WORDS:
+        esc = re.escape(word)
+        sep = r"[ \t\u3000\r\n]*[、。,.!?！？]*[ \t\u3000\r\n]*"
+        pattern = re.compile(rf"{esc}(?:{sep}{esc})+")
+
+        def _repl(m: re.Match, w: str = word) -> str:
+            count = m.group(0).count(w)
+            if count >= 3:
+                return ""
+            return w
+
+        s = pattern.sub(_repl, s)
+    return s
+
+
+def remove_sentence_start_fillers(text: str) -> str:
+    """
+    文頭・句点直後に現れる単独フィラー的な「あ」「あっ」を除去する。
+    例: 「あ、そうですね」→「そうですね」
+        「あっ、本当ですか」→「本当ですか」
+    ただし「ああ」「あの」等は対象外。
+    """
+    s = text
+    s = re.sub(r"(?m)^[ \t\u3000]*あっ?[、，]\s*", "", s)
+    s = re.sub(r"(?<=[。！？!?])\s*あっ?[、，]\s*", "", s)
+    return s
+
+
 def remove_fillers(text: str) -> str:
     """
     フィラー削除ルール（ユーザー指定、重要）:
@@ -227,6 +265,8 @@ def apply_mechanical_corrections(
     s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)
     s = remove_fillers(s)
+    s = compress_consecutive_aizuchi(s)
+    s = remove_sentence_start_fillers(s)
     s = compress_repeated_short_phrases(s)
     s = cleanup_common_noise(s)
     # Newline normalization last (user-specified output format)
