@@ -14,6 +14,7 @@ from ai_correct_text import (
 )
 from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
+from diarize_speakers import diarize_transcript
 from filename_hints import extract_filename_hints, format_hints_for_prompt
 from job_context import load_job_context
 from progress_tracker import (
@@ -960,6 +961,66 @@ def main() -> None:
             job_id=args.job_id,
             message=f"Step 4.3: AI補正完了 output={len(ai_text)} stop_reason={stop_label}",
         )
+
+        # --- Step 4.4: 話者識別・ターン分割 ---
+        log_line(log_path, f"step_4_4_diarize: starting input_chars={len(ai_text)}")
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_4_4_diarize",
+            status="running",
+            detail={"chars": len(ai_text)},
+        )
+        current_phase = "step_4_4_diarize"
+        current_step_label = "Step 4.4: 話者識別"
+        update_doc_title_from_hub(hub_meta_path, f"【話者識別中】{stem}", log_path)
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="Step 4.4: 話者識別・ターン分割開始",
+        )
+        try:
+            diarized_text = diarize_transcript(
+                ai_text,
+                filename_hints=hints,
+                job_context=job_context if job_context else None,
+            )
+            with open(ai_path, "w", encoding="utf-8") as f:
+                f.write(diarized_text)
+            ai_text = diarized_text
+            log_line(
+                log_path,
+                f"step_4_4_diarize: done output_chars={len(diarized_text)}",
+            )
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="step_4_4_diarize",
+                status="success",
+                detail={"chars": len(diarized_text)},
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 4.4: 話者識別完了 output={len(diarized_text)}",
+            )
+        except Exception as e:
+            log_line(log_path, f"step_4_4_diarize: non-fatal error: {e}")
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="step_4_4_diarize",
+                status="error",
+                detail={"error": str(e)},
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Step 4.4: 話者識別スキップ（非致命的エラー: {e}）",
+            )
 
         # Step 4.35: AI不明点検出（Claude Opus）
         # 既存の回答済み不明点を読み込んで重複質問防止に利用する
