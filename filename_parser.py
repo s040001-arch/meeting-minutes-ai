@@ -33,17 +33,25 @@ _SPLIT_RE = re.compile(r"[_\-\s\u3000・/]+")
 _DATE_TOKEN_RE = re.compile(r"^\d{4,8}$")
 
 # 「プレセナ」を意味するトークン群（社内会議の判定キー）
+# 部分マッチ（startswith）も併用するため、ここはコアキーワードのみを定義する
 _INTERNAL_MARKERS = {
     "プレセナ",
     "ぷれせな",
     "precena",
-    "プレセナストラテジックパートナーズ",
     "internal",
     "社内",
     "内部",
     "弊社",
     "自社",
 }
+
+# 「プレセナ社」「プレセナ・ストラテジック・パートナーズ」「Precena Inc」のように
+# プレセナを含む派生形もすべて内部判定の対象にする（前方一致）
+_INTERNAL_PREFIXES = (
+    "プレセナ",
+    "ぷれせな",
+    "precena",
+)
 
 _GENERIC_TOKENS = {
     "打合せ",
@@ -85,8 +93,64 @@ def _normalize_date(token: str) -> str:
     return s
 
 
+def _try_consume_date_tokens(tokens: list[str]) -> tuple[dict[str, str | None], int]:
+    """先頭の数値トークン群から日付を構築し、消費したトークン数とともに返す。
+
+    対応パターン:
+    - YYYY_MMDD       (2026_0512)  → 2026-05-12, consumed=2
+    - YYYYMMDD        (20260512)   → 2026-05-12, consumed=1
+    - YYMMDD          (260512)     → 2026-05-12, consumed=1
+    - MMDD            (0512)       → --05-12,   consumed=1
+    - 日付トークンなし                          → consumed=0
+    """
+    if not tokens:
+        return {"date_raw": None, "date": None}, 0
+
+    first = tokens[0].strip()
+    if not _is_date_token(first):
+        return {"date_raw": None, "date": None}, 0
+
+    # YYYY_MMDD パターン: 4桁年 + 4桁月日
+    if len(first) == 4 and first.isdigit() and len(tokens) >= 2:
+        second = tokens[1].strip()
+        if (
+            _is_date_token(second)
+            and len(second) == 4
+            and second.isdigit()
+            and 1 <= int(second[0:2]) <= 12
+            and 1 <= int(second[2:4]) <= 31
+            and 2000 <= int(first) <= 2099  # 年の妥当性
+        ):
+            combined = f"{first}{second}"
+            return {
+                "date_raw": combined,
+                "date": _normalize_date(combined),
+            }, 2
+
+    # 単一トークンの日付
+    return {
+        "date_raw": first,
+        "date": _normalize_date(first),
+    }, 1
+
+
 def _is_internal_marker(token: str) -> bool:
-    return token.strip().casefold() in {m.casefold() for m in _INTERNAL_MARKERS}
+    """社内会議を意味するトークンかを判定する。
+
+    完全一致だけでなく、「プレセナ社」「プレセナ・ストラテジック・パートナーズ」
+    「Precena Inc」のような派生形（前方一致）も内部扱いにする。
+    """
+    s = token.strip().casefold()
+    if not s:
+        return False
+    # 1) 完全一致
+    if s in {m.casefold() for m in _INTERNAL_MARKERS}:
+        return True
+    # 2) 前方一致（"プレセナ社", "プレセナ・ストラテジック・パートナーズ", "Precena Inc" 等）
+    for prefix in _INTERNAL_PREFIXES:
+        if s.startswith(prefix.casefold()):
+            return True
+    return False
 
 
 def _split_attendees_from_topic(
@@ -160,14 +224,13 @@ def parse_filename(
     if not tokens:
         return result
 
-    # 1番目: 日付候補
-    idx = 0
-    if _is_date_token(tokens[idx]):
-        result["date_raw"] = tokens[idx]
-        result["date"] = _normalize_date(tokens[idx])
-        idx += 1
+    # 1) 日付候補（YYYY_MMDD / YYYYMMDD / YYMMDD / MMDD いずれも対応）
+    date_info, consumed = _try_consume_date_tokens(tokens)
+    result["date_raw"] = date_info["date_raw"]
+    result["date"] = date_info["date"]
+    idx = consumed
 
-    # 2番目: 顧客 or プレセナ
+    # 2) 顧客名 or プレセナ判定
     if idx < len(tokens):
         second = tokens[idx]
         if _is_internal_marker(second):
@@ -178,7 +241,7 @@ def parse_filename(
             result["customer"] = second
         idx += 1
 
-    # 3番目以降: 会議内容＋参加者
+    # 3) 会議内容＋参加者
     remaining = tokens[idx:]
     topics, attendees = _split_attendees_from_topic(remaining, known_people)
     result["topics"] = topics
