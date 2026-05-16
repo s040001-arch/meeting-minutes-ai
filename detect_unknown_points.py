@@ -23,12 +23,16 @@ from ai_correct_text import (
 )
 from filename_hints import format_hints_for_prompt
 from job_context import format_context_for_prompt
-from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
+from knowledge_sheet_store import load_knowledge_memos
 
 logger = logging.getLogger(__name__)
 
 OPUS_DETECTION_MODEL = "claude-opus-4-20250514"
-_DETECTION_MAX_TEXT_CHARS = 30000
+# 旧 30,000 字制限を撤廃。Claude Opus のコンテキスト窓 200K に収まる範囲で扱う。
+# 安全側で 100,000 字までを単一プロンプトで処理し、それ以上は分割検出する。
+_DETECTION_MAX_TEXT_CHARS = 100000
+_DETECTION_CHUNK_CHARS = 80000  # 分割時の1チャンク文字数（オーバーラップ含めず）
+_DETECTION_CHUNK_OVERLAP = 1500  # チャンク間の重複文字数（境界の不明点を取り逃さない）
 
 
 def _resolve_detection_api_key() -> str:
@@ -36,6 +40,26 @@ def _resolve_detection_api_key() -> str:
     if key:
         return key
     raise RuntimeError("ANTHROPIC_API_KEY is not set for AI unknown-point detection.")
+
+
+def _format_knowledge_as_exclusion(memos: list[str] | None) -> str:
+    """ナレッジを「既知情報＝質問しないリスト」として明示する。
+
+    `format_knowledge_for_prompt` は補正用の参考情報文言なので、
+    検出時は「これらは既知ゆえ確認質問するな」を強く伝える別フォーマットを使う。
+    """
+    if not memos:
+        return ""
+    lines = "\n".join(f"- {m}" for m in memos if m and m.strip())
+    if not lines:
+        return ""
+    return (
+        "\n\n【既知情報（これらに関する質問を生成してはならない）】\n"
+        "以下はスプレッドシートに既に登録されている用語・人名・組織・社内呼称等です。\n"
+        "これらに該当する内容は、たとえ会議テキスト上で表記揺れがあっても、\n"
+        "『不明点』として挙げないでください（後段の補正処理で自動的に正しい表記へ修正されます）。\n"
+        f"{lines}"
+    )
 
 
 def _build_detection_system_prompt(
@@ -53,10 +77,21 @@ def _build_detection_system_prompt(
         "2. 社名・部署名・略称の正式名称が不明\n"
         "3. 決定事項・アクションアイテムの実施主体（誰がやるか）が不明確\n"
         "4. 発言の文脈から意味が複数解釈できる箇所\n"
-        "\n【除外するもの】\n"
+        "5. 金額・件数・期限などの数値で誤認識・誤聴き取りの疑いがあるもの\n"
+        "\n【除外するもの（重要・厳守）】\n"
         "- 言い淀み・フィラー（「えっと」「あの」等）\n"
         "- 文脈から一意に解釈できる箇所\n"
         "- 同一論点の重複（1論点につき1件のみ）\n"
+        "- 後述の【既知情報】に登録済みの用語・人名・組織（後述ナレッジで自動補正される）\n"
+        "- 後述の【確認済み情報】で過去に同等の質問が解消済みのもの\n"
+        "\n【優先度の付け方】\n"
+        "- 議事録の主要論点・合意事項・Next Action に関連するものを優先\n"
+        "- 単なる雑談中の固有名詞は優先度を下げる\n"
+        "- 確認したら本文の何箇所も連動して確定する『要』の論点を最優先\n"
+        "\n【hypothesis（推測の正解）について】\n"
+        "- 文脈から「これではないか」と高い確度で推測できる場合は必ず hypothesis に書く\n"
+        "- hypothesis があれば後段で『○○で合っていますか？』のYes/No形式に変換される\n"
+        "- 自由記述質問は回答コストが高いため、可能な限り hypothesis を埋めること\n"
         "\n【出力形式】\n"
         "JSON配列のみを出力してください。説明文・前置き・マークダウンのコードブロックは不要です。\n"
         "各要素のスキーマ:\n"
@@ -69,22 +104,53 @@ def _build_detection_system_prompt(
 
     if answered_items:
         confirmed_lines = []
-        for item in answered_items[:20]:
+        for item in answered_items[:30]:
             q_text = str(item.get("text", "")).strip()[:120]
             answer = str(item.get("answer", "")).strip()[:120]
             if q_text and answer:
                 confirmed_lines.append(f"- 「{q_text}」→ 回答: {answer}")
         if confirmed_lines:
             prompt += (
-                "\n\n【確認済み情報（重複質問禁止）】\n"
+                "\n\n【確認済み情報（重複質問禁止・厳守）】\n"
                 "以下は過去のQ&Aで既に確認済みの内容です。同じ内容を再度不明点として挙げないでください。\n"
                 + "\n".join(confirmed_lines)
             )
 
     prompt += format_hints_for_prompt(filename_hints or [])
     prompt += format_context_for_prompt(job_context or {})
-    prompt += format_knowledge_for_prompt(knowledge_memos or [])
+    prompt += _format_knowledge_as_exclusion(knowledge_memos or [])
     return prompt
+
+
+def _split_text_for_detection(text: str) -> list[str]:
+    """長文を検出用に分割する。文字単位で重複付きチャンクに分ける。"""
+    if len(text) <= _DETECTION_MAX_TEXT_CHARS:
+        return [text]
+    chunks: list[str] = []
+    pos = 0
+    while pos < len(text):
+        end = min(pos + _DETECTION_CHUNK_CHARS, len(text))
+        chunk = text[pos:end]
+        chunks.append(chunk)
+        if end >= len(text):
+            break
+        pos = end - _DETECTION_CHUNK_OVERLAP
+        if pos < 0:
+            pos = 0
+    return chunks
+
+
+def _dedupe_unknown_items(items: list[dict]) -> list[dict]:
+    """text 完全一致で重複削除。先勝ち。"""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for item in items:
+        key = str(item.get("text", "")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def detect_unknown_points(
@@ -137,10 +203,17 @@ def detect_unknown_points(
     except Exception as e:
         _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
 
-    _append_visible_log(
-        visible_log_path,
-        f"  AIに不明点の検出を依頼中...（{len(text):,}文字を分析）",
-    )
+    chunks = _split_text_for_detection(text)
+    if len(chunks) > 1:
+        _append_visible_log(
+            visible_log_path,
+            f"  AIに不明点の検出を依頼中...（{len(text):,}文字を{len(chunks)}分割で分析）",
+        )
+    else:
+        _append_visible_log(
+            visible_log_path,
+            f"  AIに不明点の検出を依頼中...（{len(text):,}文字を分析）",
+        )
 
     system_prompt = _build_detection_system_prompt(
         filename_hints=filename_hints,
@@ -149,83 +222,90 @@ def detect_unknown_points(
         answered_items=answered_items,
     )
 
-    user_text = text[:_DETECTION_MAX_TEXT_CHARS]
     max_tokens = 4096
+    aggregated: list[dict] = []
 
-    try:
-        raw_response, stop_reason = _stream_anthropic_text(
-            api_key=api_key,
-            model=resolved_model,
-            system_prompt=system_prompt,
-            user_message=user_text,
-            max_tokens=max_tokens,
-            timeout_sec=timeout_sec,
-            log_label="detect_unknown_points",
-        )
-    except Exception as e:
-        _append_visible_log(
-            visible_log_path,
-            f"  AI不明点検出: APIエラーが発生しました（0件として続行）",
-        )
-        return []
-
-    raw_text = raw_response.strip()
-
-    # マークダウンのコードブロックを除去
-    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw_text, re.DOTALL)
-    if m:
-        raw_text = m.group(1)
-
-    try:
-        result = json.loads(raw_text)
-    except json.JSONDecodeError:
-        m = re.search(r"\[.*\]", raw_text, re.DOTALL)
-        if m:
-            try:
-                result = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                _append_visible_log(
-                    visible_log_path,
-                    "  AI不明点検出: 応答の解析に失敗しました（0件として続行）",
-                )
-                return []
-        else:
+    for chunk_idx, chunk_text in enumerate(chunks):
+        if len(chunks) > 1:
             _append_visible_log(
                 visible_log_path,
-                "  AI不明点検出: 応答にデータが含まれていませんでした（0件として続行）",
+                f"  チャンク{chunk_idx + 1}/{len(chunks)}を分析中...（{len(chunk_text):,}文字）",
             )
-            return []
-
-    if not isinstance(result, list):
-        _append_visible_log(
-            visible_log_path,
-            "  AI不明点検出: 想定外の応答形式（0件として続行）",
-        )
-        return []
-
-    normalized: list[dict] = []
-    for item in result:
-        if not isinstance(item, dict):
+        try:
+            raw_response, _stop_reason = _stream_anthropic_text(
+                api_key=api_key,
+                model=resolved_model,
+                system_prompt=system_prompt,
+                user_message=chunk_text,
+                max_tokens=max_tokens,
+                timeout_sec=timeout_sec,
+                log_label=f"detect_unknown_points_chunk_{chunk_idx + 1}",
+            )
+        except Exception as e:
+            _append_visible_log(
+                visible_log_path,
+                f"  AI不明点検出: APIエラー（チャンク{chunk_idx + 1}スキップ、続行）: {e!r}",
+            )
             continue
-        text_val = str(item.get("text", "")).strip()
-        type_val = str(item.get("type", "固有名詞")).strip()
-        reason_val = str(item.get("reason", "")).strip()
-        if not text_val or not reason_val:
-            continue
-        entry: dict = {
-            "type": type_val,
-            "text": text_val,
-            "reason": reason_val,
-            "source": "claude_step9",
-        }
-        hypothesis = str(item.get("hypothesis", "")).strip()
-        if hypothesis:
-            entry["hypothesis"] = hypothesis
-        normalized.append(entry)
 
-    normalized = normalized[:10]
+        raw_text = raw_response.strip()
+
+        # マークダウンのコードブロックを除去
+        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw_text, re.DOTALL)
+        if m:
+            raw_text = m.group(1)
+
+        try:
+            result = json.loads(raw_text)
+        except json.JSONDecodeError:
+            m = re.search(r"\[.*\]", raw_text, re.DOTALL)
+            if m:
+                try:
+                    result = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    _append_visible_log(
+                        visible_log_path,
+                        f"  AI不明点検出: チャンク{chunk_idx + 1}の応答解析に失敗（スキップ）",
+                    )
+                    continue
+            else:
+                _append_visible_log(
+                    visible_log_path,
+                    f"  AI不明点検出: チャンク{chunk_idx + 1}に有効データなし（スキップ）",
+                )
+                continue
+
+        if not isinstance(result, list):
+            _append_visible_log(
+                visible_log_path,
+                f"  AI不明点検出: チャンク{chunk_idx + 1}の応答形式が想定外（スキップ）",
+            )
+            continue
+
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            text_val = str(item.get("text", "")).strip()
+            type_val = str(item.get("type", "固有名詞")).strip()
+            reason_val = str(item.get("reason", "")).strip()
+            if not text_val or not reason_val:
+                continue
+            entry: dict = {
+                "type": type_val,
+                "text": text_val,
+                "reason": reason_val,
+                "source": "claude_step9",
+            }
+            hypothesis = str(item.get("hypothesis", "")).strip()
+            if hypothesis:
+                entry["hypothesis"] = hypothesis
+            aggregated.append(entry)
+
+    deduped = _dedupe_unknown_items(aggregated)
+    # 全体上限を 12 件に拡張（hypothesis 付き Yes/No 質問が増える前提で余裕を持たせる）
+    deduped = deduped[:12]
     _append_visible_log(
         visible_log_path,
-        f"  AI不明点検出が完了しました（{len(normalized)}件を検出）",
+        f"  AI不明点検出が完了しました（{len(deduped)}件を検出）",
     )
-    return normalized
+    return deduped

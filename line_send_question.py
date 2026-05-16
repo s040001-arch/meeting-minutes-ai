@@ -30,22 +30,29 @@ def build_line_message(result: dict) -> str:
     doc_url = str(result.get("doc_url", "")).strip()
     if status == "generated":
         question_text = str(result.get("question_text", "")).strip()
+        question_format = str(result.get("question_format", "")).strip().lower()
         selected = result.get("selected_unknown")
         if not isinstance(selected, dict):
             selected = {}
-        selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=140)
+        selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=180)
         why = ""
         audit = result.get("selection_audit")
         if isinstance(audit, dict):
             why = _trim_preview(str(audit.get("why_this_question", "")).strip(), limit=100)
 
-        parts = ["[確認したいこと]"]
+        # Yes/No 質問はヘッダーで一目でわかるようにする
+        if question_format == "yes_no":
+            header = "[確認したいこと（はい/いいえで回答可）]"
+        else:
+            header = "[確認したいこと]"
+
+        parts = [header]
         if question_text:
             parts.append(question_text)
-        if why:
-            parts.append(f"背景: {why}")
         if selected_text:
             parts.append(f"該当箇所: 「{selected_text}」")
+        if why:
+            parts.append(f"背景: {why}")
         if doc_url:
             parts.append(f"議事録: {doc_url}")
         return "\n".join(parts)

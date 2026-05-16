@@ -15,6 +15,7 @@ logs/
 
 # 秘密情報
 credentials.json
+credentials_service_account.json
 token.json
 token_drive.json
 
@@ -38,3 +39,12 @@ __pycache__/
 # 一時スクリプト
 tmp_*.py
 _export_*.txt
+
+# ナレッジ抽出の中間生成物
+data/consolidated_knowledge.json
+data/extracted_knowledge.json
+data/extract_knowledge_log.txt
+
+# ローカル個人作業ファイル
+新しいチャットに引き継ぐ際の指示書.docx
+*.docx

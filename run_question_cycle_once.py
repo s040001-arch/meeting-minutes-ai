@@ -8,6 +8,7 @@ import requests
 
 from ai_correct_text import resolve_openai_api_key
 from generate_one_question import TYPE_PRIORITY, load_unknown_points
+from knowledge_sheet_store import load_knowledge_memos
 from line_send_question import build_line_message, push_line_message
 from question_value_selection import (
     deduplicate_unknown_points_by_type_text,
@@ -58,17 +59,66 @@ RISKY_TYPE_PRIORITY = {
 }
 
 
-def _build_unknown_points_compact(unknown_points: list[dict], limit: int = 25) -> list[dict]:
+def _extract_context_window(full_text: str, target_text: str, window: int = 200) -> str:
+    """target_text の出現位置の前後 window 文字を切り出す。
+
+    複数候補がある場合は最初の出現位置を採用。
+    """
+    if not full_text or not target_text:
+        return ""
+    needle = target_text.strip()[:50]  # 長すぎると find に失敗するので先頭50字で当たる
+    if not needle:
+        return ""
+    pos = full_text.find(needle)
+    if pos < 0:
+        return ""
+    start = max(0, pos - window)
+    end = min(len(full_text), pos + len(needle) + window)
+    excerpt = full_text[start:end].strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(full_text) else ""
+    return f"{prefix}{excerpt}{suffix}"
+
+
+def _build_unknown_points_compact(
+    unknown_points: list[dict],
+    full_text: str = "",
+    limit: int = 25,
+) -> list[dict]:
+    """検出結果を AI に渡す形に整形。前後文脈と hypothesis を必ず含める。"""
     out: list[dict] = []
     for item in unknown_points[:limit]:
-        out.append(
-            {
-                "type": str(item.get("type", "")).strip(),
-                "text": str(item.get("text", "")).strip()[:220],
-                "reason": str(item.get("reason", "")).strip()[:220],
-            }
-        )
+        text_raw = str(item.get("text", "")).strip()
+        entry = {
+            "type": str(item.get("type", "")).strip(),
+            "text": text_raw[:220],
+            "reason": str(item.get("reason", "")).strip()[:220],
+        }
+        hypothesis = str(item.get("hypothesis", "")).strip()
+        if hypothesis:
+            entry["hypothesis"] = hypothesis[:120]
+        # 前後200字の文脈ウィンドウ
+        ctx = _extract_context_window(full_text, text_raw, window=200)
+        if ctx:
+            entry["context_window"] = ctx[:600]
+        out.append(entry)
     return out
+
+
+def _format_knowledge_for_question_prompt(memos: list[str]) -> str:
+    """質問生成プロンプト用のナレッジ整形。「これに該当するなら質問するな」を明示。"""
+    if not memos:
+        return ""
+    lines = "\n".join(f"- {m}" for m in memos if m and m.strip())
+    if not lines:
+        return ""
+    return (
+        "\n\n【既知情報（質問しない対象・厳守）】\n"
+        "以下はスプレッドシートに登録済みの用語・人名・組織です。\n"
+        "これらに該当する不明点が候補に含まれていても、ユーザーへの質問対象から除外してください。\n"
+        "（後段の補正で自動的に正しい表記へ修正されます）\n"
+        f"{lines}"
+    )
 
 
 def _is_answered_unknown(item: dict) -> bool:
@@ -118,51 +168,71 @@ def _generate_one_question_by_ai(
     model: str,
     api_key: str,
     timeout_sec: int = 180,
+    knowledge_memos: list[str] | None = None,
 ) -> dict:
     """
     AI主導で「全体文脈に最も効く1問」を生成する。
+    
+    強化点:
+    - 各 unknown_point に前後200字の context_window を含めて渡す
+    - hypothesis があれば「○○で合っていますか？はい/いいえ で教えてください」形式に変換
+    - ナレッジ既知の項目は質問対象から除外させる
+    
     戻り値は dict:
       - question_status: generated / none
       - question_text
+      - question_format: yes_no | free_text  ← 新規
       - selected_unknown
       - selection_audit
       - message
     """
     url = "https://api.openai.com/v1/responses"
-    compact_unknowns = _build_unknown_points_compact(unknown_points)
+    compact_unknowns = _build_unknown_points_compact(unknown_points, full_text=full_text)
     transcript = (full_text or "").strip()
     if len(transcript) > 12000:
         transcript = transcript[:12000]
 
     schema_hint = {
         "question_status": "generated|none",
-        "question_text": "string",
+        "question_text": "string（質問本文）",
+        "question_format": "yes_no | free_text（hypothesisがあればyes_no優先）",
         "selected_unknown": {"type": "string", "text": "string", "reason": "string"},
         "selection_audit": {
             "selection_mode": "ai_global_context",
-            "why_this_question": "string",
-            "resolved_if_answered": "string",
+            "why_this_question": "string（なぜこの1問か。50字以内）",
+            "resolved_if_answered": "string（回答で何が確定するか）",
             "confidence": "low|medium|high",
         },
         "message": "string",
     }
     user_payload = {
-        "transcript": transcript,
+        "transcript_excerpt": transcript,
         "unknown_points": compact_unknowns,
         "output_schema": schema_hint,
     }
+    knowledge_section = _format_knowledge_for_question_prompt(knowledge_memos or [])
     system_prompt = (
         "あなたは議事録品質管理アシスタントです。"
-        "目的は、全文の文脈が最も繋がるように、質問は常に1問だけ選ぶことです。"
-        "細かな表記ゆれより、全体の解釈が分岐する論点を優先してください。"
-        "質問の結果で本文全体がどこまで確定するかを重視してください。"
-        "question_text は LINE 送信用の自然な日本語にしてください。"
-        "question_text は1つの確認事項だけを短く聞いてください。"
-        "question_text は原則1〜2文、できれば120文字以内にしてください。"
-        "question_text に job_id や question_id のような内部IDを書かないでください。"
-        "selected_unknown.text は引用用の候補であり、question_text に長文引用をそのまま入れないでください。"
-        "不確実性が低く、そのまま提出可能と判断できる場合のみ question_status=none を返してください。"
-        "出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
+        "目的は、全文の文脈が最も繋がるように、ユーザーへの質問を1問だけ選ぶことです。"
+        "\n\n【1問の選び方】"
+        "\n- 細かな表記ゆれより、全体の解釈が分岐する論点を優先する"
+        "\n- 質問の結果で本文全体がどこまで確定するかを重視する"
+        "\n- 候補の context_window（前後文脈）を必ず読んで判断する"
+        "\n- ユーザー側の回答コストが極端に高いものは避ける"
+        "\n\n【質問文の形式】"
+        "\n- hypothesis（推測の正解）が候補に存在する場合は、原則として『○○で合っていますか？"
+        "「はい」または「いいえ」で教えてください。』形式の Yes/No 質問にし、question_format='yes_no' を返す"
+        "\n- hypothesis が無い、または推測が複数候補ある場合は自由記述質問にし、question_format='free_text' を返す"
+        "\n- いずれの場合も、ユーザーが該当箇所を思い出しやすいよう、context_window から要点を1〜2文で含める"
+        "\n- question_text は LINE 送信用の自然な日本語、原則120字以内（Yes/No質問は150字までOK）"
+        "\n- question_text に job_id や question_id のような内部IDを書かない"
+        "\n- selected_unknown.text の長文引用をそのまま貼らない"
+        "\n\n【質問しない判断（question_status=none）】"
+        "\n- 全候補が【既知情報】に該当する場合"
+        "\n- 全候補が文脈から一意に解釈可能な場合"
+        "\n- 議事録としてそのまま提出可能と判断できる場合"
+        "\n\n出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
+        + knowledge_section
     )
     payload = {
         "model": model,
@@ -433,14 +503,26 @@ def main() -> None:
         print(f"question_generation_openai_api_key_found={bool(api_key)} source={key_source}")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set for AI question generation.")
+        # ナレッジを質問生成に渡す（既知の項目を質問対象から除外させる）
+        try:
+            knowledge_memos = load_knowledge_memos()
+            print(f"question_generation_knowledge_memos={len(knowledge_memos)}")
+        except Exception as e:
+            knowledge_memos = []
+            print(f"question_generation_knowledge_load_failed={e!r}")
+
         try:
             ai_result = _generate_one_question_by_ai(
                 full_text=full_text,
                 unknown_points=unknown_points,
                 model=args.question_model,
                 api_key=api_key,
+                knowledge_memos=knowledge_memos,
             )
             question_status = str(ai_result.get("question_status", "generated")).strip() or "generated"
+            question_format = str(ai_result.get("question_format", "")).strip().lower()
+            if question_format not in {"yes_no", "free_text"}:
+                question_format = "free_text"
             selected_unknown = ai_result.get("selected_unknown")
             if not isinstance(selected_unknown, dict):
                 selected_unknown = None
@@ -449,6 +531,7 @@ def main() -> None:
             if not isinstance(selection_audit, dict):
                 selection_audit = {"selection_mode": "ai_global_context"}
             selection_audit["selection_mode"] = "ai_global_context"
+            selection_audit["question_format"] = question_format
             message = str(ai_result.get("message", "")).strip()
 
             if question_status == "none" or not question_text:
@@ -467,6 +550,7 @@ def main() -> None:
                     "job_id": args.job_id,
                     "question_id": question_id,
                     "question_status": "generated",
+                    "question_format": question_format,
                     "message": "",
                     "selected_unknown": selected_unknown,
                     "doc_url": doc_url,

@@ -17,6 +17,7 @@ from detect_unknown_points import detect_unknown_points
 from diarize_speakers import diarize_transcript
 from filename_hints import extract_filename_hints, format_hints_for_prompt
 from job_context import load_job_context
+from knowledge_sheet_store import load_knowledge_memos
 from progress_tracker import (
     ensure_artifact_flags,
     finalize_job_progress,
@@ -24,6 +25,7 @@ from progress_tracker import (
     update_job_progress,
 )
 from repo_env import load_dotenv_local
+from whisper_initial_prompt import build_initial_prompt
 
 TEXT_EXTENSIONS = {".txt"}
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav"}
@@ -558,9 +560,23 @@ def main() -> None:
     )
     parser.add_argument("--chunk-seconds", type=int, default=30, help="チャンク秒数（デフォルト: 30）")
     parser.add_argument("--max-chunks", type=int, default=None, help="最大チャンク数（テスト用）")
-    parser.add_argument("--whisper-model", default="small", help="Whisperモデル（デフォルト: small）")
+    parser.add_argument(
+        "--whisper-model",
+        default=None,
+        help=(
+            "Whisperモデル。未指定時は環境変数 WHISPER_MODEL、"
+            "それも無ければ large-v3-turbo（精度重視・推奨）"
+        ),
+    )
     parser.add_argument("--whisper-language", default="ja", help="Whisper言語（デフォルト: ja）")
-    parser.add_argument("--compute-type", default="int8", help="Whisper compute type（デフォルト: int8）")
+    parser.add_argument(
+        "--compute-type",
+        default=None,
+        help=(
+            "Whisper compute type。未指定時は環境変数 WHISPER_COMPUTE_TYPE、"
+            "それも無ければ int8"
+        ),
+    )
     parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAIモデル（デフォルト: gpt-4.1）")
     parser.add_argument(
         "--min-ai-length-ratio",
@@ -756,6 +772,38 @@ def main() -> None:
                 message=f"音声の分割が完了しました（{len(chunk_files)}個のチャンクに分割）",
             )
 
+            # ── initial_prompt（語彙バイアス）の構築 ───────────────────────
+            # ナレッジシートとファイル名/コンテキストから固有名詞を抜き、
+            # Whisper の initial_prompt として渡せる短い自然文を作る。
+            try:
+                knowledge_for_prompt = load_knowledge_memos()
+            except Exception as e:
+                log_line(log_path, f"initial_prompt: knowledge load failed: {e!r}")
+                knowledge_for_prompt = []
+            initial_prompt_text = build_initial_prompt(
+                knowledge_memos=knowledge_for_prompt,
+                filename_hints=hints,
+                job_context=job_context if job_context else None,
+            )
+            initial_prompt_path = os.path.join(job_dir, "initial_prompt.txt")
+            with open(initial_prompt_path, "w", encoding="utf-8") as f:
+                f.write(initial_prompt_text)
+            log_line(
+                log_path,
+                f"initial_prompt: knowledge={len(knowledge_for_prompt)} "
+                f"prompt_chars={len(initial_prompt_text)} path={initial_prompt_path}",
+            )
+            if initial_prompt_text:
+                record_visible_progress(
+                    log_path=log_path,
+                    visible_log_path=visible_log_path,
+                    job_id=args.job_id,
+                    message=(
+                        f"音声認識の語彙バイアスを設定しました（{len(initial_prompt_text)}文字"
+                        f"、ナレッジ{len(knowledge_for_prompt)}件参照）"
+                    ),
+                )
+
             current_phase = "step_3_transcribe"
             current_step_label = "Step 3: 文字起こし"
             record_visible_progress(
@@ -768,32 +816,33 @@ def main() -> None:
                 chunk_id = chunk_path.stem
                 start_sec = i * args.chunk_seconds
                 end_sec = (i + 1) * args.chunk_seconds
+                transcribe_args = [
+                    py,
+                    os.path.join(repo, "transcribe_one_chunk.py"),
+                    "--input",
+                    str(chunk_path),
+                    "--language",
+                    args.whisper_language,
+                    "--job-id",
+                    args.job_id,
+                    "--chunk-id",
+                    chunk_id,
+                    "--chunk-index",
+                    str(i),
+                    "--start-sec",
+                    str(start_sec),
+                    "--end-sec",
+                    str(end_sec),
+                    "--output-root",
+                    args.input_root,
+                ]
+                if args.whisper_model:
+                    transcribe_args.extend(["--model", args.whisper_model])
+                if args.compute_type:
+                    transcribe_args.extend(["--compute-type", args.compute_type])
                 run_cmd(
                     log_path,
-                    [
-                        py,
-                        os.path.join(repo, "transcribe_one_chunk.py"),
-                        "--input",
-                        str(chunk_path),
-                        "--model",
-                        args.whisper_model,
-                        "--language",
-                        args.whisper_language,
-                        "--compute-type",
-                        args.compute_type,
-                        "--job-id",
-                        args.job_id,
-                        "--chunk-id",
-                        chunk_id,
-                        "--chunk-index",
-                        str(i),
-                        "--start-sec",
-                        str(start_sec),
-                        "--end-sec",
-                        str(end_sec),
-                        "--output-root",
-                        args.input_root,
-                    ],
+                    transcribe_args,
                     f"step_3_transcribe_{chunk_id}",
                 )
             record_visible_progress(
