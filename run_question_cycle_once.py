@@ -19,6 +19,107 @@ from question_value_selection import (
 from repo_env import load_dotenv_local
 
 LINE_PENDING_CONTEXT_PATH = os.path.join("data", "line_pending_context.json")
+ASKED_QUESTIONS_FILENAME = "asked_questions.json"
+
+
+def _asked_questions_path(job_dir: str) -> str:
+    return os.path.join(job_dir, ASKED_QUESTIONS_FILENAME)
+
+
+def _load_asked_questions(job_dir: str) -> list[dict]:
+    """このジョブで既に LINE 送信した質問の履歴を読み込む。
+
+    重複質問を抑制するため、AI への入力プロンプトと
+    asked マーク判定の両方で参照する。
+    """
+    path = _asked_questions_path(job_dir)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _append_asked_question(
+    job_dir: str,
+    *,
+    question_id: str,
+    question_text: str,
+    question_format: str,
+    selected_unknown: dict | None,
+) -> None:
+    """質問送信時に履歴を追記する。"""
+    history = _load_asked_questions(job_dir)
+    history.append({
+        "question_id": question_id,
+        "question_text": question_text,
+        "question_format": question_format,
+        "selected_text": str((selected_unknown or {}).get("text") or "").strip(),
+        "selected_type": str((selected_unknown or {}).get("type") or "").strip(),
+        "selected_hypothesis": str((selected_unknown or {}).get("hypothesis") or "").strip(),
+        "asked_at": datetime.now(timezone.utc).isoformat(),
+    })
+    path = _asked_questions_path(job_dir)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _normalize_text_for_dedup(s: str) -> str:
+    """重複判定用にテキストを正規化（空白・句読点・記号を圧縮）。"""
+    if not s:
+        return ""
+    norm = s.strip().lower()
+    for ch in [" ", "\t", "\u3000", "\n", "\r", "「", "」", "『", "』",
+               "、", "。", ",", ".", "？", "?", "！", "!", "・", "-", "ー"]:
+        norm = norm.replace(ch, "")
+    return norm
+
+
+def _is_similar_text(a: str, b: str, *, min_overlap: float = 0.7) -> bool:
+    """正規化後のテキスト類似判定。
+
+    - 短文（< 10文字）は完全一致と片方包含のみで判定（誤マッチ防止）
+    - 中長文（>= 10文字）は完全一致 / 部分包含 / 2-gram の Jaccard 類似度で判定
+    - 単独文字のオーバーラップ率は使わない（「さん」共通で誤マッチするため）
+    """
+    na = _normalize_text_for_dedup(a)
+    nb = _normalize_text_for_dedup(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+
+    # 短文同士は厳密判定のみ
+    if len(short) < 10:
+        # 短い方が完全に長い方に含まれる場合のみ類似扱い
+        return len(short) >= 4 and short in long_
+
+    # 中長文は部分包含なら類似
+    if short in long_:
+        return True
+
+    # 2-gram の Jaccard 類似度
+    def bigrams(s: str) -> set[str]:
+        return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
+
+    ga = bigrams(na)
+    gb = bigrams(nb)
+    if not ga or not gb:
+        return False
+    inter = len(ga & gb)
+    union = len(ga | gb)
+    return union > 0 and (inter / union) >= min_overlap
 
 
 def resolve_context_text_path(job_id: str, input_root: str, explicit_path: str | None) -> str | None:
@@ -121,6 +222,40 @@ def _format_knowledge_for_question_prompt(memos: list[str]) -> str:
     )
 
 
+def _format_asked_questions_for_prompt(asked: list[dict]) -> str:
+    """過去質問履歴を AI への入力プロンプト向けに整形。
+
+    AI に「これと似た質問は二度と作るな」と強く指示するための材料。
+    text と question_text の両方を渡し、論点重複を避けさせる。
+    """
+    if not asked:
+        return ""
+    lines: list[str] = []
+    for q in asked[-15:]:  # 直近15件まで
+        qt = str(q.get("question_text") or "").strip()
+        st = str(q.get("selected_text") or "").strip()
+        hyp = str(q.get("selected_hypothesis") or "").strip()
+        if not qt and not st:
+            continue
+        bits: list[str] = []
+        if qt:
+            bits.append(f"質問:『{qt[:120]}』")
+        if hyp:
+            bits.append(f"仮説:『{hyp[:80]}』")
+        if st:
+            bits.append(f"該当:『{st[:80]}』")
+        lines.append("- " + " / ".join(bits))
+    if not lines:
+        return ""
+    return (
+        "\n\n【既に同じジョブで送信済みの質問（重複禁止・厳守）】\n"
+        "以下は今のジョブで既にユーザーへ送信した質問です。"
+        "論点・該当箇所・仮説のいずれかが類似する質問を新たに作ってはいけません。"
+        "もし候補がすべて既出と類似する場合は question_status='none' を返してください。\n"
+        + "\n".join(lines)
+    )
+
+
 def _is_answered_unknown(item: dict) -> bool:
     status = str(item.get("status", "")).strip().lower()
     if status in {"answered", "done", "closed", "resolved"}:
@@ -169,6 +304,7 @@ def _generate_one_question_by_ai(
     api_key: str,
     timeout_sec: int = 180,
     knowledge_memos: list[str] | None = None,
+    asked_questions: list[dict] | None = None,
 ) -> dict:
     """
     AI主導で「全体文脈に最も効く1問」を生成する。
@@ -211,6 +347,7 @@ def _generate_one_question_by_ai(
         "output_schema": schema_hint,
     }
     knowledge_section = _format_knowledge_for_question_prompt(knowledge_memos or [])
+    asked_section = _format_asked_questions_for_prompt(asked_questions or [])
     system_prompt = (
         "あなたは議事録品質管理アシスタントです。"
         "目的は、全文の文脈が最も繋がるように、ユーザーへの質問を1問だけ選ぶことです。"
@@ -219,6 +356,7 @@ def _generate_one_question_by_ai(
         "\n- 質問の結果で本文全体がどこまで確定するかを重視する"
         "\n- 候補の context_window（前後文脈）を必ず読んで判断する"
         "\n- ユーザー側の回答コストが極端に高いものは避ける"
+        "\n- 【既に送信済みの質問】と論点・該当箇所・仮説が類似するものは絶対に再質問しない"
         "\n\n【質問文の形式】"
         "\n- hypothesis（推測の正解）が候補に存在する場合は、原則として『○○で合っていますか？"
         "「はい」または「いいえ」で教えてください。』形式の Yes/No 質問にし、question_format='yes_no' を返す"
@@ -233,6 +371,7 @@ def _generate_one_question_by_ai(
         "\n- 議事録としてそのまま提出可能と判断できる場合"
         "\n\n出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
         + knowledge_section
+        + asked_section
     )
     payload = {
         "model": model,
@@ -361,12 +500,17 @@ def _mark_unknown_point_asked(
     selected_unknown: dict | None,
     question_id: str,
 ) -> int:
-    """選定された不明点に status='asked' をマークする（同一質問の重複送信防止）。"""
+    """選定された不明点に status='asked' をマークする（同一質問の重複送信防止）。
+
+    text 完全一致だけでなく、正規化後の類似一致と hypothesis 一致も判定材料にする。
+    AI が同じ論点を別表現で選び直したケースでも asked マークが当たるようにする。
+    """
     if not selected_unknown or not os.path.isfile(unknowns_path):
         return 0
     target_text = str(selected_unknown.get("text") or "").strip()
     target_type = str(selected_unknown.get("type") or "").strip()
-    if not target_text:
+    target_hypo = str(selected_unknown.get("hypothesis") or "").strip()
+    if not target_text and not target_hypo:
         return 0
 
     try:
@@ -383,9 +527,22 @@ def _mark_unknown_point_asked(
             continue
         item_text = str(item.get("text") or "").strip()
         item_type = str(item.get("type") or "").strip()
-        if item_text != target_text:
-            continue
+        item_hypo = str(item.get("hypothesis") or "").strip()
+        # 型が違う候補は対象外（人名 vs 数値などを誤マークしない）
         if target_type and item_type and item_type != target_type:
+            continue
+        # マッチ条件: ①text完全一致、②text類似、③hypothesis一致（両方ある場合）
+        match = False
+        if target_text and item_text and item_text == target_text:
+            match = True
+        elif target_text and item_text and _is_similar_text(item_text, target_text):
+            match = True
+        elif target_hypo and item_hypo and (
+            item_hypo == target_hypo
+            or _is_similar_text(item_hypo, target_hypo, min_overlap=0.7)
+        ):
+            match = True
+        if not match:
             continue
         item["status"] = "asked"
         item["asked_by_question_id"] = question_id
@@ -511,6 +668,10 @@ def main() -> None:
             knowledge_memos = []
             print(f"question_generation_knowledge_load_failed={e!r}")
 
+        # 同一ジョブで既に送信済みの質問履歴を AI に渡して類似質問を抑制
+        asked_history = _load_asked_questions(job_dir)
+        print(f"question_generation_asked_history_count={len(asked_history)}")
+
         try:
             ai_result = _generate_one_question_by_ai(
                 full_text=full_text,
@@ -518,6 +679,7 @@ def main() -> None:
                 model=args.question_model,
                 api_key=api_key,
                 knowledge_memos=knowledge_memos,
+                asked_questions=asked_history,
             )
             question_status = str(ai_result.get("question_status", "generated")).strip() or "generated"
             question_format = str(ai_result.get("question_format", "")).strip().lower()
@@ -635,6 +797,14 @@ def main() -> None:
                 unknowns_path=unknowns_path,
                 selected_unknown=result_payload.get("selected_unknown"),
                 question_id=str(result_payload.get("question_id") or ""),
+            )
+            # 質問履歴に追記（次サイクルで AI へ既出として渡し、類似質問を抑制する）
+            _append_asked_question(
+                job_dir=job_dir,
+                question_id=str(result_payload.get("question_id") or ""),
+                question_text=str(result_payload.get("question_text") or ""),
+                question_format=str(result_payload.get("question_format") or ""),
+                selected_unknown=result_payload.get("selected_unknown"),
             )
         else:
             line_push = "sent_completion"

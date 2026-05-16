@@ -814,6 +814,81 @@ def _mark_unknown_points_answered(
     return updated_count
 
 
+_YES_PATTERNS = (
+    "はい", "ハイ", "yes", "y", "ok", "okay", "オーケー", "おーけー",
+    "そう", "そうです", "合ってます", "合ってる", "合っています", "あってます",
+    "あってる", "その通り", "そのとおり", "正しい", "正しいです",
+)
+_NO_PATTERNS = (
+    "いいえ", "イイエ", "no", "n", "違います", "違う", "ちがう", "ちがいます",
+    "誤り", "間違い", "ノー",
+)
+
+
+def _classify_yes_no_answer(answer_text: str) -> str:
+    """回答テキストが肯定/否定/その他のいずれかを判定する。
+
+    補足が長く付いた回答（例: 「はい。具体的にはDCS確認を必須にしました」）にも
+    対応するため、先頭の数文字で判定する。返り値は 'yes' / 'no' / 'other'。
+    """
+    s = (answer_text or "").strip().lower()
+    if not s:
+        return "other"
+    head = s[:8]
+    for pat in _YES_PATTERNS:
+        if head.startswith(pat.lower()):
+            return "yes"
+    for pat in _NO_PATTERNS:
+        if head.startswith(pat.lower()):
+            return "no"
+    return "other"
+
+
+def _enrich_yes_no_answer_with_hypothesis(
+    *,
+    raw_answer: str,
+    selected_unknown: dict | None,
+) -> str:
+    """Yes/No 質問の単純回答に対し、selected_unknown.hypothesis を併記して
+    answers.json への記録内容を学習に使えるレベルに引き上げる。
+
+    - 「はい」のみ → hypothesis を確定情報として併記
+      例: 「はい。確定内容: 契約書・メール送付前にDCSでの確認を必須化する」
+    - 「いいえ」のみ → hypothesis を不正解情報として併記
+      例: 「いいえ（仮説『〜』は不正解）」
+    - 自由記入の補足が既にあれば、その補足を最優先で残し、hypothesis は補助として併記
+    - hypothesis が存在しない場合は何もせず raw を返す
+    """
+    if not isinstance(selected_unknown, dict):
+        return raw_answer
+    hypothesis = str(selected_unknown.get("hypothesis") or "").strip()
+    if not hypothesis:
+        return raw_answer
+
+    cleaned = (raw_answer or "").strip()
+    if not cleaned:
+        return raw_answer
+
+    polarity = _classify_yes_no_answer(cleaned)
+    # 全体の長さで「補足あり/なし」を判定（「はい」「いいえ」のみは短い）
+    SHORT_ANSWER_THRESHOLD = 6  # 「はい」「いいえ」「Yes」「OK」「そうです」程度まで
+
+    if polarity == "yes":
+        if len(cleaned) <= SHORT_ANSWER_THRESHOLD:
+            # ほぼ「はい」のみ → hypothesis を確定情報として注入
+            return f"はい。確定内容: {hypothesis}"
+        # 補足付きはユーザーの言葉を尊重しつつ hypothesis を併記
+        return f"{cleaned}（前提仮説: 『{hypothesis}』を肯定）"
+    if polarity == "no":
+        if len(cleaned) <= SHORT_ANSWER_THRESHOLD:
+            return (
+                f"いいえ（仮説『{hypothesis}』は不正解。"
+                "正しい内容は不明のため要追加確認）"
+            )
+        return f"{cleaned}（前提仮説『{hypothesis}』は不正解）"
+    return raw_answer
+
+
 def handle_user_input(text: str, user_id: str | None = None) -> str:
     """LINE メッセージから使える情報を抽出し、回答反映と辞書更新を必要に応じて両方行う。"""
     global state
@@ -877,6 +952,19 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         has_answer = False
         answer_text = ""
     effective_answer_text = answer_text or str(text or "").strip()
+    # Yes/No 質問への「はい」「いいえ」だけの回答は、それ単体ではナレッジ蓄積の入力が
+    # 薄すぎる。selected_unknown.hypothesis を併記して学習に使える形へ拡張する。
+    if has_answer:
+        enriched = _enrich_yes_no_answer_with_hypothesis(
+            raw_answer=effective_answer_text,
+            selected_unknown=selected_unknown,
+        )
+        if enriched != effective_answer_text:
+            print(
+                "yes_no_answer_enriched="
+                f"{{'before': {effective_answer_text!r}, 'after': {enriched!r}}}"
+            )
+            effective_answer_text = enriched
     answer_save_ok = False
     answered_updates = 0
     if has_answer and qtext_for_save:

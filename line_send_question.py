@@ -42,7 +42,7 @@ def build_line_message(result: dict) -> str:
 
         # Yes/No 質問はヘッダーで一目でわかるようにする
         if question_format == "yes_no":
-            header = "[確認したいこと（はい/いいえで回答可）]"
+            header = "[確認したいこと（はい/いいえで回答可・補足歓迎）]"
         else:
             header = "[確認したいこと]"
 
@@ -55,6 +55,12 @@ def build_line_message(result: dict) -> str:
             parts.append(f"背景: {why}")
         if doc_url:
             parts.append(f"議事録: {doc_url}")
+        # Yes/No でも自由記入を歓迎する旨を末尾に明示（インプット強化）
+        if question_format == "yes_no":
+            parts.append(
+                "※「はい」「いいえ」のみでも OK。"
+                "ただ、追加情報や訂正があれば一言だけ補足いただけると議事録が大幅に良くなります。"
+            )
         return "\n".join(parts)
     message = str(result.get("message", "")).strip() or "未回答の不明箇所は0件のため確認事項はありません。"
     parts = ["[完了]", message]
