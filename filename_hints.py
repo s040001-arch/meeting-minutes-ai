@@ -60,3 +60,38 @@ def format_hints_for_prompt(hints: list[str]) -> str:
         "上記の正しい表記に修正してください。\n"
         "例: 「CHR」→「THR」、「サービス」→「サーベイ」など。"
     )
+
+
+def format_filename_meta_for_prompt(parsed: dict | None) -> str:
+    """ファイル名構造化パース結果をプロンプトに整形する。
+
+    filename_parser.parse_filename() の戻り値を入力に取り、
+    顧客企業・参加者・会議内容を明示してAIに渡す。
+    """
+    if not parsed:
+        return ""
+    lines: list[str] = []
+    if parsed.get("date"):
+        lines.append(f"開催日: {parsed['date']}")
+    scope = parsed.get("meeting_scope")
+    if scope == "internal":
+        lines.append("会議区分: 社内会議（プレセナ・ストラテジック・パートナーズ内部）")
+    elif scope == "external":
+        customer = parsed.get("customer") or "?"
+        lines.append(f"会議区分: 外部会議（顧客企業: {customer}）")
+    topics = parsed.get("topics") or []
+    if topics:
+        lines.append(f"会議内容（推定）: {'、'.join(topics)}")
+    attendees = parsed.get("attendees") or []
+    if attendees:
+        lines.append(f"参加者（推定・苗字のみの場合あり）: {'、'.join(attendees)}")
+    if not lines:
+        return ""
+    body = "\n".join(f"- {ln}" for ln in lines)
+    return (
+        "\n\n【ファイル名から抽出した会議メタ情報】\n"
+        f"{body}\n"
+        "上記情報を文脈理解の前提として活用してください。"
+        "音声認識で顧客名・参加者名が誤変換されている場合は、上記の正しい表記に修正してください。"
+        "外部会議の場合、参加者は『顧客企業側』と『プレセナ側（弊社）』が混在することに注意してください。"
+    )

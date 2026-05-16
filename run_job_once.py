@@ -12,10 +12,19 @@ from ai_correct_text import (
     get_last_correct_full_text_meta,
     resolve_openai_api_key,
 )
+from accumulate_filename_metadata import accumulate_filename_metadata
 from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
 from diarize_speakers import diarize_transcript
-from filename_hints import extract_filename_hints, format_hints_for_prompt
+from filename_hints import (
+    extract_filename_hints,
+    format_filename_meta_for_prompt,
+    format_hints_for_prompt,
+)
+from filename_parser import (
+    extract_known_people_from_knowledge,
+    parse_filename,
+)
 from job_context import load_job_context
 from knowledge_sheet_store import load_knowledge_memos
 from progress_tracker import (
@@ -709,6 +718,40 @@ def main() -> None:
         log_line(log_path, f"filename_hints_prompt_enabled={bool(hints_prompt_text)}")
     if job_context:
         log_line(log_path, f"📋 ジョブコンテキスト読み込み: {list(job_context.keys())}")
+
+    # ── ファイル名構造化パース（日付/顧客/参加者/トピック） ────────────────
+    # 規約: <日付>_<顧客名 or プレセナ>_<会議内容・参加者...>
+    # ナレッジから既知人名を読み込み、参加者/トピックの判別精度を上げる。
+    try:
+        _km_for_parse = load_knowledge_memos()
+    except Exception as e:
+        log_line(log_path, f"filename_parse: knowledge load failed: {e!r}")
+        _km_for_parse = []
+    known_people = extract_known_people_from_knowledge(_km_for_parse)
+    parsed_filename = parse_filename(filename, known_people)
+    log_line(
+        log_path,
+        "filename_parse: "
+        f"date={parsed_filename.get('date')} scope={parsed_filename.get('meeting_scope')} "
+        f"customer={parsed_filename.get('customer')} "
+        f"attendees={parsed_filename.get('attendees')} topics={parsed_filename.get('topics')}",
+    )
+    # 既存 job_context（context.json があれば優先）と統合してプロンプトに渡せる形に。
+    # 既存 schema: participants / related_companies / agenda / notes
+    if parsed_filename.get("attendees") and not job_context.get("participants"):
+        job_context["participants"] = list(parsed_filename["attendees"])
+    if parsed_filename.get("customer") and not job_context.get("related_companies"):
+        job_context["related_companies"] = [parsed_filename["customer"]]
+    if parsed_filename.get("topics") and not job_context.get("agenda"):
+        job_context["agenda"] = list(parsed_filename["topics"])
+    # 会議区分 / 開催日は構造化メタとして job_context に保存（プロンプトで活用）
+    job_context["meeting_scope"] = parsed_filename.get("meeting_scope") or "unknown"
+    if parsed_filename.get("date"):
+        job_context["meeting_date"] = parsed_filename["date"]
+    if parsed_filename.get("customer"):
+        job_context["customer_name"] = parsed_filename["customer"]
+    # AI プロンプト注入用のメタ情報セクション
+    filename_meta_prompt_text = format_filename_meta_for_prompt(parsed_filename)
     try:
         if input_ext in TEXT_EXTENSIONS:
             log_line(log_path, "input_type=txt")
@@ -773,8 +816,9 @@ def main() -> None:
             )
 
             # ── initial_prompt（語彙バイアス）の構築 ───────────────────────
-            # ナレッジシートとファイル名/コンテキストから固有名詞を抜き、
+            # ナレッジシート＋ファイル名構造化情報＋コンテキストから固有名詞を抜き、
             # Whisper の initial_prompt として渡せる短い自然文を作る。
+            # parsed_filename（顧客名・参加者・トピック）を最優先で語彙投入する。
             try:
                 knowledge_for_prompt = load_knowledge_memos()
             except Exception as e:
@@ -784,6 +828,7 @@ def main() -> None:
                 knowledge_memos=knowledge_for_prompt,
                 filename_hints=hints,
                 job_context=job_context if job_context else None,
+                parsed_filename=parsed_filename,
             )
             initial_prompt_path = os.path.join(job_dir, "initial_prompt.txt")
             with open(initial_prompt_path, "w", encoding="utf-8") as f:
@@ -1468,6 +1513,52 @@ def main() -> None:
             phase="step_17_knowledge_accumulation",
             status="success",
             detail=kr,
+        )
+
+        # Step17b: ファイル名メタ情報のナレッジ蓄積
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17b_filename_metadata",
+            status="running",
+            detail={},
+        )
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="ファイル名から抽出した会議メタ情報をナレッジに蓄積中...",
+        )
+        fr = accumulate_filename_metadata(
+            parsed_filename=parsed_filename,
+            visible_log_path=visible_log_path,
+        )
+        if not fr.get("enabled"):
+            fr_msg = "ファイル名メタ蓄積: スキップ（KNOWLEDGE_SHEET_IDが未設定のため）"
+        elif fr.get("error"):
+            fr_msg = f"ファイル名メタ蓄積でエラー: {fr.get('error')}"
+        elif fr.get("skipped"):
+            fr_msg = f"ファイル名メタ蓄積: スキップ（{fr.get('reason', '対象なし')}）"
+        elif fr.get("updated"):
+            before = fr.get("knowledge_count_before", 0)
+            after = fr.get("knowledge_count_after", 0)
+            fr_msg = (
+                f"ファイル名メタ蓄積が完了しました（{before}件 → {after}件、差分{after - before:+d}件）"
+            )
+        else:
+            fr_msg = f"ファイル名メタ蓄積: 変更なし（{fr.get('reason', '新規情報なし')}）"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message=fr_msg,
+        )
+        update_job_progress(
+            input_root=args.input_root,
+            job_id=args.job_id,
+            phase="step_17b_filename_metadata",
+            status="success",
+            detail=fr,
         )
 
         log_line(log_path, "pipeline_status=success")

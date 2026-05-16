@@ -87,27 +87,41 @@ def build_initial_prompt(
     filename_hints: list[str] | None = None,
     extra_terms: list[str] | None = None,
     job_context: dict | None = None,
+    parsed_filename: dict | None = None,
     max_chars: int = _MAX_PROMPT_CHARS,
 ) -> str:
     """Whisper 用 initial_prompt を構築する。
 
-    優先度:
-      1) filename_hints（その会議に関係する確度が高い）
-      2) job_context の attendees / company / project 等
-      3) knowledge_memos 由来の用語（汎用ナレッジ）
+    優先度（高い順、Whisper の語彙バイアスは前半ほど効きが強い）:
+      1) parsed_filename（その会議の顧客・参加者・トピック）← 最重要
+      2) filename_hints（後方互換: 旧形式のヒント語）
+      3) job_context の attendees / company / project 等
+      4) knowledge_memos 由来の用語（汎用ナレッジ）
 
     Whisper の initial_prompt は「自然な日本語の文」として与えると効果が高いため、
     最終的に「以下の語が登場します: A, B, C ... 。」の形に組み立てる。
     """
     terms: list[str] = []
 
-    # 1) ファイル名ヒント（最優先）
+    # 1) parsed_filename（最優先）— 顧客名→参加者→トピックの順
+    if isinstance(parsed_filename, dict):
+        customer = parsed_filename.get("customer")
+        if isinstance(customer, str) and _is_useful_term(customer.strip()):
+            terms.append(customer.strip())
+        for a in parsed_filename.get("attendees") or []:
+            if isinstance(a, str) and _is_useful_term(a.strip()):
+                terms.append(a.strip())
+        for t in parsed_filename.get("topics") or []:
+            if isinstance(t, str) and _is_useful_term(t.strip()):
+                terms.append(t.strip())
+
+    # 2) filename_hints（後方互換）
     for h in filename_hints or []:
         h = h.strip()
         if _is_useful_term(h):
             terms.append(h)
 
-    # 2) job_context から拾える固有名詞（attendees, company, etc.）
+    # 3) job_context から拾える固有名詞（attendees, company, etc.）
     if isinstance(job_context, dict):
         for key in ("attendees", "company", "project", "client", "title"):
             val = job_context.get(key)
@@ -121,13 +135,13 @@ def build_initial_prompt(
                     if isinstance(token, str) and _is_useful_term(token.strip()):
                         terms.append(token.strip())
 
-    # 3) ナレッジから用語抽出
+    # 4) ナレッジから用語抽出
     for memo in knowledge_memos or []:
         term = _extract_term_from_memo(memo)
         if term and _is_useful_term(term):
             terms.append(term)
 
-    # 4) 明示的な追加語
+    # 5) 明示的な追加語
     for t in extra_terms or []:
         if _is_useful_term(t):
             terms.append(t)

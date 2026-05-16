@@ -36,6 +36,18 @@ def load_job_context(job_dir: str) -> dict[str, Any]:
 
 def _build_context_lines(context: dict[str, Any]) -> list[str]:
     parts: list[str] = []
+    meeting_date = str(context.get("meeting_date") or "").strip()
+    if meeting_date:
+        parts.append(f"開催日: {meeting_date}")
+    scope = str(context.get("meeting_scope") or "").strip().lower()
+    customer = str(context.get("customer_name") or "").strip()
+    if scope == "internal":
+        parts.append("会議区分: 社内会議（プレセナ・ストラテジック・パートナーズ内部）")
+    elif scope == "external":
+        if customer:
+            parts.append(f"会議区分: 外部会議（顧客企業: {customer}）")
+        else:
+            parts.append("会議区分: 外部会議")
     participants = [str(p).strip() for p in (context.get("participants") or []) if str(p).strip()]
     if participants:
         parts.append(f"参加者: {', '.join(participants)}")
