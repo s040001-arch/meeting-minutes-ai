@@ -25,7 +25,7 @@ from filename_parser import (
     extract_known_people_from_knowledge,
     parse_filename,
 )
-from job_context import load_job_context
+from job_context import load_job_context, save_job_context
 from knowledge_sheet_store import load_knowledge_memos
 from progress_tracker import (
     ensure_artifact_flags,
@@ -752,6 +752,12 @@ def main() -> None:
         job_context["customer_name"] = parsed_filename["customer"]
     # AI プロンプト注入用のメタ情報セクション
     filename_meta_prompt_text = format_filename_meta_for_prompt(parsed_filename)
+    # ファイル名から得たメタ情報を context.json に保存（後段ステップ・再実行でも参照可能に）
+    try:
+        save_job_context(os.path.join(args.input_root, args.job_id), job_context)
+        log_line(log_path, f"context.json saved keys={list(job_context.keys())}")
+    except Exception as e:
+        log_line(log_path, f"context.json save failed: {e!r}")
     try:
         if input_ext in TEXT_EXTENSIONS:
             log_line(log_path, "input_type=txt")
@@ -1092,7 +1098,7 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="話者の識別とターン分割を実行中...（誰が何を話したか推定します）",
+            message="話者交代箇所の分割を実行中...（話者が変わるたびに空行を入れます）",
         )
         try:
             diarized_text = diarize_transcript(
@@ -1118,7 +1124,7 @@ def main() -> None:
                 log_path=log_path,
                 visible_log_path=visible_log_path,
                 job_id=args.job_id,
-                message=f"話者識別が完了しました（{len(diarized_text):,}文字）",
+                message=f"話者交代の分割が完了しました（{len(diarized_text):,}文字、{diarized_text.count(chr(10)+chr(10))+1}段落）",
             )
         except Exception as e:
             log_line(log_path, f"step_4_4_diarize: non-fatal error: {e}")

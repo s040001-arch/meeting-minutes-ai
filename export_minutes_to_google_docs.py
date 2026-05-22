@@ -108,6 +108,10 @@ def md_to_google_docs_text(md: str) -> str:
         if line.startswith("- "):
             line = f"* {line[2:]}"
 
+        # Markdown 強調記号を除去（Google Docs にそのまま出ないように）
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = line.replace("**", "")
+
         lines.append(line)
     return "\n".join(lines).strip() + "\n"
 

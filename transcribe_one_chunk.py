@@ -147,6 +147,17 @@ def main() -> None:
     if initial_prompt:
         transcribe_kwargs["initial_prompt"] = initial_prompt
 
+    # VAD: 短すぎる無音区間のノイズを除去（環境変数 WHISPER_VAD_MIN_SILENCE_MS で調整可）
+    if use_vad:
+        try:
+            min_silence_ms = int(os.getenv("WHISPER_VAD_MIN_SILENCE_MS", "400"))
+        except ValueError:
+            min_silence_ms = 400
+        transcribe_kwargs["vad_parameters"] = {
+            "min_silence_duration_ms": max(200, min_silence_ms),
+            "speech_pad_ms": 300,
+        }
+
     try:
         model = WhisperModel(use_model, device="cpu", compute_type=use_compute_type)
         segments, info = model.transcribe(args.input, **transcribe_kwargs)

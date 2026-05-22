@@ -34,6 +34,16 @@ def load_job_context(job_dir: str) -> dict[str, Any]:
         return {}
 
 
+def save_job_context(job_dir: str, context: dict[str, Any]) -> None:
+    """ジョブディレクトリに context.json を保存する。"""
+    if not context:
+        return
+    os.makedirs(job_dir, exist_ok=True)
+    path = os.path.join(job_dir, CONTEXT_FILENAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(context, f, ensure_ascii=False, indent=2)
+
+
 def _build_context_lines(context: dict[str, Any]) -> list[str]:
     parts: list[str] = []
     meeting_date = str(context.get("meeting_date") or "").strip()

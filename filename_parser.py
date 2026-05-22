@@ -153,6 +153,26 @@ def _is_internal_marker(token: str) -> bool:
     return False
 
 
+_PERSON_NAME_TOKEN_RE = re.compile(
+    r"^[一-龠々]{1,4}(?:さん|氏|様)?$"
+)
+
+
+def _looks_like_person_name_token(token: str) -> bool:
+    """ファイル名トークンが人名らしいか（ナレッジ未登録でも判定）。"""
+    t = token.strip()
+    if not t or len(t) > 8:
+        return False
+    if t.casefold() in _GENERIC_TOKENS:
+        return False
+    if _PERSON_NAME_TOKEN_RE.fullmatch(t):
+        return True
+    # 英字名（松本→漢字のみだが短い固有名詞も拾う）
+    if re.fullmatch(r"[A-Za-z]{2,12}", t):
+        return True
+    return False
+
+
 def _split_attendees_from_topic(
     tokens: list[str],
     known_people: set[str],
@@ -161,6 +181,7 @@ def _split_attendees_from_topic(
 
     判定:
     - known_people（ナレッジ等から取得した既知の人名集合）に一致するトークン → 参加者
+    - 人名らしい短いトークン（山崎様、松本 等）→ 参加者
     - それ以外 → 会議内容/トピック側
     """
     attendees: list[str] = []
@@ -173,13 +194,16 @@ def _split_attendees_from_topic(
             continue
         if t in known_people:
             attendees.append(t)
+            continue
+        # 「川口さん」「相原氏」「山崎様」のような呼称付きも参加者扱い
+        stripped = re.sub(r"(さん|氏|様)$", "", t)
+        if stripped in known_people:
+            attendees.append(stripped)
+            continue
+        if _looks_like_person_name_token(t):
+            attendees.append(stripped if stripped else t)
         else:
-            # 「川口さん」「相原氏」のような呼称付きも参加者扱い
-            stripped = re.sub(r"(さん|氏|様)$", "", t)
-            if stripped in known_people:
-                attendees.append(stripped)
-            else:
-                topics.append(t)
+            topics.append(t)
     return topics, attendees
 
 

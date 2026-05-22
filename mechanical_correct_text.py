@@ -30,6 +30,18 @@ COMMON_NOISE_REPLACEMENTS = {
     "何かえっと": "えっと",
     "なんかえっと": "えっと",
     "お願いしま す": "お願いします",
+    "係数詐欺": "具体的",
+    "係数詐欺で": "具体的に",
+    "集合形成": "集合研修",
+    "集合形成の": "集合研修の",
+    "パワー文句金": "月金",
+    "禁止受けても": "診断受けても",
+    "20年のがある": "20年ものがある",
+    "アウルの呼吸": "阿吽の呼吸",
+    "アウンの呼吸": "阿吽の呼吸",
+    "本店にあります": "本当にあります",
+    "本店にある": "本当にある",
+    "本店に重要": "本当に重要",
 }
 REPEATED_SHORT_PHRASES = [
     "ありがとうございます",
@@ -256,6 +268,61 @@ def compress_repeated_short_phrases(text: str) -> str:
     return s
 
 
+# 会議前後の雑音として除去しやすい短い冒頭・末尾パターン
+_EDGE_START_NOISE_RE = re.compile(
+    r"^(?:カメラが(?:奥に)?[。]?|映像(?:が)?(?:映)?(?:って)?(?:ます)?[。]?)$"
+)
+_EDGE_END_NOISE_RES = (
+    re.compile(r"^何でもない(?:です)?[。]?$"),
+    re.compile(r"^なんかこんな感じでしょうね[。]?$"),
+    re.compile(r"^うん、?でもなんかすごい[。]?$"),
+    re.compile(r"^ポジティブに私受け止めたのは[？?]?$"),
+    re.compile(r"^お疲れ様でした[。]?$"),
+)
+
+
+def trim_edge_noise(text: str) -> str:
+    """会議前後に混入しやすい短い雑音行を除去する。
+
+    - 冒頭: 「カメラが奥に。」等の機材調整コメント
+    - 末尾: 会議終了後の振り返り雑談（「何でもないです」等）
+    """
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    # 冒頭ノイズ（最大2行まで）
+    for _ in range(min(2, len(lines))):
+        first = lines[0].strip()
+        if first and _EDGE_START_NOISE_RE.match(first):
+            lines.pop(0)
+        else:
+            break
+
+    # 末尾ノイズ: 会議の締め（失礼いたします/ありがとうございました）以降の短い雑談
+    close_idx = -1
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if "失礼いたします" in s or "ありがとうございました" in s:
+            close_idx = i
+
+    if close_idx >= 0 and close_idx < len(lines) - 1:
+        tail = lines[close_idx + 1 :]
+        trimmed_tail: list[str] = []
+        for line in tail:
+            s = line.strip()
+            if not s:
+                continue
+            if any(p.match(s) for p in _EDGE_END_NOISE_RES):
+                continue
+            if len(s) <= 25 and ("こんな感じ" in s or "受け止め" in s):
+                continue
+            trimmed_tail.append(line)
+        lines = lines[: close_idx + 1] + trimmed_tail
+
+    return "\n".join(lines).strip()
+
+
 def apply_mechanical_corrections(
     text: str,
     correction_dict_path: str = DEFAULT_CORRECTION_DICT_PATH,
@@ -269,6 +336,7 @@ def apply_mechanical_corrections(
     s = remove_sentence_start_fillers(s)
     s = compress_repeated_short_phrases(s)
     s = cleanup_common_noise(s)
+    s = trim_edge_noise(s)
     # Newline normalization last (user-specified output format)
     s = normalize_spaces_and_newlines(s)
     return s
