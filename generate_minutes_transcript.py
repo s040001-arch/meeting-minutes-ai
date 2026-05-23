@@ -1,6 +1,8 @@
 import argparse
 import os
 
+from meeting_profile import load_meeting_profile, resolve_display_title
+
 
 def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> str:
     if input_path:
@@ -57,7 +59,10 @@ def main() -> None:
     if not transcript_text.strip():
         raise ValueError("input transcript is empty.")
 
-    title = args.title or args.job_id
+    title = args.title or resolve_display_title(
+        load_meeting_profile(os.path.join(args.input_root, args.job_id)),
+        job_id=args.job_id,
+    )
     output_text = build_minutes_text(title=title, transcript_text=transcript_text)
 
     out_path = args.output or os.path.join(

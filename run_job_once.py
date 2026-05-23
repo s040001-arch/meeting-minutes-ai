@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ai_correct_text import (
+    OPUS_CORRECTION_MODEL,
     correct_full_text,
     get_last_correct_full_text_meta,
     resolve_openai_api_key,
@@ -15,18 +16,14 @@ from ai_correct_text import (
 from accumulate_filename_metadata import accumulate_filename_metadata
 from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
-from diarize_speakers import diarize_transcript
-from filename_hints import (
-    extract_filename_hints,
-    format_filename_meta_for_prompt,
-    format_hints_for_prompt,
-)
+from filename_hints import extract_filename_hints
 from filename_parser import (
     extract_known_people_from_knowledge,
     parse_filename,
 )
 from job_context import load_job_context, save_job_context
 from knowledge_sheet_store import load_knowledge_memos
+from meeting_profile import build_meeting_profile, save_meeting_profile
 from progress_tracker import (
     ensure_artifact_flags,
     finalize_job_progress,
@@ -34,10 +31,7 @@ from progress_tracker import (
     update_job_progress,
 )
 from repo_env import load_dotenv_local
-from whisper_initial_prompt import build_initial_prompt
 
-TEXT_EXTENSIONS = {".txt"}
-AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav"}
 _APPEND_LOG_INPUT_ROOT = "data/transcriptions"
 
 
@@ -210,11 +204,7 @@ def run_transcription_stage_docs_export(
         return
 
     stem = Path(input_audio_path).stem
-    input_ext = Path(input_audio_path).suffix.lower()
-    if input_ext in TEXT_EXTENSIONS:
-        title = f"【処理開始】{stem}"
-    else:
-        title = f"【文字起こし完了】{stem}"
+    title = f"【処理開始】{stem}"
     hub_meta_path = os.path.join(input_root, job_id, "google_doc_hub.json")
     stage_md = os.path.join(job_dir, "transcript_stage_docs.md")
 
@@ -567,25 +557,7 @@ def main() -> None:
         default="data/transcriptions",
         help="ジョブ出力ルート（デフォルト: data/transcriptions）",
     )
-    parser.add_argument("--chunk-seconds", type=int, default=30, help="チャンク秒数（デフォルト: 30）")
     parser.add_argument("--max-chunks", type=int, default=None, help="最大チャンク数（テスト用）")
-    parser.add_argument(
-        "--whisper-model",
-        default=None,
-        help=(
-            "Whisperモデル。未指定時は環境変数 WHISPER_MODEL、"
-            "それも無ければ large-v3-turbo（精度重視・推奨）"
-        ),
-    )
-    parser.add_argument("--whisper-language", default="ja", help="Whisper言語（デフォルト: ja）")
-    parser.add_argument(
-        "--compute-type",
-        default=None,
-        help=(
-            "Whisper compute type。未指定時は環境変数 WHISPER_COMPUTE_TYPE、"
-            "それも無ければ int8"
-        ),
-    )
     parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAIモデル（デフォルト: gpt-4.1）")
     parser.add_argument(
         "--min-ai-length-ratio",
@@ -696,8 +668,15 @@ def main() -> None:
         log_line(log_path, "input_relocate_subfolder: skipped (--no-relocate-input-subfolder)")
     log_line(log_path, f"input_audio={args.input_audio}")
 
-    wav_path = os.path.join(job_dir, "input_16k_mono.wav")
-    chunks_dir = os.path.join(job_dir, "chunks")
+    # .txt 以外は静かに終了（音声経路は廃止済み）
+    input_ext = os.path.splitext(args.input_audio)[1].lower()
+    if input_ext != ".txt":
+        log_line(
+            log_path,
+            f"unsupported_input_type={input_ext}, audio pipeline removed. exiting cleanly.",
+        )
+        sys.exit(0)
+
     merged_path = os.path.join(job_dir, "merged_transcript.txt")
     mechanical_path = os.path.join(job_dir, "merged_transcript_mechanical.txt")
     ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
@@ -706,22 +685,17 @@ def main() -> None:
 
     py = sys.executable
     repo = os.getcwd()
-    input_ext = Path(args.input_audio).suffix.lower()
-    stem = Path(args.input_audio).stem
+    display_title = Path(args.input_audio).stem
     filename = Path(args.input_audio).name
     hints = extract_filename_hints(filename)
-    hints_prompt_text = format_hints_for_prompt(hints)
     job_context = load_job_context(os.path.join(args.input_root, args.job_id))
     hub_meta_path = os.path.join(args.input_root, args.job_id, "google_doc_hub.json")
     if hints:
         log_line(log_path, f"📎 ファイル名ヒント抽出: {hints}")
-        log_line(log_path, f"filename_hints_prompt_enabled={bool(hints_prompt_text)}")
     if job_context:
         log_line(log_path, f"📋 ジョブコンテキスト読み込み: {list(job_context.keys())}")
 
     # ── ファイル名構造化パース（日付/顧客/参加者/トピック） ────────────────
-    # 規約: <日付>_<顧客名 or プレセナ>_<会議内容・参加者...>
-    # ナレッジから既知人名を読み込み、参加者/トピックの判別精度を上げる。
     try:
         _km_for_parse = load_knowledge_memos()
     except Exception as e:
@@ -736,194 +710,39 @@ def main() -> None:
         f"customer={parsed_filename.get('customer')} "
         f"attendees={parsed_filename.get('attendees')} topics={parsed_filename.get('topics')}",
     )
-    # 既存 job_context（context.json があれば優先）と統合してプロンプトに渡せる形に。
-    # 既存 schema: participants / related_companies / agenda / notes
     if parsed_filename.get("attendees") and not job_context.get("participants"):
         job_context["participants"] = list(parsed_filename["attendees"])
     if parsed_filename.get("customer") and not job_context.get("related_companies"):
         job_context["related_companies"] = [parsed_filename["customer"]]
     if parsed_filename.get("topics") and not job_context.get("agenda"):
         job_context["agenda"] = list(parsed_filename["topics"])
-    # 会議区分 / 開催日は構造化メタとして job_context に保存（プロンプトで活用）
     job_context["meeting_scope"] = parsed_filename.get("meeting_scope") or "unknown"
     if parsed_filename.get("date"):
         job_context["meeting_date"] = parsed_filename["date"]
     if parsed_filename.get("customer"):
         job_context["customer_name"] = parsed_filename["customer"]
-    # AI プロンプト注入用のメタ情報セクション
-    filename_meta_prompt_text = format_filename_meta_for_prompt(parsed_filename)
-    # ファイル名から得たメタ情報を context.json に保存（後段ステップ・再実行でも参照可能に）
     try:
         save_job_context(os.path.join(args.input_root, args.job_id), job_context)
         log_line(log_path, f"context.json saved keys={list(job_context.keys())}")
     except Exception as e:
         log_line(log_path, f"context.json save failed: {e!r}")
+
+    meeting_profile = build_meeting_profile(
+        parsed_filename=parsed_filename,
+        job_context=job_context,
+        knowledge_memos=_km_for_parse,
+        display_title=display_title,
+    )
+    profile_path = save_meeting_profile(job_dir, meeting_profile)
+    log_line(log_path, f"meeting_profile saved path={profile_path}")
+
     try:
-        if input_ext in TEXT_EXTENSIONS:
-            log_line(log_path, "input_type=txt")
-            log_line(log_path, "skipped_steps=2_1_convert_wav,2_2_split_chunks,3_transcribe,4_1_merge_chunks")
-            with open(args.input_audio, "r", encoding="utf-8") as f:
-                src_text = f.read()
-            with open(merged_path, "w", encoding="utf-8") as f:
-                f.write(src_text)
-            log_line(log_path, f"seed_transcript_path={merged_path} chars={len(src_text)}")
-        elif input_ext in AUDIO_EXTENSIONS:
-            log_line(log_path, f"input_type=audio ext={input_ext}")
-            current_phase = "step_2_1_convert_wav"
-            current_step_label = "Step 2.1: WAV変換"
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message="音声ファイルをWAV形式に変換しています...",
-            )
-            run_cmd(
-                log_path,
-                [py, os.path.join(repo, "ffmpeg_convert_to_wav.py"), "--input", args.input_audio, "--output", wav_path],
-                "step_2_1_convert_wav",
-            )
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message="WAV変換が完了しました",
-            )
-            split_cmd = [
-                py,
-                os.path.join(repo, "audio_split_chunks.py"),
-                "--input",
-                wav_path,
-                "--output-dir",
-                chunks_dir,
-                "--chunk-seconds",
-                str(args.chunk_seconds),
-            ]
-            if args.max_chunks is not None:
-                split_cmd.extend(["--max-chunks", str(args.max_chunks)])
-            current_phase = "step_2_2_split_chunks"
-            current_step_label = "Step 2.2: チャンク分割"
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"音声を{args.chunk_seconds}秒ごとに分割しています...",
-            )
-            run_cmd(log_path, split_cmd, "step_2_2_split_chunks")
-
-            chunk_files = sorted(Path(chunks_dir).glob("chunk_*.wav"))
-            if not chunk_files:
-                raise RuntimeError(f"no chunk files generated: {chunks_dir}")
-            log_line(log_path, f"chunk_count={len(chunk_files)}")
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"音声の分割が完了しました（{len(chunk_files)}個のチャンクに分割）",
-            )
-
-            # ── initial_prompt（語彙バイアス）の構築 ───────────────────────
-            # ナレッジシート＋ファイル名構造化情報＋コンテキストから固有名詞を抜き、
-            # Whisper の initial_prompt として渡せる短い自然文を作る。
-            # parsed_filename（顧客名・参加者・トピック）を最優先で語彙投入する。
-            try:
-                knowledge_for_prompt = load_knowledge_memos()
-            except Exception as e:
-                log_line(log_path, f"initial_prompt: knowledge load failed: {e!r}")
-                knowledge_for_prompt = []
-            initial_prompt_text = build_initial_prompt(
-                knowledge_memos=knowledge_for_prompt,
-                filename_hints=hints,
-                job_context=job_context if job_context else None,
-                parsed_filename=parsed_filename,
-            )
-            initial_prompt_path = os.path.join(job_dir, "initial_prompt.txt")
-            with open(initial_prompt_path, "w", encoding="utf-8") as f:
-                f.write(initial_prompt_text)
-            log_line(
-                log_path,
-                f"initial_prompt: knowledge={len(knowledge_for_prompt)} "
-                f"prompt_chars={len(initial_prompt_text)} path={initial_prompt_path}",
-            )
-            if initial_prompt_text:
-                record_visible_progress(
-                    log_path=log_path,
-                    visible_log_path=visible_log_path,
-                    job_id=args.job_id,
-                    message=(
-                        f"音声認識の語彙バイアスを設定しました（{len(initial_prompt_text)}文字"
-                        f"、ナレッジ{len(knowledge_for_prompt)}件参照）"
-                    ),
-                )
-
-            current_phase = "step_3_transcribe"
-            current_step_label = "Step 3: 文字起こし"
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"文字起こしを開始します（{len(chunk_files)}チャンク、完了まで数分かかります）",
-            )
-            for i, chunk_path in enumerate(chunk_files):
-                chunk_id = chunk_path.stem
-                start_sec = i * args.chunk_seconds
-                end_sec = (i + 1) * args.chunk_seconds
-                transcribe_args = [
-                    py,
-                    os.path.join(repo, "transcribe_one_chunk.py"),
-                    "--input",
-                    str(chunk_path),
-                    "--language",
-                    args.whisper_language,
-                    "--job-id",
-                    args.job_id,
-                    "--chunk-id",
-                    chunk_id,
-                    "--chunk-index",
-                    str(i),
-                    "--start-sec",
-                    str(start_sec),
-                    "--end-sec",
-                    str(end_sec),
-                    "--output-root",
-                    args.input_root,
-                ]
-                if args.whisper_model:
-                    transcribe_args.extend(["--model", args.whisper_model])
-                if args.compute_type:
-                    transcribe_args.extend(["--compute-type", args.compute_type])
-                run_cmd(
-                    log_path,
-                    transcribe_args,
-                    f"step_3_transcribe_{chunk_id}",
-                )
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"文字起こしが完了しました（全{len(chunk_files)}チャンク処理済み）",
-            )
-
-            current_phase = "step_4_1_merge_chunks"
-            current_step_label = "Step 4.1: 文字起こし結合"
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message="文字起こし結果を1つのテキストにまとめています...",
-            )
-            run_cmd(
-                log_path,
-                [py, os.path.join(repo, "transcription_merge_chunks.py"), "--job-id", args.job_id, "--input-root", args.input_root, "--output", merged_path],
-                "step_4_1_merge_chunks",
-            )
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message="文字起こし結果の結合が完了しました",
-            )
-        else:
-            raise ValueError(f"unsupported input extension: {input_ext}")
+        log_line(log_path, "input_type=txt")
+        with open(args.input_audio, "r", encoding="utf-8") as f:
+            src_text = f.read()
+        with open(merged_path, "w", encoding="utf-8") as f:
+            f.write(src_text)
+        log_line(log_path, "step_input_to_merged: done")
 
         run_transcription_stage_docs_export(
             log_path=log_path,
@@ -948,7 +767,7 @@ def main() -> None:
             message=(
                 f"===== 議事録の作成を開始します =====\n"
                 f"  対象ファイル: {Path(args.input_audio).name}\n"
-                f"  処理モード: {'テキスト入力（文字起こし済み）' if input_ext in TEXT_EXTENSIONS else '音声入力（文字起こしから実施）'}"
+                f"  処理モード: テキスト入力（Pixelレコーダー .txt）"
             ),
         )
 
@@ -959,9 +778,9 @@ def main() -> None:
             job_id=args.job_id,
             phase="step_4_2_mechanical_correct",
             status="running",
-            detail={"input_ext": input_ext},
+            detail={"input_ext": ".txt"},
         )
-        update_doc_title_from_hub(hub_meta_path, f"【機械補正中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【機械補正中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -1010,7 +829,7 @@ def main() -> None:
 
         log_line(
             log_path,
-            f"step_4_3_ai_correct: input_chars={len(mechanical_text)} model=claude-sonnet-4-20250514",
+            f"step_4_3_ai_correct: input_chars={len(mechanical_text)} model={OPUS_CORRECTION_MODEL}",
         )
         update_job_progress(
             input_root=args.input_root,
@@ -1021,7 +840,7 @@ def main() -> None:
         )
         current_phase = "step_4_3_ai_correct"
         current_step_label = "Step 4.3: AI補正"
-        update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -1037,7 +856,7 @@ def main() -> None:
 
         def _on_ai_phase(phase: str):
             label = PHASE_LABELS.get(phase, phase)
-            title = f"【AI補正中：{label}】{stem}"
+            title = f"【AI補正中：{label}】{display_title}"
             update_doc_title_from_hub(hub_meta_path, title, log_path)
             append_log_to_drive(args.job_id, f"  AI処理中...（{label}を実行しています）")
 
@@ -1047,9 +866,8 @@ def main() -> None:
         ai_text = correct_full_text(
             text=mechanical_text,
             on_phase=_on_ai_phase,
-            filename_hints=hints,
+            meeting_profile=meeting_profile,
             visible_log_path=visible_log_path,
-            job_context=job_context if job_context else None,
             on_stream_progress=_on_ai_stream_progress,
         )
 
@@ -1082,65 +900,7 @@ def main() -> None:
             ),
         )
 
-        # --- Step 4.4: 話者識別・ターン分割 ---
-        log_line(log_path, f"step_4_4_diarize: starting input_chars={len(ai_text)}")
-        update_job_progress(
-            input_root=args.input_root,
-            job_id=args.job_id,
-            phase="step_4_4_diarize",
-            status="running",
-            detail={"chars": len(ai_text)},
-        )
-        current_phase = "step_4_4_diarize"
-        current_step_label = "Step 4.4: 話者識別"
-        update_doc_title_from_hub(hub_meta_path, f"【話者識別中】{stem}", log_path)
-        record_visible_progress(
-            log_path=log_path,
-            visible_log_path=visible_log_path,
-            job_id=args.job_id,
-            message="話者交代箇所の分割を実行中...（話者が変わるたびに空行を入れます）",
-        )
-        try:
-            diarized_text = diarize_transcript(
-                ai_text,
-                filename_hints=hints,
-                job_context=job_context if job_context else None,
-            )
-            with open(ai_path, "w", encoding="utf-8") as f:
-                f.write(diarized_text)
-            ai_text = diarized_text
-            log_line(
-                log_path,
-                f"step_4_4_diarize: done output_chars={len(diarized_text)}",
-            )
-            update_job_progress(
-                input_root=args.input_root,
-                job_id=args.job_id,
-                phase="step_4_4_diarize",
-                status="success",
-                detail={"chars": len(diarized_text)},
-            )
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"話者交代の分割が完了しました（{len(diarized_text):,}文字、{diarized_text.count(chr(10)+chr(10))+1}段落）",
-            )
-        except Exception as e:
-            log_line(log_path, f"step_4_4_diarize: non-fatal error: {e}")
-            update_job_progress(
-                input_root=args.input_root,
-                job_id=args.job_id,
-                phase="step_4_4_diarize",
-                status="error",
-                detail={"error": str(e)},
-            )
-            record_visible_progress(
-                log_path=log_path,
-                visible_log_path=visible_log_path,
-                job_id=args.job_id,
-                message=f"話者識別をスキップしました（処理は継続します。原因: {e}）",
-            )
+        update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{display_title}", log_path)
 
         # Step 4.35: AI不明点検出（Claude Opus）
         # 既存の回答済み不明点を読み込んで重複質問防止に利用する
@@ -1158,8 +918,7 @@ def main() -> None:
         )
         ai_unknown_points = detect_unknown_points(
             ai_text,
-            filename_hints=hints,
-            job_context=job_context if job_context else None,
+            meeting_profile=meeting_profile,
             answered_items=answered_items if answered_items else None,
             visible_log_path=visible_log_path,
         )
@@ -1181,8 +940,6 @@ def main() -> None:
             job_id=args.job_id,
             message=f"AIによる不明点の検出が完了しました（{len(ai_unknown_points)}件の不明箇所を発見）",
         )
-        update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
-
         current_phase = "step_4_4_extract_unknowns"
         current_step_label = "Step 4.4: ハイブリッド不明点検出"
         record_visible_progress(
@@ -1217,7 +974,7 @@ def main() -> None:
                 f" → 統合後: {len(merged_unknown_points)}件）"
             ),
         )
-        update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{display_title}", log_path)
         qcycle_cmd = [
             py,
             os.path.join(repo, "run_question_cycle_once.py"),
@@ -1320,7 +1077,7 @@ def main() -> None:
         )
         current_phase = "step_6_1_generate_minutes_transcript"
         current_step_label = "Step 6.1: 議事録生成"
-        update_doc_title_from_hub(hub_meta_path, f"【議事録生成中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【議事録生成中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -1424,13 +1181,13 @@ def main() -> None:
                 "--chunk-size",
                 str(args.docs_chunk_size),
                 "--title",
-                Path(args.input_audio).stem,
+                display_title,
             ]
             if args.docs_parent_folder_id:
                 docs_cmd.extend(["--drive-parent-folder-id", args.docs_parent_folder_id])
                 subfolder_name = args.docs_subfolder_name
                 if not subfolder_name:
-                    subfolder_name = Path(args.input_audio).stem
+                    subfolder_name = display_title
                 docs_cmd.extend(["--drive-subfolder-name", subfolder_name])
             if args.docs_push:
                 docs_cmd.append("--push")
@@ -1444,7 +1201,6 @@ def main() -> None:
             if (
                 args.docs_push
                 and args.docs_parent_folder_id
-                and (input_ext in TEXT_EXTENSIONS or input_ext in AUDIO_EXTENSIONS)
                 and not args.no_docs_upload_source
             ):
                 docs_cmd.extend(["--upload-local-file", os.path.abspath(args.input_audio)])
@@ -1538,6 +1294,7 @@ def main() -> None:
         fr = accumulate_filename_metadata(
             parsed_filename=parsed_filename,
             visible_log_path=visible_log_path,
+            meeting_profile=meeting_profile,
         )
         if not fr.get("enabled"):
             fr_msg = "ファイル名メタ蓄積: スキップ（KNOWLEDGE_SHEET_IDが未設定のため）"

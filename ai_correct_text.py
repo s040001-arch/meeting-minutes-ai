@@ -12,9 +12,9 @@ import urllib.request
 from datetime import datetime
 from typing import Callable, Optional
 
-from filename_hints import format_hints_for_prompt
 from job_context import format_context_for_prompt
 from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
+from meeting_profile import format_meeting_profile_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -221,17 +221,13 @@ def _append_visible_log(visible_log_path: str | None, message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _build_opus_correction_system_prompt(
-    filename_hints: list[str] | None = None,
+    meeting_profile: dict | None = None,
     knowledge_memos: list[str] | None = None,
-    job_context: dict | None = None,
 ) -> str:
-    """Claude 4 Opus 向け一括補正プロンプト。
-    マスキングなしでテキスト全文をそのまま渡す前提。
-    補正後テキスト本文のみを出力させる。
-    """
-    return (
+    """Claude 4 Opus 向け一括補正プロンプト。"""
+    base = (
         "あなたは会議の音声認識テキストを補正する専門アシスタントです。"
-        "入力テキストは音声認識（Whisper）の出力を機械補正したものです。"
+        "入力テキストは Google Pixel レコーダーアプリの音声認識出力を機械補正したものです。"
         "以下の補正ルールに従って補正し、補正後のテキスト本文のみを出力してください。"
         "説明文・前置き・注釈は一切付けないでください。"
         "\n\n【補正ルール】"
@@ -260,10 +256,24 @@ def _build_opus_correction_system_prompt(
         "\n11. 外部会議ではプレセナ側と顧客側の双方が「我々」「御社」「弊社」を使う"
         "\n   - 研修・提案・教材・見積を語る発言はプレセナ側、社内制度・人事施策を語る発言は顧客側"
         "\n   - 一人称・社称の一括置換は禁止。文脈から主語が一意に判断できる場合のみ表記を整える"
-        + format_hints_for_prompt(filename_hints or [])
-        + format_context_for_prompt(job_context or {})
-        + format_knowledge_for_prompt(knowledge_memos or [])
+        "\n12. 入力は Google Pixel レコーダーアプリの音声認識テキストである。以下のPixel特有の誤変換パターンを最優先で復元すること："
+        "\n   - 「最高用」「最高用語」「最高業者」→「再雇用」「再雇用者」"
+        "\n   - 「天然」「天然前」→「定年」「定年前」"
+        "\n   - 「食卓社員」「食卓」→「嘱託社員」「嘱託」"
+        "\n   - 「公認育成」→「後輩育成」"
+        "\n   - 「軽S」「軽装」（経営の意味で使われている場合）→「経営」"
+        "\n   - 「リネン戦略」「リンチ」「ミンチ政策」→「理念戦略」「認知」「認知施策」"
+        "\n   - 「インギージメントサーベリー」「サーベリー」→「エンゲージメントサーベイ」「サーベイ」"
+        "\n   - 「mvv」「MVV」関連の語"
+        "\n   - 人名は会議内で表記が揺れることがある（例: 碓井／薄井／薄い／有馬／アメリカ→参加者リストの人名に統一）"
+        "\n   - 「天然」が「定年」を指している以外の用法（例: 「天然ガス」）は当然そのまま"
+        "\n13. 上記は例示であり、文脈から明らかに別の語を意味していると判断できる場合は同様の補正を行う。"
+        "\n14. 補正前の音声認識特有の冗長な相槌（「うん。」「はい。」の連続、「えっと」「あの」の多用）は、"
+        "発言の意味を変えない範囲で適度に整える。ただし話者の意図を改変するような言い換えは行わない。"
     )
+    profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    knowledge_block = format_knowledge_for_prompt(knowledge_memos or [])
+    return base + profile_block + knowledge_block
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +292,8 @@ def correct_full_text(
     model: str | None = None,
     timeout_sec: int = 900,
     on_phase: Optional[Callable[[str], None]] = None,
-    filename_hints: list[str] | None = None,
+    meeting_profile: dict | None = None,
     visible_log_path: str | None = None,
-    job_context: dict | None = None,
     on_stream_progress: Optional[Callable[[str], None]] = None,
 ) -> str:
     """機械補正済みテキストを Claude 4 Opus に一括で渡し補正済み全文を返す。
@@ -352,9 +361,8 @@ def correct_full_text(
         _append_visible_log(visible_log_path, "  AIにテキストを送信しました（応答を待っています...）")
 
         system_prompt = _build_opus_correction_system_prompt(
-            filename_hints=filename_hints,
+            meeting_profile=meeting_profile,
             knowledge_memos=knowledge_memos,
-            job_context=job_context,
         )
 
         def _on_stream_visible(msg: str) -> None:

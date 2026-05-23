@@ -8,6 +8,7 @@ import requests
 
 from ai_correct_text import resolve_openai_api_key
 from generate_one_question import TYPE_PRIORITY, load_unknown_points
+from meeting_profile import format_meeting_profile_for_prompt, load_meeting_profile
 from knowledge_sheet_store import load_knowledge_memos
 from line_send_question import build_line_message, push_line_message
 from question_value_selection import (
@@ -20,6 +21,7 @@ from repo_env import load_dotenv_local
 
 LINE_PENDING_CONTEXT_PATH = os.path.join("data", "line_pending_context.json")
 ASKED_QUESTIONS_FILENAME = "asked_questions.json"
+QUESTION_SELECTION_AUDIT_FILENAME = "question_selection_audit.json"
 
 
 def _asked_questions_path(job_dir: str) -> str:
@@ -195,6 +197,15 @@ def _build_unknown_points_compact(
             "text": text_raw[:220],
             "reason": str(item.get("reason", "")).strip()[:220],
         }
+        impact = item.get("proposal_impact")
+        if impact is not None:
+            try:
+                entry["proposal_impact"] = int(impact)
+            except (TypeError, ValueError):
+                pass
+        evidence = str(item.get("evidence", "")).strip()
+        if evidence:
+            entry["evidence"] = evidence[:200]
         hypothesis = str(item.get("hypothesis", "")).strip()
         if hypothesis:
             entry["hypothesis"] = hypothesis[:120]
@@ -305,6 +316,7 @@ def _generate_one_question_by_ai(
     timeout_sec: int = 180,
     knowledge_memos: list[str] | None = None,
     asked_questions: list[dict] | None = None,
+    meeting_profile: dict | None = None,
 ) -> dict:
     """
     AI主導で「全体文脈に最も効く1問」を生成する。
@@ -332,6 +344,7 @@ def _generate_one_question_by_ai(
         "question_status": "generated|none",
         "question_text": "string（質問本文）",
         "question_format": "yes_no | free_text（hypothesisがあればyes_no優先）",
+        "proposal_impact": "integer 1-10（選んだ不明点の proposal_impact）",
         "selected_unknown": {"type": "string", "text": "string", "reason": "string"},
         "selection_audit": {
             "selection_mode": "ai_global_context",
@@ -348,11 +361,14 @@ def _generate_one_question_by_ai(
     }
     knowledge_section = _format_knowledge_for_question_prompt(knowledge_memos or [])
     asked_section = _format_asked_questions_for_prompt(asked_questions or [])
+    profile_section = format_meeting_profile_for_prompt(meeting_profile or {})
     system_prompt = (
         "あなたは議事録品質管理アシスタントです。"
         "目的は、全文の文脈が最も繋がるように、ユーザーへの質問を1問だけ選ぶことです。"
-        "\n\n【1問の選び方】"
-        "\n- 【最優先】音声認識の誤変換・意味不明語句（固有名詞/数値/文字化け）"
+        + profile_section
+        + "\n\n【1問の選び方】"
+        "\n- 【最優先】proposal_impact が高いもの（次の打ち手への影響が大きい）"
+        "\n- 音声認識の誤変換・意味不明語句（固有名詞/数値/文字化け）"
         "\n- 解釈確認（『この運用方針で合っていますか？』系）は原則出さない。"
         "文脈から読み取れる合意内容を疑う質問はユーザー負担が高く価値が低い"
         "\n- 細かな表記ゆれより、誤変換の修正に直結する論点を優先する"
@@ -360,6 +376,10 @@ def _generate_one_question_by_ai(
         "\n- 候補の context_window（前後文脈）を必ず読んで判断する"
         "\n- ユーザー側の回答コストが極端に高いものは避ける"
         "\n- 【既に送信済みの質問】と論点・該当箇所・仮説が類似するものは絶対に再質問しない"
+        "\n\n【選定基準】"
+        "\n- proposal_impact が高いものを優先（次の打ち手への影響が大きい）"
+        "\n- 同じ impact なら、確認のしやすさ（Yes/Noで答えられる > 自由記述）を優先"
+        "\n- 同じ impact かつ同じ形式なら、会議の前半で言及された論点を優先"
         "\n\n【質問文の形式】"
         "\n- 誤変換・固有名詞の確認は free_text を優先"
         "（例: 『〇〇』は『△△』の誤変換でしょうか？正しい表記を教えてください）"
@@ -620,8 +640,8 @@ def main() -> None:
     parser.add_argument(
         "--min-question-value",
         type=int,
-        default=8,
-        help="この値未満の候補は質問せず完了扱い（デフォルト: 8）",
+        default=7,
+        help="この proposal_impact 未満の候補は質問せず完了扱い（デフォルト: 7）",
     )
     parser.add_argument(
         "--question-model",
@@ -677,6 +697,7 @@ def main() -> None:
         # 同一ジョブで既に送信済みの質問履歴を AI に渡して類似質問を抑制
         asked_history = _load_asked_questions(job_dir)
         print(f"question_generation_asked_history_count={len(asked_history)}")
+        meeting_profile = load_meeting_profile(job_dir)
 
         try:
             ai_result = _generate_one_question_by_ai(
@@ -686,6 +707,7 @@ def main() -> None:
                 api_key=api_key,
                 knowledge_memos=knowledge_memos,
                 asked_questions=asked_history,
+                meeting_profile=meeting_profile,
             )
             question_status = str(ai_result.get("question_status", "generated")).strip() or "generated"
             question_format = str(ai_result.get("question_format", "")).strip().lower()
@@ -695,18 +717,32 @@ def main() -> None:
             if not isinstance(selected_unknown, dict):
                 selected_unknown = None
             question_text = _normalize_question_text(ai_result.get("question_text", ""))
+            try:
+                selected_impact = int(ai_result.get("proposal_impact", 0))
+            except (TypeError, ValueError):
+                selected_impact = int((selected_unknown or {}).get("proposal_impact") or 0)
             selection_audit = ai_result.get("selection_audit")
             if not isinstance(selection_audit, dict):
                 selection_audit = {"selection_mode": "ai_global_context"}
             selection_audit["selection_mode"] = "ai_global_context"
             selection_audit["question_format"] = question_format
+            selection_audit["proposal_impact"] = selected_impact
             message = str(ai_result.get("message", "")).strip()
 
-            if question_status == "none" or not question_text:
+            if (
+                question_status == "none"
+                or not question_text
+                or selected_impact < args.min_question_value
+            ):
                 result_payload = {
                     "job_id": args.job_id,
                     "question_status": "none",
-                    "message": message or "全文文脈は提出可能水準のため、追加質問は行いません。",
+                    "message": message or (
+                        f"proposal_impact={selected_impact} が閾値 {args.min_question_value} 未満のため、"
+                        "追加質問は行いません。"
+                        if selected_impact < args.min_question_value and question_text
+                        else "全文文脈は提出可能水準のため、追加質問は行いません。"
+                    ),
                     "selected_unknown": selected_unknown,
                     "doc_url": doc_url,
                     "selection_audit": {**pending_meta, **selection_audit},
@@ -779,6 +815,22 @@ def main() -> None:
     with open(question_output, "w", encoding="utf-8") as f:
         json.dump(result_payload, f, ensure_ascii=False, indent=2)
 
+    audit_path = os.path.join(job_dir, QUESTION_SELECTION_AUDIT_FILENAME)
+    audit_payload = {
+        "job_id": args.job_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "question_status": result_payload.get("question_status"),
+        "message": result_payload.get("message"),
+        "question_text": result_payload.get("question_text"),
+        "selected_unknown": result_payload.get("selected_unknown"),
+        "selection_audit": result_payload.get("selection_audit"),
+        "min_question_value": args.min_question_value,
+        "unknown_points_pending_count": len(unknown_points),
+        "context_text_path": context_text_path,
+    }
+    with open(audit_path, "w", encoding="utf-8") as f:
+        json.dump(audit_payload, f, ensure_ascii=False, indent=2)
+
     message_text = build_line_message(result_payload)
     with open(message_output, "w", encoding="utf-8") as f:
         f.write(message_text)
@@ -819,6 +871,7 @@ def main() -> None:
     print(f"unknowns={unknowns_path}")
     print(f"context_text={context_text_path or '(not found)'}")
     print(f"question_result={question_output}")
+    print(f"question_selection_audit={audit_path}")
     print(f"line_message={message_output}")
     print(f"question_status={result_payload.get('question_status')}")
     print(f"line_push={line_push}")

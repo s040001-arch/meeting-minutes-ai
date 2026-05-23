@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 
+from meeting_profile import infer_display_title, load_meeting_profile, resolve_display_title
+
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -51,6 +53,18 @@ def _load_doc_id(job_id: str, input_root: str) -> str | None:
         return s or None
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _resolve_export_title(job_id: str, input_root: str, cli_title: str | None) -> str | None:
+    if cli_title:
+        return cli_title
+    job_dir = os.path.join(input_root, job_id)
+    profile = load_meeting_profile(job_dir)
+    resolved = resolve_display_title(profile, job_id=job_id)
+    if resolved != job_id:
+        return resolved
+    inferred = infer_display_title(job_dir, job_id)
+    return inferred if inferred != job_id else None
 
 
 def _export_cmd(
@@ -90,8 +104,13 @@ def _export_cmd(
     return cmd
 
 
+def _minutes_structured_path(job_id: str, input_root: str) -> str:
+    return os.path.join(input_root, job_id, "minutes_structured.md")
+
+
 def cmd_sync_docs(args: argparse.Namespace) -> None:
-    if not getattr(args, "skip_compose", False):
+    structured_md = _minutes_structured_path(args.job_id, args.input_root)
+    if getattr(args, "compose_from_scratch", False):
         compose_cmd = [
             _py(),
             os.path.join(REPO_ROOT, "compose_docs_hub_markdown.py"),
@@ -105,6 +124,13 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
         if getattr(args, "include_internal_workspace", False):
             compose_cmd.append("--include-internal-workspace")
         _run(compose_cmd + (["--title", args.title] if args.title else []))
+    elif not os.path.isfile(structured_md):
+        raise FileNotFoundError(
+            f"minutes_structured.md not found: {structured_md}. "
+            "Run generate_minutes_other_sections.py first, or pass --compose-from-scratch "
+            "for legacy jobs (note: compose omits 論点メモ)."
+        )
+    export_title = _resolve_export_title(args.job_id, args.input_root, args.title)
     _run(
         _export_cmd(
             args.job_id,
@@ -113,7 +139,7 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
             chunk_size=args.chunk_size,
             drive_parent=args.drive_parent_folder_id,
             drive_subfolder=args.drive_subfolder_name,
-            title=args.title,
+            title=export_title,
         )
     )
 
@@ -136,21 +162,6 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.answers_json,
         ]
     )
-    if os.path.isfile(after_qa_path):
-        _run(
-            [
-                _py(),
-                os.path.join(REPO_ROOT, "diarize_speakers.py"),
-                "--job-id",
-                args.job_id,
-                "--input-root",
-                args.input_root,
-                "--input",
-                after_qa_path,
-                "--output",
-                after_qa_path,
-            ]
-        )
     _run(
         [
             _py(),
@@ -251,9 +262,17 @@ def main() -> None:
         help="Docs 用 MD に確認ワークスペース・回答メタを含める（デフォルトは成果物のみ）",
     )
     parser.add_argument(
+        "--compose-from-scratch",
+        action="store_true",
+        help=(
+            "compose_docs_hub_markdown.py で minutes_structured.md を再生成する。"
+            "Phase 6 以降の「論点メモ」は含まれない旧形式のため、通常は指定しない。"
+        ),
+    )
+    parser.add_argument(
         "--skip-compose",
         action="store_true",
-        help="compose_docs_hub_markdown.py をスキップし、既存の minutes_structured.md をそのまま使用する（generate_minutes_other_sections.py 実行後に使用）",
+        help="（非推奨・互換用）デフォルトで compose はスキップされるため指定不要",
     )
     args = parser.parse_args()
     if os.getenv("DOCS_HUB_INCLUDE_INTERNAL_WORKSPACE", "").strip().lower() in ("1", "true", "yes"):

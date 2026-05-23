@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-diarize",
         action="store_true",
-        help="話者交代の空行分割をスキップ",
+        help="（非推奨・互換用）話者分割は廃止済みのため常にスキップ",
     )
     parser.add_argument(
         "--push",
@@ -76,32 +76,6 @@ def main() -> None:
             ],
             "recorrect_from_line_answer",
         )
-
-    if not args.skip_diarize:
-        source = after_qa if os.path.isfile(after_qa) else ai_path
-        if not os.path.isfile(source):
-            raise FileNotFoundError(
-                f"no transcript to diarize: {after_qa} or {ai_path}"
-            )
-        _run(
-            [
-                _py(),
-                os.path.join(REPO_ROOT, "diarize_speakers.py"),
-                "--job-id",
-                args.job_id,
-                "--input-root",
-                args.input_root,
-                "--input",
-                source,
-                "--output",
-                after_qa if source == after_qa else ai_path,
-            ],
-            "diarize_speakers",
-        )
-        if source == ai_path and os.path.isfile(ai_path):
-            import shutil
-
-            shutil.copyfile(ai_path, after_qa)
 
     _run(
         [

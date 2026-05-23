@@ -197,10 +197,20 @@ def _merge_knowledge_memos_with_all_answers(
     *,
     existing_memos: list[str],
     answers: list[dict],
+    meeting_profile: dict | None = None,
     model: str = KNOWLEDGE_UPDATER_MODEL,
 ) -> dict:
     """複数の Q&A ペアをまとめて1回の Claude 呼び出しで整理する（Step⑰用）。"""
     client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
+    profile = meeting_profile or {}
+    customer = str(profile.get("customer_name") or "").strip()
+    topic = str(profile.get("topic") or "").strip()
+    profile_hint = ""
+    if customer or topic:
+        profile_hint = (
+            f"\n\n【今回の会議コンテキスト】顧客: {customer or '不明'} / 議題: {topic or '不明'}"
+            "\nこの会議文脈に紐づく再利用価値のある知識を優先的に統合してください。"
+        )
     system_prompt = (
         "あなたは議事録AIの再利用ナレッジ管理アシスタントです。"
         "入力として、既存のナレッジメモ一覧と、今回のジョブで蓄積された複数の質問・回答ペアが与えられます。"
@@ -210,7 +220,8 @@ def _merge_knowledge_memos_with_all_answers(
         "会議固有の一時的な yes/no 回答や、その場限りの数字確認のように再利用価値が低いものは追加しないでください。"
         "一方で、用語説明、役割定義、社内固有の呼称、サービス説明、関係性の説明などは蓄積対象にしてください。"
         "既存メモの意味が変わらない範囲で、より自然で再利用しやすい表現に統合して構いません。"
-        "出力は JSON オブジェクトのみ。"
+        + profile_hint
+        + "\n出力は JSON オブジェクトのみ。"
         '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
     )
     qa_pairs = [
@@ -224,6 +235,11 @@ def _merge_knowledge_memos_with_all_answers(
     payload = {
         "existing_knowledge": existing_memos,
         "qa_pairs": qa_pairs,
+        "meeting_profile": {
+            "customer_name": customer,
+            "topic": topic,
+            "meeting_scope": profile.get("meeting_scope"),
+        },
     }
     resp = client.messages.create(
         model=model,
@@ -243,7 +259,11 @@ def _merge_knowledge_memos_with_all_answers(
     }
 
 
-def merge_all_answers_into_knowledge_store(answers: list[dict]) -> dict:
+def merge_all_answers_into_knowledge_store(
+    answers: list[dict],
+    *,
+    meeting_profile: dict | None = None,
+) -> dict:
     """複数の Q&A ペアをまとめて Knowledge Sheet に反映する（Step⑰用）。
 
     answers は [{"question_text": "...", "answer_text": "..."}] 形式のリスト。
@@ -270,6 +290,7 @@ def merge_all_answers_into_knowledge_store(answers: list[dict]) -> dict:
     merged = _merge_knowledge_memos_with_all_answers(
         existing_memos=existing,
         answers=answers,
+        meeting_profile=meeting_profile,
     )
     updated = _normalize_knowledge_memos(merged.get("updated_knowledge"))
     changed = updated != existing

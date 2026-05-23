@@ -1,27 +1,16 @@
-"""Step⑰: ナレッジ蓄積モジュール。
-
-Step⑪（議事録生成）完了直後に実行され、現在のジョブで得られた回答（answers.json）を
-Knowledge Sheet に永続化する。
-
-目的は将来の別ジョブで同じ質問を繰り返さないようにすること。
-この処理は次回以降のジョブのためであり、現在のジョブの補正には影響しない。
-
-環境変数:
-  ANTHROPIC_API_KEY   — Anthropic API キー（必須）
-  KNOWLEDGE_SHEET_ID  — Google Sheets のスプレッドシート ID（未設定時はスキップ）
-"""
+"""Step⑰: ナレッジ蓄積モジュール。"""
 
 import json
 import os
 
 from ai_correct_text import _append_visible_log
 from knowledge_sheet_store import merge_all_answers_into_knowledge_store
+from meeting_profile import load_meeting_profile
 
 ANSWERS_JSON_FILENAME = "answers.json"
 
 
 def load_job_answers(job_dir: str) -> list[dict]:
-    """ジョブディレクトリの answers.json を読み込む。存在しなければ空リスト。"""
     path = os.path.join(job_dir, ANSWERS_JSON_FILENAME)
     if not os.path.isfile(path):
         return []
@@ -38,29 +27,24 @@ def accumulate_knowledge(
     *,
     visible_log_path: str | None = None,
 ) -> dict:
-    """answers.json を読み込んで Knowledge Sheet に反映する（Step⑰）。
-
-    失敗してもパイプラインを止めない（結果は dict で返す）。
-
-    Args:
-        job_dir: ジョブディレクトリのパス（answers.json の格納先）
-        visible_log_path: processing_visible_log.txt のパス
-
-    Returns:
-        {"updated": bool, "enabled": bool, ...} の結果辞書
-    """
     answers = load_job_answers(job_dir)
     if not answers:
         _append_visible_log(visible_log_path, "  回答データなし → ナレッジ蓄積をスキップ")
         return {"skipped": True, "reason": "no_answers", "enabled": True, "updated": False}
 
+    meeting_profile = load_meeting_profile(job_dir)
     _append_visible_log(
         visible_log_path,
-        f"  {len(answers)}件の回答をナレッジシートに反映中...",
+        f"  {len(answers)}件の回答をナレッジシートに反映中..."
+        f"（顧客={meeting_profile.get('customer_name') or '-'},"
+        f" 議題={meeting_profile.get('topic') or '-'}）",
     )
 
     try:
-        result = merge_all_answers_into_knowledge_store(answers)
+        result = merge_all_answers_into_knowledge_store(
+            answers,
+            meeting_profile=meeting_profile,
+        )
     except Exception as e:
         _append_visible_log(visible_log_path, f"  ナレッジ蓄積でエラーが発生しました: {e!r}")
         return {"error": str(e), "enabled": True, "updated": False}

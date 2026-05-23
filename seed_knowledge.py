@@ -129,17 +129,39 @@ PENDING_APPEND_MEMOS = [
     "「嘱託定年再雇用」「360度評価」はエレマテック人事関連会議で登場しうる用語。",
 ]
 
+# 会話・運用改善セッション（2026-05）で追加するナレッジ
+SESSION_APPEND_MEMOS = [
+    "外部会議でプレセナ社員（相原等）が「この研修」「こういう研修」と言った場合、プレセナが顧客向けに設計・提供する研修プログラムを指す。顧客社内の既存研修名と混同しない。",
+    "定年・継続再雇用の切り替え期における典型的な研修ニーズは、キャリア棚卸し、知識・スキルの後輩への伝承、役割変化へのモチベーション設計である（エレマテック等の人事相談で頻出）。",
+    "定年再雇用・嘱託社員向け研修の対象は、問題が表面化した少数の社員だけでなく、定年前後の社員や将来の再雇用者を想定した予防的プログラムとして設計されることが多い。",
+    "外部会議での「我々」はプレセナ側・顧客側の双方が使う。ある箇所で「我々＝顧客人事部」と確認されても、発言録全体をその主体に置き換えてはならない。引用箇所と前後文脈（制度・研修・提案のどれを語るか）で判断する。",
+    "エレマテックの嘱託定年再雇用には複数のランクがあり、給与・役割・資格の最適化に関する社内ワーキンググループが人事部内で進行することがある。外部研修ニーズはその文脈から生じる。",
+    "エレマテック人事部では再雇用者評価に後輩育成項目を組み込む制度整備と、それを支援する外部研修（キャリア棚卸し等）をセットで検討することがある。",
+    "ファイル名が「プレセナ社_」「プレセナ・ストラテジック・パートナーズ_」等で始まる場合はプレセナ社内会議。顧客名がファイル名に入る場合は外部会議。",
+    "相原隆太郎はプレセナ・ストラテジック・パートナーズの講師・コンサルタント。外部会議では顧客（例: エレマテック人事）の相談を受け研修を提案する側であり、顧客側の人事担当者ではない。",
+]
 
-def append_pending_knowledge_memos() -> dict:
-    """PENDING_APPEND_MEMOS を既存ナレッジに重複なく追記する。"""
+
+def append_knowledge_memos(memos: list[str]) -> dict:
+    """指定メモを既存ナレッジに重複なく追記する。"""
     existing = load_knowledge_memos()
     seen = set(existing)
-    added = [m for m in PENDING_APPEND_MEMOS if m not in seen]
+    added = [m for m in memos if m not in seen]
     if added:
         save_knowledge_memos(existing + added)
     return {
         "added_count": len(added),
         "total_count": len(existing) + len(added),
+        "added": added,
+    }
+
+
+def append_pending_knowledge_memos() -> dict:
+    """PENDING_APPEND_MEMOS を既存ナレッジに重複なく追記する。"""
+    result = append_knowledge_memos(PENDING_APPEND_MEMOS)
+    return {
+        "added_count": result["added_count"],
+        "total_count": result["total_count"],
     }
 
 
@@ -149,6 +171,11 @@ def main() -> None:
         "--append-pending",
         action="store_true",
         help="PENDING_APPEND_MEMOS を既存シートに重複なく追記して終了",
+    )
+    parser.add_argument(
+        "--append-session",
+        action="store_true",
+        help="SESSION_APPEND_MEMOS（会話セッション由来）を追記して終了",
     )
     args = parser.parse_args()
 
@@ -163,6 +190,16 @@ def main() -> None:
             f"append-pending 完了: 追加 {result['added_count']}件 / "
             f"合計 {result['total_count']}件"
         )
+        return
+
+    if args.append_session:
+        result = append_knowledge_memos(SESSION_APPEND_MEMOS)
+        print(
+            f"append-session 完了: 追加 {result['added_count']}件 / "
+            f"合計 {result['total_count']}件"
+        )
+        for item in result.get("added") or []:
+            print(f"  + {item[:80]}...")
         return
 
     print(f"対象スプレッドシート: {sheet_id}")

@@ -1,15 +1,4 @@
-"""Step⑨: Claude 4 Opus による AI 不明点検出モジュール。
-
-Step⑧の補正済みテキストを入力として、文脈レベルの不明点を検出する。
-
-出力スキーマは extract_unknown_points.py の形式（type/text/reason）に準拠し、
-source/hypothesis を追加フィールドとして持つ。
-パース失敗時は空リストを返してパイプラインを止めない。
-
-環境変数:
-  ANTHROPIC_API_KEY          — Anthropic API キー（必須）
-  ANTHROPIC_DETECTION_MODEL  — モデル名の上書き（デフォルト: claude-opus-4-20250514）
-"""
+"""Step 4.35: Claude 4 Opus による AI 不明点検出モジュール。"""
 
 import json
 import logging
@@ -21,18 +10,12 @@ from ai_correct_text import (
     _normalize_api_key,
     _stream_anthropic_text,
 )
-from filename_hints import format_hints_for_prompt
-from job_context import format_context_for_prompt
 from knowledge_sheet_store import load_knowledge_memos
+from meeting_profile import format_meeting_profile_for_prompt
 
 logger = logging.getLogger(__name__)
 
 OPUS_DETECTION_MODEL = "claude-opus-4-20250514"
-# 旧 30,000 字制限を撤廃。Claude Opus のコンテキスト窓 200K に収まる範囲で扱う。
-# 安全側で 100,000 字までを単一プロンプトで処理し、それ以上は分割検出する。
-_DETECTION_MAX_TEXT_CHARS = 100000
-_DETECTION_CHUNK_CHARS = 80000  # 分割時の1チャンク文字数（オーバーラップ含めず）
-_DETECTION_CHUNK_OVERLAP = 1500  # チャンク間の重複文字数（境界の不明点を取り逃さない）
 
 
 def _resolve_detection_api_key() -> str:
@@ -43,11 +26,6 @@ def _resolve_detection_api_key() -> str:
 
 
 def _format_knowledge_as_exclusion(memos: list[str] | None) -> str:
-    """ナレッジを「既知情報＝質問しないリスト」として明示する。
-
-    `format_knowledge_for_prompt` は補正用の参考情報文言なので、
-    検出時は「これらは既知ゆえ確認質問するな」を強く伝える別フォーマットを使う。
-    """
     if not memos:
         return ""
     lines = "\n".join(f"- {m}" for m in memos if m and m.strip())
@@ -62,57 +40,80 @@ def _format_knowledge_as_exclusion(memos: list[str] | None) -> str:
     )
 
 
-def _build_detection_system_prompt(
-    filename_hints: list[str] | None = None,
-    job_context: dict | None = None,
-    knowledge_memos: list[str] | None = None,
+def _build_detection_prompt(
+    meeting_profile: dict,
+    knowledge_memos: list[str],
     answered_items: list[dict] | None = None,
 ) -> str:
+    profile_block = format_meeting_profile_for_prompt(meeting_profile)
+    knowledge_block = _format_knowledge_as_exclusion(knowledge_memos)
+
+    scope = str(meeting_profile.get("meeting_scope") or "unknown")
+
+    if scope == "external":
+        purpose_frame = (
+            "この会議は外部会議（顧客との打ち合わせ）です。"
+            "相原は提案・相談を担う立場にあり、会議後に「次の打ち手」を考える必要があります。"
+            "次の打ち手とは、例えば次の提案書を書く、追加のヒアリングを設計する、"
+            "社内に持ち帰って検討する、などです。"
+            "相原が次の打ち手を考えるために、会議の文面だけからは確定できず"
+            "確認が必要な事項を不明点として抽出してください。"
+        )
+    elif scope == "internal":
+        purpose_frame = (
+            "この会議は社内会議（プレセナ社内の議論）です。"
+            "相原がこの会議の議論を踏まえて次のアクションを取るために、"
+            "会議の文面だけからは確定できず確認が必要な事項を不明点として抽出してください。"
+        )
+    else:
+        purpose_frame = (
+            "相原がこの会議の議論を踏まえて次のアクションを取るために、"
+            "会議の文面だけからは確定できず確認が必要な事項を不明点として抽出してください。"
+        )
+
     prompt = (
-        "あなたは会議の議事録品質管理アシスタントです。\n"
-        "以下の会議テキスト（音声認識→AI補正済み）を読み、人間の担当者が確認しなければ"
-        "議事録を正確に完成させられない「不明点」を最大10件まで検出してください。\n"
-        "\n【検出対象とする不明点（優先順）】\n"
-        "【最優先】音声認識の誤変換・文字化け・意味不明な語句\n"
-        "  例: 「係数詐欺」→「具体的」、「集合形成」→「集合研修」、意味が通らないフレーズ\n"
-        "【高】人名・社名・部署名・略称の表記揺れ・誤認\n"
-        "【高】金額・件数・期限などの数値で誤認識・誤聴き取りの疑い\n"
-        "【中】決定事項の実施主体（誰がやるか）が発言録上で不明確\n"
-        "\n【検出してはならないもの（重要・厳守）】\n"
-        "- 発言内容の解釈確認（「この提案で合っていますか？」系）。"
-        "文脈から読み取れる運用方針・合意内容を疑う質問は不要\n"
-        "- 既に決定事項・Next Action として明確な内容の再確認\n"
-        "- 言い淀み・フィラー（「えっと」「あの」等）\n"
-        "- 文脈から一意に解釈できる箇所\n"
-        "- 同一論点の重複（1論点につき1件のみ）\n"
-        "- 後述の【既知情報】に登録済みの用語・人名・組織\n"
-        "- 後述の【確認済み情報】で過去に同等の質問が解消済みのもの\n"
-        "- 雑談・自己紹介・挨拶部分の細部\n"
-        "- 「我々」「御社」「弊社」などの主語確認で、引用箇所以外は文脈から一意に判断できるもの\n"
-        "  （外部会議では顧客側とコンサル/研修提供側の双方が「我々」を使うのが普通。全体を一括で置き換える質問は不要）\n"
-        "- 外部会議でプレセナが研修/コンサル提供側であることが文脈上明らかなのに、"
-        "「誰が研修を提供するか」を再確認する質問\n"
-        "\n【旧カテゴリ参考（上記優先順に従うこと）】\n"
-        "1. 人名の表記揺れ・誤認\n"
-        "2. 社名・部署名・略称の正式名称が不明\n"
-        "3. 数値の誤認識\n"
-        "4. 意味不明な語句（garbled text）\n"
-        "\n【優先度の付け方】\n"
-        "- 議事録の主要論点・合意事項・Next Action に関連するものを優先\n"
-        "- 単なる雑談中の固有名詞は優先度を下げる\n"
-        "- 確認したら本文の何箇所も連動して確定する『要』の論点を最優先\n"
-        "\n【hypothesis（推測の正解）について】\n"
-        "- 文脈から「これではないか」と高い確度で推測できる場合は必ず hypothesis に書く\n"
-        "- hypothesis があれば後段で『○○で合っていますか？』のYes/No形式に変換される\n"
-        "- 自由記述質問は回答コストが高いため、可能な限り hypothesis を埋めること\n"
+        "あなたは相原隆太郎（プレセナ・ストラテジック・パートナーズの提案担当）の参謀です。\n"
+        f"{purpose_frame}\n"
+        f"{profile_block}\n"
+        "\n【不明点の優先度評価】\n"
+        "各不明点に proposal_impact スコア（1-10）を付けてください：\n"
+        "- 10: この情報がないと次の打ち手の骨子が組み立てられない（最優先）\n"
+        "- 7-9: 次の打ち手のα案には書けるが、本提案・本アクションで必ず必要\n"
+        "- 4-6: 打ち手の精度向上に役立つが、なくても進められる\n"
+        "- 1-3: あれば嬉しいが、打ち手に大きな影響はない\n"
+        "\n【検出対象】\n"
+        "1. 顧客（または社内関係者）の意思決定が未確定で、打ち手の方向性に影響する論点\n"
+        "2. 相手側で次回までに整理してもらう必要がある情報\n"
+        "3. 相原が仮置きで話を進めた前提のうち、確認が必要なもの\n"
+        "4. 重要な固有名詞・人名・組織名・数値で、音声認識補正後も意味が確定できないもの\n"
+        "5. 議論の中で『〇〇については別途』『この話はまた』のように先送りされた論点\n"
+        "\n【除外】\n"
+        "- 相槌・つなぎ言葉の聞き取り誤り\n"
+        "- 会議の本筋に関係ない雑談\n"
+        "- 既に会議内で合意・確認が取れている事項\n"
+        "- 具体的な日時・時期・スケジュール（例：「6月1週目」「6月中」「来月末まで」）が"
+        "会議内で発言されている場合、その時期に関する論点は decision_pending として扱わない。"
+        "時期が合意された証拠が evidence にある場合は、その不明点を抽出してはならない。\n"
+        "- 数値・金額・人数・期間などが会議内で具体的に発言・合意されている場合、"
+        "それを「未確定」として抽出してはならない。\n"
+        "- 「○○については別途」「この話はまた」と先送りされた論点は deferred_topic として"
+        "抽出してよいが、proposal_impact は最大 6 までとする"
+        "（先送り＝相原の次の打ち手の骨子には直接影響しないため）。\n"
+        "- 下記の既知情報に該当するもの\n"
+        f"{knowledge_block}\n"
         "\n【出力形式】\n"
         "JSON配列のみを出力してください。説明文・前置き・マークダウンのコードブロックは不要です。\n"
-        "各要素のスキーマ:\n"
-        '{"type": "固有名詞|決定事項|発言意図|数値|主語", '
-        '"text": "問題箇所のテキスト（前後の文脈を含む短い抜粋。70文字以内）", '
-        '"reason": "なぜ不明なのか（1〜2文）", '
-        '"hypothesis": "推測される正解（確信があれば。なければ空文字）"}\n'
-        "最大10件。本当に確認が必要なものだけに絞ること。"
+        "各要素は以下のフィールドを持つ：\n"
+        "- type: 'fact_unknown' / 'decision_pending' / 'name_unclear' / 'premise_to_verify' / 'deferred_topic' のいずれか\n"
+        "- text: 不明点の内容（相原が読んで何を確認すべきかすぐ分かる文）\n"
+        "- proposal_impact: 1-10 の整数\n"
+        "- reason: なぜこの不明点が次の打ち手にとって重要なのか（簡潔に）\n"
+        "- evidence: 不明点の根拠となる会議発言の該当箇所（30-100文字程度の引用）。"
+        "「不明点が未確定であることを示す発言」を引用すること。"
+        "冒頭挨拶・議題提示文（例：「本日は〜についてご相談」）を evidence に使うのは禁止"
+        "（議題提示は不明点の根拠にならない）。\n"
+        "- hypothesis: 最もありそうな答え（推測でよい）。Yes/No質問にできる場合のみ記載\n"
+        "\n最大10件。proposal_impact の降順でソート。本当に確認が必要なものだけに絞る。"
     )
 
     if answered_items:
@@ -129,32 +130,18 @@ def _build_detection_system_prompt(
                 + "\n".join(confirmed_lines)
             )
 
-    prompt += format_hints_for_prompt(filename_hints or [])
-    prompt += format_context_for_prompt(job_context or {})
-    prompt += _format_knowledge_as_exclusion(knowledge_memos or [])
     return prompt
 
 
-def _split_text_for_detection(text: str) -> list[str]:
-    """長文を検出用に分割する。文字単位で重複付きチャンクに分ける。"""
-    if len(text) <= _DETECTION_MAX_TEXT_CHARS:
-        return [text]
-    chunks: list[str] = []
-    pos = 0
-    while pos < len(text):
-        end = min(pos + _DETECTION_CHUNK_CHARS, len(text))
-        chunk = text[pos:end]
-        chunks.append(chunk)
-        if end >= len(text):
-            break
-        pos = end - _DETECTION_CHUNK_OVERLAP
-        if pos < 0:
-            pos = 0
-    return chunks
+def _parse_proposal_impact(value: object) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(10, n))
 
 
 def _dedupe_unknown_items(items: list[dict]) -> list[dict]:
-    """text 完全一致で重複削除。先勝ち。"""
     seen: set[str] = set()
     out: list[dict] = []
     for item in items:
@@ -171,25 +158,13 @@ def detect_unknown_points(
     *,
     model: str | None = None,
     timeout_sec: int = 600,
-    filename_hints: list[str] | None = None,
-    job_context: dict | None = None,
+    meeting_profile: dict | None = None,
     answered_items: list[dict] | None = None,
     visible_log_path: str | None = None,
+    # 後方互換（未使用）
+    filename_hints: list[str] | None = None,
+    job_context: dict | None = None,
 ) -> list[dict]:
-    """Step⑨: 補正済みテキストから Claude 4 Opus で不明点を検出して返す。
-
-    エラー時は空リストを返してパイプラインを止めない。
-    出力スキーマ: [{"type", "text", "reason", "source", "hypothesis?"}]
-
-    Args:
-        text: Step⑧で補正済みのテキスト
-        model: モデル名（未指定時は ANTHROPIC_DETECTION_MODEL 環境変数 or デフォルト）
-        timeout_sec: API タイムアウト秒数
-        filename_hints: ファイル名から抽出したヒント
-        job_context: context.json のコンテキスト情報
-        answered_items: 過去に回答済みの不明点（重複質問防止に使用）
-        visible_log_path: processing_visible_log.txt のパス
-    """
     if not text:
         return []
 
@@ -201,122 +176,96 @@ def detect_unknown_points(
 
     try:
         api_key = _resolve_detection_api_key()
-    except RuntimeError as e:
-        _append_visible_log(visible_log_path, f"  AI不明点検出: APIキーが未設定のためスキップ")
+    except RuntimeError:
+        _append_visible_log(visible_log_path, "  AI不明点検出: APIキーが未設定のためスキップ")
         return []
 
-    knowledge_memos: list[str] = []
-    try:
-        knowledge_memos = load_knowledge_memos() or []
-        if knowledge_memos:
-            _append_visible_log(
-                visible_log_path,
-                f"  ナレッジシートから{len(knowledge_memos)}件の知識を参照",
-            )
-    except Exception as e:
-        _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
+    profile = dict(meeting_profile or {})
+    knowledge_memos: list[str] = list(profile.get("relevant_knowledge") or [])
+    if not knowledge_memos:
+        try:
+            knowledge_memos = load_knowledge_memos() or []
+            if knowledge_memos:
+                _append_visible_log(
+                    visible_log_path,
+                    f"  ナレッジシートから{len(knowledge_memos)}件の知識を参照",
+                )
+        except Exception as e:
+            _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
 
-    chunks = _split_text_for_detection(text)
-    if len(chunks) > 1:
-        _append_visible_log(
-            visible_log_path,
-            f"  AIに不明点の検出を依頼中...（{len(text):,}文字を{len(chunks)}分割で分析）",
-        )
-    else:
-        _append_visible_log(
-            visible_log_path,
-            f"  AIに不明点の検出を依頼中...（{len(text):,}文字を分析）",
-        )
+    _append_visible_log(
+        visible_log_path,
+        f"  AIに不明点の検出を依頼中...（{len(text):,}文字を分析）",
+    )
 
-    system_prompt = _build_detection_system_prompt(
-        filename_hints=filename_hints,
-        job_context=job_context,
+    system_prompt = _build_detection_prompt(
+        meeting_profile=profile,
         knowledge_memos=knowledge_memos,
         answered_items=answered_items,
     )
 
-    max_tokens = 4096
-    aggregated: list[dict] = []
+    try:
+        raw_response, _stop_reason = _stream_anthropic_text(
+            api_key=api_key,
+            model=resolved_model,
+            system_prompt=system_prompt,
+            user_message=text,
+            max_tokens=4096,
+            timeout_sec=timeout_sec,
+            log_label="detect_unknown_points",
+        )
+    except Exception as e:
+        _append_visible_log(visible_log_path, f"  AI不明点検出: APIエラー（続行）: {e!r}")
+        return []
 
-    for chunk_idx, chunk_text in enumerate(chunks):
-        if len(chunks) > 1:
-            _append_visible_log(
-                visible_log_path,
-                f"  チャンク{chunk_idx + 1}/{len(chunks)}を分析中...（{len(chunk_text):,}文字）",
-            )
+    raw_text = raw_response.strip()
+    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw_text, re.DOTALL)
+    if m:
+        raw_text = m.group(1)
+
+    try:
+        result = json.loads(raw_text)
+    except json.JSONDecodeError:
+        m = re.search(r"\[.*\]", raw_text, re.DOTALL)
+        if not m:
+            _append_visible_log(visible_log_path, "  AI不明点検出: 応答解析に失敗")
+            return []
         try:
-            raw_response, _stop_reason = _stream_anthropic_text(
-                api_key=api_key,
-                model=resolved_model,
-                system_prompt=system_prompt,
-                user_message=chunk_text,
-                max_tokens=max_tokens,
-                timeout_sec=timeout_sec,
-                log_label=f"detect_unknown_points_chunk_{chunk_idx + 1}",
-            )
-        except Exception as e:
-            _append_visible_log(
-                visible_log_path,
-                f"  AI不明点検出: APIエラー（チャンク{chunk_idx + 1}スキップ、続行）: {e!r}",
-            )
-            continue
-
-        raw_text = raw_response.strip()
-
-        # マークダウンのコードブロックを除去
-        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw_text, re.DOTALL)
-        if m:
-            raw_text = m.group(1)
-
-        try:
-            result = json.loads(raw_text)
+            result = json.loads(m.group(0))
         except json.JSONDecodeError:
-            m = re.search(r"\[.*\]", raw_text, re.DOTALL)
-            if m:
-                try:
-                    result = json.loads(m.group(0))
-                except json.JSONDecodeError:
-                    _append_visible_log(
-                        visible_log_path,
-                        f"  AI不明点検出: チャンク{chunk_idx + 1}の応答解析に失敗（スキップ）",
-                    )
-                    continue
-            else:
-                _append_visible_log(
-                    visible_log_path,
-                    f"  AI不明点検出: チャンク{chunk_idx + 1}に有効データなし（スキップ）",
-                )
-                continue
+            _append_visible_log(visible_log_path, "  AI不明点検出: 応答解析に失敗")
+            return []
 
-        if not isinstance(result, list):
-            _append_visible_log(
-                visible_log_path,
-                f"  AI不明点検出: チャンク{chunk_idx + 1}の応答形式が想定外（スキップ）",
-            )
+    if not isinstance(result, list):
+        _append_visible_log(visible_log_path, "  AI不明点検出: 応答形式が想定外")
+        return []
+
+    aggregated: list[dict] = []
+    for item in result:
+        if not isinstance(item, dict):
             continue
-
-        for item in result:
-            if not isinstance(item, dict):
-                continue
-            text_val = str(item.get("text", "")).strip()
-            type_val = str(item.get("type", "固有名詞")).strip()
-            reason_val = str(item.get("reason", "")).strip()
-            if not text_val or not reason_val:
-                continue
-            entry: dict = {
-                "type": type_val,
-                "text": text_val,
-                "reason": reason_val,
-                "source": "claude_step9",
-            }
-            hypothesis = str(item.get("hypothesis", "")).strip()
-            if hypothesis:
-                entry["hypothesis"] = hypothesis
-            aggregated.append(entry)
+        text_val = str(item.get("text", "")).strip()
+        reason_val = str(item.get("reason", "")).strip()
+        if not text_val or not reason_val:
+            continue
+        entry: dict = {
+            "type": str(item.get("type", "fact_unknown")).strip() or "fact_unknown",
+            "text": text_val,
+            "reason": reason_val,
+            "proposal_impact": _parse_proposal_impact(item.get("proposal_impact")),
+            "source": "claude_step9",
+        }
+        evidence = str(item.get("evidence", "")).strip()
+        if evidence:
+            entry["evidence"] = evidence[:200]
+        hypothesis = str(item.get("hypothesis", "")).strip()
+        if hypothesis:
+            entry["hypothesis"] = hypothesis
+        aggregated.append(entry)
 
     deduped = _dedupe_unknown_items(aggregated)
-    # 全体上限を 12 件に拡張（hypothesis 付き Yes/No 質問が増える前提で余裕を持たせる）
-    deduped = deduped[:12]
+    deduped.sort(key=lambda x: int(x.get("proposal_impact") or 0), reverse=True)
+    deduped = deduped[:10]
     _append_visible_log(
         visible_log_path,
         f"  AI不明点検出が完了しました（{len(deduped)}件を検出）",

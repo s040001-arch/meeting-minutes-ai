@@ -10,8 +10,7 @@ from pathlib import Path
 from ai_correct_text import correct_full_text, get_last_correct_full_text_meta
 from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
-from filename_hints import extract_filename_hints
-from job_context import load_job_context
+from meeting_profile import ensure_meeting_profile, resolve_display_title, strip_status_prefix
 from progress_tracker import finalize_job_progress, update_job_progress
 from repo_env import load_dotenv_local
 from run_job_once import (
@@ -44,11 +43,18 @@ def _line_push_env_ready() -> bool:
 
 
 def _strip_status_prefix(title: str) -> str:
-    s = str(title or "").strip()
-    return re.sub(r"^【[^】]+】", "", s).strip()
+    return strip_status_prefix(title)
 
 
-def _load_final_doc_title(hub_meta_path: str, fallback: str) -> str:
+def _load_final_doc_title(
+    hub_meta_path: str,
+    meeting_profile: dict,
+    job_id: str,
+    fallback: str,
+) -> str:
+    profile_title = resolve_display_title(meeting_profile, job_id=job_id)
+    if profile_title and profile_title != job_id:
+        return profile_title
     if not os.path.isfile(hub_meta_path):
         return fallback
     try:
@@ -99,8 +105,14 @@ def main() -> None:
     visible_log_path = os.path.join(job_dir, "processing_visible_log.txt")
     repo_root = os.path.dirname(os.path.abspath(__file__))
     py = sys.executable
-    stem = Path(args.job_id).name
-    final_doc_title = _load_final_doc_title(hub_meta_path, fallback=stem)
+    meeting_profile = ensure_meeting_profile(job_dir, job_id=args.job_id)
+    display_title = resolve_display_title(meeting_profile, job_id=args.job_id)
+    final_doc_title = _load_final_doc_title(
+        hub_meta_path,
+        meeting_profile,
+        args.job_id,
+        fallback=display_title,
+    )
 
     current_phase = "step_7_mechanical_correct"
     current_step_label = "Step 7: 機械補正"
@@ -113,7 +125,7 @@ def main() -> None:
             status="running",
             detail={"resume_reason": "line_correction_request"},
         )
-        update_doc_title_from_hub(hub_meta_path, f"【機械補正中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【機械補正中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -162,7 +174,7 @@ def main() -> None:
             status="running",
             detail={"input_chars": len(mechanical_text)},
         )
-        update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【AI補正中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
@@ -178,7 +190,7 @@ def main() -> None:
 
         def _on_ai_phase(phase: str) -> None:
             label = phase_labels.get(phase, phase)
-            update_doc_title_from_hub(hub_meta_path, f"【AI補正中：{label}】{stem}", log_path)
+            update_doc_title_from_hub(hub_meta_path, f"【AI補正中：{label}】{display_title}", log_path)
             record_visible_progress(
                 log_path=log_path,
                 visible_log_path=visible_log_path,
@@ -189,14 +201,11 @@ def main() -> None:
         def _on_ai_stream_progress(msg: str) -> None:
             append_log_to_drive(args.job_id, msg)
 
-        hints = extract_filename_hints(args.job_id)
-        job_context = load_job_context(job_dir)
         ai_text = correct_full_text(
             text=mechanical_text,
             on_phase=_on_ai_phase,
-            filename_hints=hints,
+            meeting_profile=meeting_profile,
             visible_log_path=visible_log_path,
-            job_context=job_context if job_context else None,
             on_stream_progress=_on_ai_stream_progress,
         )
         with open(ai_path, "w", encoding="utf-8") as f:
@@ -221,8 +230,7 @@ def main() -> None:
         ]
         ai_unknown_points = detect_unknown_points(
             ai_text,
-            filename_hints=hints,
-            job_context=job_context if job_context else None,
+            meeting_profile=meeting_profile,
             answered_items=answered_items if answered_items else None,
             visible_log_path=visible_log_path,
         )
@@ -239,7 +247,7 @@ def main() -> None:
             job_id=args.job_id,
             message=f"再補正: AIによる不明点の検出が完了しました（{len(ai_unknown_points)}件を発見）",
         )
-        update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{display_title}", log_path)
 
         current_phase = "step_10_hybrid_unknowns"
         current_step_label = "Step 10: ハイブリッド不明点検出"
@@ -293,7 +301,7 @@ def main() -> None:
                 f" → 統合: {len(merged_unknown_points)}件）"
             ),
         )
-        update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{display_title}", log_path)
 
         if args.incorporate_latest_answer and os.path.isfile(args.answers_json):
             current_phase = "step_16_17_apply_latest_answer"
@@ -328,22 +336,6 @@ def main() -> None:
                     after_qa_path,
                 ],
                 "step_16_apply_latest_answer",
-            )
-            _run_cmd(
-                log_path,
-                [
-                    py,
-                    os.path.join(repo_root, "diarize_speakers.py"),
-                    "--job-id",
-                    args.job_id,
-                    "--input-root",
-                    args.input_root,
-                    "--input",
-                    after_qa_path,
-                    "--output",
-                    after_qa_path,
-                ],
-                "step_16b_diarize_after_answer",
             )
             _run_cmd(
                 log_path,
@@ -434,7 +426,7 @@ def main() -> None:
             status="running",
             detail={},
         )
-        update_doc_title_from_hub(hub_meta_path, f"【議事録生成中】{stem}", log_path)
+        update_doc_title_from_hub(hub_meta_path, f"【議事録生成中】{display_title}", log_path)
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,

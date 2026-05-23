@@ -21,6 +21,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
+from meeting_profile import infer_display_title, load_meeting_profile, resolve_display_title
+
 DOCS_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
@@ -178,6 +180,32 @@ def resolve_input(minutes_structured_path: str | None, job_id: str, input_root: 
     if minutes_structured_path:
         return minutes_structured_path
     return os.path.join(input_root, job_id, "minutes_structured.md")
+
+
+def resolve_doc_display_title(
+    job_id: str,
+    input_root: str,
+    cli_title: str | None,
+) -> str:
+    if cli_title:
+        return cli_title.strip()
+    job_dir = os.path.join(input_root, job_id)
+    profile = load_meeting_profile(job_dir)
+    resolved = resolve_display_title(profile, job_id=job_id)
+    if resolved != job_id:
+        return resolved
+    return infer_display_title(job_dir, job_id)
+
+
+def sync_md_h1_title(md: str, display_title: str) -> str:
+    """Markdown 先頭 H1 を display_title に揃える（旧ジョブ再生成用）。"""
+    lines = md.splitlines()
+    if lines and lines[0].startswith("# "):
+        lines[0] = f"# {display_title}"
+    out = "\n".join(lines)
+    if md.endswith("\n") and not out.endswith("\n"):
+        out += "\n"
+    return out
 
 
 def resolve_output_dir(job_id: str, output_root: str) -> str:
@@ -540,9 +568,9 @@ def main() -> None:
     with open(in_path, "r", encoding="utf-8") as f:
         md = f.read()
 
+    title = resolve_doc_display_title(args.job_id, args.input_root, args.title)
+    md = sync_md_h1_title(md, title)
     text = md_to_google_docs_text(md)
-
-    title = args.title or args.job_id
     out_dir = resolve_output_dir(args.job_id, args.output_root)
     out_text_path = os.path.join(out_dir, "docs_text.txt")
     out_payload_path = os.path.join(out_dir, "docs_payload_preview.txt")

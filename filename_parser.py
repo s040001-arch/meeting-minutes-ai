@@ -308,23 +308,6 @@ def format_parsed_for_prompt(parsed: dict[str, Any]) -> str:
     )
 
 
-def extract_filename_terms_for_initial_prompt(parsed: dict[str, Any]) -> list[str]:
-    """Whisper の initial_prompt に語彙バイアスとして渡すための語彙一覧を作る。
-
-    顧客名・参加者・会議内容トークンをこの優先順で返す。
-    """
-    terms: list[str] = []
-    if parsed.get("customer"):
-        terms.append(str(parsed["customer"]))
-    for a in parsed.get("attendees") or []:
-        if a and a not in terms:
-            terms.append(str(a))
-    for t in parsed.get("topics") or []:
-        if t and t not in terms:
-            terms.append(str(t))
-    return terms
-
-
 def extract_known_people_from_knowledge(memos: list[str]) -> set[str]:
     """ナレッジから既知の人名集合を抽出する（参加者判定用）。
 
