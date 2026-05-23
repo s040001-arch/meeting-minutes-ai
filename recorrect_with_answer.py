@@ -1,7 +1,9 @@
 import argparse
 import os
+import re
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
+from job_context import load_job_context
 from transcript_paths import resolve_transcript_path
 
 
@@ -63,12 +65,21 @@ def main() -> None:
     with open(in_path, "r", encoding="utf-8") as f:
         base_text = f.read()
 
+    scope_quotes = [
+        m.group(1).strip()
+        for m in re.finditer(r"「([^」]{4,})」", args.question_text)
+        if m.group(1).strip()
+    ]
+    job_context = load_job_context(os.path.join(args.input_root, args.job_id))
+
     updated = call_openai_incorporate_answer(
         text=base_text,
         question_text=args.question_text,
         answer_text=args.answer_text,
         model=args.model,
         api_key=api_key,
+        scope_quotes=scope_quotes,
+        job_context=job_context,
     )
 
     out_path = args.output or os.path.join(

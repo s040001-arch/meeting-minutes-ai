@@ -437,6 +437,126 @@ def correct_full_text(
 # Legacy OpenAI helpers (used by recorrect_with_answer.py / recorrect_from_line_answer.py)
 # ---------------------------------------------------------------------------
 
+_INCORPORATE_META_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"以下[、,]?.{0,24}残り"),
+    re.compile(r"置換[・・]?補完"),
+    re.compile(r"全文整形"),
+    re.compile(r"反映して.{0,12}(おり|い)ます"),
+    re.compile(r"更新後の(?:発言録|抜粋|テキスト)"),
+    re.compile(r"作業(?:内容|結果|メモ)"),
+    re.compile(r"我々を.{0,40}に置換"),
+)
+
+
+def _looks_like_incorporate_meta_commentary(block: str) -> bool:
+    s = block.strip()
+    if not s:
+        return False
+    if any(p.search(s) for p in _INCORPORATE_META_LINE_PATTERNS):
+        return True
+    if len(s) <= 220 and re.search(
+        r"(置換|補完|整形|反映|更新).{0,30}(しました|しており|しています|いたしました)",
+        s,
+    ):
+        return True
+    return False
+
+
+def sanitize_incorporated_transcript_output(
+    updated: str,
+    original_text: str | None = None,
+) -> str:
+    """回答反映APIの出力から、作業説明・メタ文・余分な追記を除去する。"""
+    text = updated.strip()
+    if not text:
+        return text
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    while paragraphs and _looks_like_incorporate_meta_commentary(paragraphs[-1]):
+        paragraphs.pop()
+    text = "\n\n".join(p.strip() for p in paragraphs if p.strip()).strip()
+
+    text = re.sub(
+        r"\n+(?:以下[、,].*|.*(?:置換[・・]?補完|全文整形).*)$",
+        "",
+        text,
+        flags=re.DOTALL,
+    ).strip()
+
+    if original_text:
+        orig = original_text.strip()
+        if orig and text.startswith(orig):
+            tail = text[len(orig) :].lstrip()
+            if tail and _looks_like_incorporate_meta_commentary(tail):
+                text = orig
+
+    return text
+
+
+def _build_incorporate_answer_scope_rules(
+    scope_quotes: list[str] | None,
+    excerpt_mode: bool,
+) -> str:
+    quote_lines = ""
+    if scope_quotes:
+        shown = [q.strip() for q in scope_quotes if q and q.strip()]
+        if shown:
+            quote_lines = (
+                "\n【質問で引用された対象箇所（回答の適用はここに限定）】\n"
+                + "\n".join(f"- 「{q}」" for q in shown[:3])
+            )
+
+    scope_note = (
+        "与えられた発言録は長文の一部抜粋です。"
+        if excerpt_mode
+        else "与えられた発言録全文のうち、質問で引用された箇所とその直前後のみを更新対象とします。"
+    )
+
+    return (
+        "\n\n【回答の適用範囲（厳守）】\n"
+        f"{scope_note}\n"
+        "ユーザーの回答は、確認質問内で引用された箇所（「…」）およびその直前後の文脈にのみ適用してください。\n"
+        "発言録全体・抜粋全体に回答内容を一律適用してはいけません。\n"
+        "特に「我々」「御社」「弊社」「当社」などの一人称・社称は、引用箇所で主語が不明確だった部分を解消するためだけに使います。\n"
+        "会議では両側（例: 顧客企業側とコンサル/研修提供側）がそれぞれ「我々」を使うのが普通です。\n"
+        "回答で「我々＝A社」と指定されても、文脈上明らかにB社側の発言である箇所の「我々」は変更しないでください。\n"
+        "文脈から主語が一意に判断できる箇所では、回答を当てはめず「我々」のまま残して構いません。\n"
+        "固有名詞の誤変換修正は、引用箇所に関連する語句に限定してください。"
+        f"{quote_lines}"
+        "\n\n【出力形式（厳守）】\n"
+        "作業説明・置換内容の報告・「以下、残りの発言部分…」などのメタ文は一切出力しないでください。\n"
+        "発言録本文のみを返してください。"
+    )
+
+
+def _build_incorporate_answer_system_prompt(
+    *,
+    excerpt_mode: bool,
+    scope_quotes: list[str] | None,
+    job_context: dict | None,
+) -> str:
+    scope_rules = _build_incorporate_answer_scope_rules(scope_quotes, excerpt_mode)
+    context_block = format_context_for_prompt(job_context or {})
+
+    if excerpt_mode:
+        role = (
+            "あなたは議事録整形アシスタントです。"
+            "与えられた発言録抜粋に対し、確認質問へのユーザーの回答内容を、引用箇所の文脈に限定して反映してください。"
+            "回答が指す固有名詞・数値・主語などを正しく差し替え・補完し、引用箇所と無関係な部分の事実や文意は変えないでください。"
+            "抜粋の前後に続く文脈と矛盾しないよう、この部分の表現だけを整えてください。"
+            "不要な説明は出力せず、更新後の抜粋テキストのみを返してください（発言録の続きや前置きは付けないでください）。"
+        )
+    else:
+        role = (
+            "あなたは議事録整形アシスタントです。"
+            "与えられた発言録全文のうち、確認質問で引用された箇所とその直前後のみに、ユーザーの回答内容を反映してください。"
+            "引用箇所と無関係な行・段落は一字一句変えないでください。"
+            "不要な説明は出力せず、更新後の発言録全文のみ返してください。"
+        )
+
+    return role + scope_rules + context_block
+
+
 def call_openai_incorporate_answer(
     text: str,
     question_text: str,
@@ -446,11 +566,20 @@ def call_openai_incorporate_answer(
     timeout_sec: int = 120,
     *,
     excerpt_mode: bool = False,
+    scope_quotes: list[str] | None = None,
+    job_context: dict | None = None,
 ) -> str:
     """ユーザー回答を補正済み全文へ反映したうえで、再度整形する。
     excerpt_mode が True のときは text を発言録の一部として扱い、同範囲の更新後テキストのみを返す。
     """
     url = "https://api.openai.com/v1/responses"
+    if scope_quotes is None:
+        scope_quotes = [
+            m.group(1).strip()
+            for m in re.finditer(r"「([^」]{4,})」", question_text)
+            if m.group(1).strip()
+        ]
+
     user_block = (
         "### 発言録\n"
         f"{text}\n\n"
@@ -459,21 +588,11 @@ def call_openai_incorporate_answer(
         "### ユーザーの回答\n"
         f"{answer_text}"
     )
-    if excerpt_mode:
-        system_content = (
-            "あなたは議事録整形アシスタントです。"
-            "与えられた発言録は長文の一部抜粋です。確認質問へのユーザーの回答内容を反映して、この抜粋範囲のみを更新してください。"
-            "回答が指す固有名詞・数値・主語などを正しく差し替え・補完し、それ以外の事実や文意は変えないでください。"
-            "抜粋の前後に続く文脈と矛盾しないよう、この部分の表現だけを整えてください。"
-            "不要な説明は出力せず、更新後の抜粋テキストのみを返してください（発言録の続きや前置きは付けないでください）。"
-        )
-    else:
-        system_content = (
-            "あなたは議事録整形アシスタントです。"
-            "与えられた発言録全文に対し、確認質問へのユーザーの回答内容を反映して更新してください。"
-            "回答が指す固有名詞・数値・主語などを正しく差し替え・補完し、それ以外の事実や文意は変えないでください。"
-            "不要な説明は出力せず、更新後の発言録全文のみ返してください。"
-        )
+    system_content = _build_incorporate_answer_system_prompt(
+        excerpt_mode=excerpt_mode,
+        scope_quotes=scope_quotes,
+        job_context=job_context,
+    )
     payload = {
         "model": model,
         "input": [
@@ -515,7 +634,7 @@ def call_openai_incorporate_answer(
     updated = "\n".join(t for t in texts if t).strip()
     if not updated:
         raise RuntimeError("OpenAI response did not contain output_text.")
-    return updated
+    return sanitize_incorporated_transcript_output(updated, original_text=text)
 
 
 # ---------------------------------------------------------------------------

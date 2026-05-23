@@ -4,6 +4,7 @@ import os
 import re
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
+from job_context import load_job_context
 from transcript_paths import resolve_transcript_path
 
 
@@ -61,13 +62,25 @@ def _anchor_strings_for_span(
 def _find_first_anchor_span(
     base_text: str, anchors: list[str]
 ) -> tuple[int, int] | None:
-    """先頭一致のみ（1箇所）。戻り値は [start, end) の一致区間。"""
+    """先頭一致のみ（1箇所）。完全一致を優先し、長いアンカーは部分一致も試す。"""
     for a in anchors:
         if not a:
             continue
         i = base_text.find(a)
         if i >= 0:
             return (i, i + len(a))
+
+    for a in sorted(anchors, key=len, reverse=True):
+        if len(a) < 24:
+            continue
+        for ratio in (0.75, 0.5):
+            short_len = max(20, int(len(a) * ratio))
+            short = a[:short_len].strip()
+            if len(short) < 20:
+                continue
+            i = base_text.find(short)
+            if i >= 0:
+                return (i, i + len(short))
     return None
 
 
@@ -180,14 +193,14 @@ def main() -> None:
     parser.add_argument(
         "--span-before",
         type=int,
-        default=1000,
-        help="アンカー一致位置より前に含める最大文字数（抜粋API用、デフォルト: 1000）",
+        default=400,
+        help="アンカー一致位置より前に含める最大文字数（抜粋API用、デフォルト: 400）",
     )
     parser.add_argument(
         "--span-after",
         type=int,
-        default=1000,
-        help="アンカー一致位置より後に含める最大文字数（抜粋API用、デフォルト: 1000）",
+        default=400,
+        help="アンカー一致位置より後に含める最大文字数（抜粋API用、デフォルト: 400）",
     )
     args = parser.parse_args()
 
@@ -225,6 +238,14 @@ def main() -> None:
 
     question_result = _load_question_result_for_job(args.job_id, args.input_root)
     anchors = _anchor_strings_for_span(question_result, question_text)
+    scope_quotes = _quoted_snippets_from_question(question_text)
+    if not scope_quotes and question_result:
+        su = question_result.get("selected_unknown")
+        if isinstance(su, dict):
+            t = str(su.get("text") or "").strip()
+            if t:
+                scope_quotes = [t]
+    job_context = load_job_context(os.path.join(args.input_root, args.job_id))
     anchor_match = _find_first_anchor_span(base_text, anchors)
 
     if anchor_match is not None:
@@ -246,6 +267,8 @@ def main() -> None:
             api_key=api_key,
             timeout_sec=args.openai_timeout_sec,
             excerpt_mode=True,
+            scope_quotes=scope_quotes,
+            job_context=job_context,
         )
         updated = base_text[:span_start] + updated_span + base_text[span_end:]
     else:
@@ -257,6 +280,8 @@ def main() -> None:
             model=args.model,
             api_key=api_key,
             timeout_sec=args.openai_timeout_sec,
+            scope_quotes=scope_quotes,
+            job_context=job_context,
         )
 
     out_path = args.output or os.path.join(
