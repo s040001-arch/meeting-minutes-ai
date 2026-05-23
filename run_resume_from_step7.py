@@ -333,6 +333,22 @@ def main() -> None:
                 log_path,
                 [
                     py,
+                    os.path.join(repo_root, "diarize_speakers.py"),
+                    "--job-id",
+                    args.job_id,
+                    "--input-root",
+                    args.input_root,
+                    "--input",
+                    after_qa_path,
+                    "--output",
+                    after_qa_path,
+                ],
+                "step_16b_diarize_after_answer",
+            )
+            _run_cmd(
+                log_path,
+                [
+                    py,
                     os.path.join(repo_root, "refresh_unknown_points_after_answer.py"),
                     "--job-id",
                     args.job_id,

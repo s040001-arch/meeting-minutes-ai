@@ -119,6 +119,11 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
 
 
 def cmd_after_answer(args: argparse.Namespace) -> None:
+    after_qa_path = os.path.join(
+        args.input_root,
+        args.job_id,
+        "merged_transcript_after_qa.txt",
+    )
     _run(
         [
             _py(),
@@ -131,6 +136,21 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.answers_json,
         ]
     )
+    if os.path.isfile(after_qa_path):
+        _run(
+            [
+                _py(),
+                os.path.join(REPO_ROOT, "diarize_speakers.py"),
+                "--job-id",
+                args.job_id,
+                "--input-root",
+                args.input_root,
+                "--input",
+                after_qa_path,
+                "--output",
+                after_qa_path,
+            ]
+        )
     _run(
         [
             _py(),
@@ -142,11 +162,6 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
         ]
     )
     # 回答反映後の全文から unknown_points を再評価し、必要なら「次の1問」を生成する。
-    after_qa_path = os.path.join(
-        args.input_root,
-        args.job_id,
-        "merged_transcript_after_qa.txt",
-    )
     unknowns_path = os.path.join(args.input_root, args.job_id, "unknown_points.json")
     _run(
         [

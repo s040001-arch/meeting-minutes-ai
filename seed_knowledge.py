@@ -10,6 +10,7 @@
   - KNOWLEDGE_SHEET_ID 環境変数（または .env）が設定されていること
 """
 
+import argparse
 import os
 import sys
 
@@ -116,12 +117,53 @@ SEED_MEMOS = [
     "仕事力サーベイは「サーベイ」と略称で呼ばれることがある。会話中に「サーベイ」と出てきた場合はほぼ仕事力サーベイを指す。",
 ]
 
+# 既存シートへ追記する追加ナレッジ（--append-pending / append_pending_knowledge_memos 用）
+PENDING_APPEND_MEMOS = [
+    "プレセナ・ストラテジック・パートナーズは研修・コンサルティングの提供側。外部会議では相原隆太郎等プレセナ社員が資料共有・研修提案・見積提示を行う。",
+    "外部会議で相原が「御社」と言った場合、文脈によってはプレセナ側（相原の所属）を指すことがある。顧客企業を指す場合もあるので、前後文脈で判断する。",
+    "外部会議ではプレセナ側と顧客側の双方が「我々」を使う。定年再雇用・社内制度・人事施策の話は顧客側、研修設計・提供・提案の話はプレセナ側の「我々」であることが多い。",
+    "エレマテック（Elematec）は電子部品商社。プレセナの顧客。人事部門が定年再雇用・嘱託社員・後輩育成研修等の相談を行う。",
+    "エレマテック人事部の「我々」は、定年再雇用制度・給与ランク・評価制度・嘱託社員の活用実態など社内人事施策を語る文脈で使われる。",
+    "臼井さん（うすいさん）はエレマテック関係者として定年再雇用・研修施策の文脈で登場することがある。",
+    "「売買で部長」は商社文脈での役職表現（売買部門の部長）。エレマテックのような商社では自然な表現。",
+    "「嘱託定年再雇用」「360度評価」はエレマテック人事関連会議で登場しうる用語。",
+]
+
+
+def append_pending_knowledge_memos() -> dict:
+    """PENDING_APPEND_MEMOS を既存ナレッジに重複なく追記する。"""
+    existing = load_knowledge_memos()
+    seen = set(existing)
+    added = [m for m in PENDING_APPEND_MEMOS if m not in seen]
+    if added:
+        save_knowledge_memos(existing + added)
+    return {
+        "added_count": len(added),
+        "total_count": len(existing) + len(added),
+    }
+
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="ナレッジシートに初期/追加データを投入")
+    parser.add_argument(
+        "--append-pending",
+        action="store_true",
+        help="PENDING_APPEND_MEMOS を既存シートに重複なく追記して終了",
+    )
+    args = parser.parse_args()
+
     sheet_id = os.getenv("KNOWLEDGE_SHEET_ID", "").strip()
     if not sheet_id:
         print("ERROR: KNOWLEDGE_SHEET_ID が設定されていません。.env または環境変数を確認してください。")
         sys.exit(1)
+
+    if args.append_pending:
+        result = append_pending_knowledge_memos()
+        print(
+            f"append-pending 完了: 追加 {result['added_count']}件 / "
+            f"合計 {result['total_count']}件"
+        )
+        return
 
     print(f"対象スプレッドシート: {sheet_id}")
     existing = load_knowledge_memos()

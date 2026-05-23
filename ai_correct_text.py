@@ -257,6 +257,9 @@ def _build_opus_correction_system_prompt(
         "\n8. 日付・時刻・数値・金額は変更しない"
         "\n9. 要約・内容の追加・削除は禁止"
         "\n10. 不確かな固有名詞・人名・会社名の推測置換は禁止（確信が持てない場合はそのまま残す）"
+        "\n11. 外部会議ではプレセナ側と顧客側の双方が「我々」「御社」「弊社」を使う"
+        "\n   - 研修・提案・教材・見積を語る発言はプレセナ側、社内制度・人事施策を語る発言は顧客側"
+        "\n   - 一人称・社称の一括置換は禁止。文脈から主語が一意に判断できる場合のみ表記を整える"
         + format_hints_for_prompt(filename_hints or [])
         + format_context_for_prompt(job_context or {})
         + format_knowledge_for_prompt(knowledge_memos or [])

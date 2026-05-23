@@ -56,6 +56,10 @@ def _build_context_lines(context: dict[str, Any]) -> list[str]:
     elif scope == "external":
         if customer:
             parts.append(f"会議区分: 外部会議（顧客企業: {customer}）")
+            parts.append(
+                "役割: プレセナ・ストラテジック・パートナーズ＝研修/コンサル提供側、"
+                f"{customer}＝相談/client側。双方が「我々」「御社」を使う。"
+            )
         else:
             parts.append("会議区分: 外部会議")
     participants = [str(p).strip() for p in (context.get("participants") or []) if str(p).strip()]

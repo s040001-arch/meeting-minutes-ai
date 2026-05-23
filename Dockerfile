@@ -16,6 +16,10 @@ COPY . .
 RUN chmod +x scripts/railway_entry.sh
 
 ENV PYTHONUNBUFFERED=1
+ENV WHISPER_MODEL=large-v3-turbo
+ENV WHISPER_COMPUTE_TYPE=int8
+ENV WHISPER_VAD_FILTER=true
+ENV WHISPER_BEAM_SIZE=5
 # Railway が注入して Start Command が CMD を上書きする場合でも、
 # ENTRYPOINT を固定して railway_entry.sh が必ず先に動くようにする
 ENTRYPOINT ["bash", "scripts/railway_entry.sh"]

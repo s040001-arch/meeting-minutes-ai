@@ -88,8 +88,20 @@ def _normalize_turn_breaks(text: str) -> str:
     return "\n\n".join(paragraphs)
 
 
-def _has_turn_breaks(text: str, *, min_paragraphs: int = 3) -> bool:
+def _expected_min_paragraphs(text: str) -> int:
+    """文字数に応じた最低段落数（話者交代の空行相当）。"""
+    n = len(text)
+    if n < 1500:
+        return 2
+    if n < 5000:
+        return 3
+    return max(4, n // 2000)
+
+
+def _has_turn_breaks(text: str, *, min_paragraphs: int | None = None) -> bool:
     """出力に十分な段落分割（話者交代の空行相当）があるか判定する。"""
+    if min_paragraphs is None:
+        min_paragraphs = _expected_min_paragraphs(text)
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     if len(paragraphs) >= min_paragraphs:
         return True
@@ -97,6 +109,41 @@ def _has_turn_breaks(text: str, *, min_paragraphs: int = 3) -> bool:
     if len(text) < 3000 and len(paragraphs) >= 2:
         return True
     return False
+
+
+_HEURISTIC_TURN_PREFIXES = (
+    r"なるほど[、,]?",
+    r"そうですね[、,]?",
+    r"そういうことですね[、,]?",
+    r"理解しました[、,]?",
+    r"ありがとうございます[、,]?",
+    r"いえいえ[、,]?",
+    r"ちょっとすいません[、,]?",
+    r"では[、,]",
+    r"で、実際に",
+    r"で、我々",
+    r"私からも",
+    r"ここからは",
+)
+
+
+def _heuristic_turn_segmentation(text: str) -> str:
+    """AI分割が不十分なときの規則ベースfallback（質問/回答の切れ目で空行を入れる）。"""
+    result = text.strip()
+    if not result:
+        return result
+    if _has_turn_breaks(result):
+        return result
+
+    for prefix in _HEURISTIC_TURN_PREFIXES:
+        result = re.sub(rf"(?<=[。！？])(?={prefix})", "\n\n", result)
+
+    result = re.sub(
+        r"(?<=[。！？])(?=[^。！？\n]{8,}(?:ですか|でしょうか|ませんか|いいんでしょうか|でしょうかね))",
+        "\n\n",
+        result,
+    )
+    return _normalize_turn_breaks(result)
 
 
 def normalize_turn_segmented_text(text: str) -> str:
@@ -162,8 +209,24 @@ def diarize_transcript(
                 raise ValueError("diarize returned empty output")
 
             if not _has_turn_breaks(result):
+                min_expected = _expected_min_paragraphs(text)
                 print(
-                    "diarize_speakers_warning: insufficient turn breaks, "
+                    "diarize_speakers_warning: insufficient turn breaks "
+                    f"(got={result.count(chr(10)+chr(10))+1} expected>={min_expected}), "
+                    "trying heuristic fallback",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                heuristic = _heuristic_turn_segmentation(text)
+                if _has_turn_breaks(heuristic):
+                    print(
+                        f"diarize_speakers_heuristic_ok paragraphs="
+                        f"{heuristic.count(chr(10)+chr(10))+1}",
+                        flush=True,
+                    )
+                    return heuristic
+                print(
+                    "diarize_speakers_warning: heuristic fallback insufficient, "
                     "returning original text",
                     file=sys.stderr,
                     flush=True,
