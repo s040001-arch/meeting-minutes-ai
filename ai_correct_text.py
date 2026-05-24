@@ -304,15 +304,100 @@ def _compute_correction_max_tokens(char_count: int) -> int:
     return min(max(int(char_count * 1.5), 8192), OPUS_MAX_OUTPUT_TOKENS)
 
 
-_TAIL_ANCHOR_SIZES = (200, 150, 100, 60)
 _CHUNK_TAIL_RETRY_SUFFIX = (
     "\n\n【重要】入力テキストの先頭から末尾まで、内容を省略・要約せずに"
     "すべて補正して出力してください。途中で止めないでください。"
 )
 
+# 会議終了に近い表現（C: 終了表現チェック）
+_CLOSING_PHRASES: tuple[str, ...] = (
+    "失礼いたします",
+    "失礼します",
+    "ありがとうございました",
+    "ありがとうございます",
+    "よいしょ",
+    "以上です",
+    "お疲れさまでした",
+    "お疲れ様でした",
+)
 
-def _normalize_for_anchor_match(text: str) -> str:
-    return re.sub(r"\s+", "", text)
+# 意味正規化時に除去するフィラー（B）
+_FILLER_RE = re.compile(
+    r"(?:あのー?|えっと|えーと|えっ|まあ|ふんふん|うんうん)+",
+    flags=re.IGNORECASE,
+)
+
+_SEMANTIC_ANCHOR_LENGTHS = (80, 60, 45, 30)
+_INPUT_TAIL_WINDOW = 400
+_OUTPUT_TAIL_WINDOW = 900
+_CLOSING_INPUT_TAIL_WINDOW = 800
+_CLOSING_OUTPUT_SEARCH_WINDOW = 1200
+
+
+def _normalize_semantic_text(text: str) -> str:
+    """句読点・空白・フィラーを除き、仮名・漢字・数字のみ残す。"""
+    collapsed = _FILLER_RE.sub("", text)
+    return re.sub(r"[^\u3040-\u30ff\u4e00-\u9fff0-9]", "", collapsed)
+
+
+def _closing_phrases_in_text(text: str) -> list[str]:
+    return [p for p in _CLOSING_PHRASES if p in text]
+
+
+def _closing_phrases_covered(input_tail: str, output_text: str) -> bool:
+    """入力末尾に終了表現がある場合、出力側にも同表現が残っているか。"""
+    in_window = (
+        input_tail[-_CLOSING_INPUT_TAIL_WINDOW:]
+        if len(input_tail) > _CLOSING_INPUT_TAIL_WINDOW
+        else input_tail
+    )
+    phrases = _closing_phrases_in_text(in_window)
+    if not phrases:
+        return False
+
+    out_window = (
+        output_text[-_CLOSING_OUTPUT_SEARCH_WINDOW:]
+        if len(output_text) > _CLOSING_OUTPUT_SEARCH_WINDOW
+        else output_text
+    )
+    norm_out = _normalize_semantic_text(out_window)
+    for phrase in phrases:
+        if phrase in out_window:
+            continue
+        norm_phrase = _normalize_semantic_text(phrase)
+        if norm_phrase and norm_phrase in norm_out:
+            continue
+        return False
+    return True
+
+
+def _semantic_tail_anchor_covered(input_chunk: str, output_chunk: str) -> bool:
+    """正規化後の入力末尾フレーズが、出力末尾領域に含まれるか（B）。"""
+    in_region = (
+        input_chunk[-_INPUT_TAIL_WINDOW:]
+        if len(input_chunk) > _INPUT_TAIL_WINDOW
+        else input_chunk
+    )
+    out_region = (
+        output_chunk[-_OUTPUT_TAIL_WINDOW:]
+        if len(output_chunk) > _OUTPUT_TAIL_WINDOW
+        else output_chunk
+    )
+    norm_out = _normalize_semantic_text(out_region)
+    norm_in = _normalize_semantic_text(in_region)
+    if not norm_in:
+        return bool(norm_out)
+
+    for length in _SEMANTIC_ANCHOR_LENGTHS:
+        if len(norm_in) < length:
+            anchor = norm_in
+        else:
+            anchor = norm_in[-length:]
+        if len(anchor) < 18:
+            continue
+        if anchor in norm_out:
+            return True
+    return False
 
 
 def chunk_output_covers_input_tail(
@@ -320,28 +405,35 @@ def chunk_output_covers_input_tail(
     output_chunk: str,
     *,
     is_last_chunk: bool = False,
-) -> bool:
-    """補正結果が入力チャンク末尾まで到達しているか（空白除去後の部分一致）。"""
+) -> tuple[bool, str]:
+    """補正結果が入力チャンク末尾まで到達しているか（B+C、厳密一致は使わない）。
+
+    Returns:
+        (covered, method) — method は correction_meta 用の判定名。
+    """
     stripped_in = input_chunk.strip()
     stripped_out = output_chunk.strip()
     if not stripped_in:
-        return True
+        return True, "empty_input"
     if not stripped_out:
-        return False
+        return False, "empty_output"
     if len(stripped_in) < 120:
-        return len(stripped_out) >= len(stripped_in) * 0.85
+        ok = len(stripped_out) >= len(stripped_in) * 0.85
+        return ok, "short_chunk_ratio" if ok else "none"
 
-    norm_out = _normalize_for_anchor_match(stripped_out)
-    sizes = _TAIL_ANCHOR_SIZES if is_last_chunk else _TAIL_ANCHOR_SIZES[:3]
-    for size in sizes:
-        if size > len(stripped_in):
-            continue
-        anchor = _normalize_for_anchor_match(stripped_in[-size:])
-        if len(anchor) < 24:
-            continue
-        if anchor in norm_out:
-            return True
-    return False
+    # C: 終了表現（主に最終チャンク／会議末尾）
+    if _closing_phrases_covered(stripped_in, stripped_out):
+        return True, "closing_phrase"
+
+    # B: 意味正規化した末尾部分一致（中間チャンクの主判定）
+    if _semantic_tail_anchor_covered(stripped_in, stripped_out):
+        return True, "semantic_anchor"
+
+    # 最終チャンクは終了表現の有無を再確認（入力に無い録音切れは B のみ）
+    if is_last_chunk and _closing_phrases_in_text(stripped_in[-_CLOSING_INPUT_TAIL_WINDOW:]):
+        return False, "closing_phrase_missing"
+
+    return False, "none"
 
 
 def _split_text_for_correction(
@@ -539,7 +631,7 @@ def correct_full_text(
                 last_stop_reason = stop_reason
                 part = full_response.strip()
                 chunk_ratio = len(part) / max(len(chunk), 1)
-                tail_covered = chunk_output_covers_input_tail(
+                tail_covered, tail_check_method = chunk_output_covers_input_tail(
                     chunk,
                     part,
                     is_last_chunk=is_last_chunk,
@@ -548,6 +640,7 @@ def correct_full_text(
                 chunk_meta["ratio"] = round(chunk_ratio, 3)
                 chunk_meta["stop_reason"] = stop_reason
                 chunk_meta["tail_covered"] = tail_covered
+                chunk_meta["tail_check_method"] = tail_check_method
 
                 if stop_reason == "max_tokens":
                     print(
@@ -604,7 +697,12 @@ def correct_full_text(
             _append_visible_log(visible_log_path, "  AI補正: 空の応答が返されたため元テキストを使用")
             return text
 
-        if not chunk_output_covers_input_tail(text, corrected, is_last_chunk=True):
+        full_tail_covered, full_tail_method = chunk_output_covers_input_tail(
+            text, corrected, is_last_chunk=True
+        )
+        _LAST_CORRECT_FULL_TEXT_META["full_tail_covered"] = full_tail_covered
+        _LAST_CORRECT_FULL_TEXT_META["full_tail_check_method"] = full_tail_method
+        if not full_tail_covered:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
             _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "full_text_tail_not_covered"
             print(
