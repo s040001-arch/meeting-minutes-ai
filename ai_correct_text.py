@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -15,6 +16,7 @@ from typing import Callable, Optional
 from job_context import format_context_for_prompt
 from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
 from meeting_profile import format_meeting_profile_for_prompt
+from mechanical_correct_text import apply_pixel_recognizer_fixes
 from pipeline_build import get_pipeline_build_info
 
 logger = logging.getLogger(__name__)
@@ -238,12 +240,26 @@ def _build_opus_correction_system_prompt(
     knowledge_memos: list[str] | None = None,
 ) -> str:
     """Claude 4 Opus 向け一括補正プロンプト。"""
+    pixel_block = (
+        "\n\n【最優先: Google Pixel 特有の誤変換】"
+        "入力は Pixel レコーダーの音声認識テキストです。冒頭から末尾まで均等に注意し、"
+        "特に文書の前半で見落としやすい次のパターンを必ず復元してください。"
+        "\n- 「最高用」「最高用語」「最高業者」「最高用される」→ 再雇用・再雇用後・再雇用者・再雇用される"
+        "\n- 「天然」「天然前」「天然デジャ」→ 定年・定年前・定年で（「天然ガス」はそのまま）"
+        "\n- 「食卓」「食卓社員」「食卓定年最高用」→ 嘱託・嘱託社員・嘱託定年再雇用"
+        "\n- 「公認育成」→ 後輩育成"
+        "\n- 「軽S」「軽装」（経営の意味）→ 経営"
+        "\n- 「リネン戦略」「リンチ」「ミンチ政策」→ 理念戦略・認知・認知施策"
+        "\n- 「インギージメントサーベリー」「サーベリー」→ エンゲージメントサーベイ・サーベイ"
+        "\n- 人名の表記揺れは参加者リストに合わせて統一"
+    )
     base = (
         "あなたは会議の音声認識テキストを補正する専門アシスタントです。"
         "入力テキストは Google Pixel レコーダーアプリの音声認識出力を機械補正したものです。"
         "以下の補正ルールに従って補正し、補正後のテキスト本文のみを出力してください。"
         "説明文・前置き・注釈は一切付けないでください。"
-        "\n\n【補正ルール】"
+        + pixel_block
+        + "\n\n【補正ルール】"
         "\n1. 音声誤変換を正しい表記に修正する"
         "\n   - 文脈から高い確信度で判断できる場合のみ修正する"
         "\n   - 例：「古車」→「子会社」、「人的尊敬」→「人的資本」、「妖怪じゃないですか」→「要諦じゃないですか」"
@@ -269,19 +285,8 @@ def _build_opus_correction_system_prompt(
         "\n11. 外部会議ではプレセナ側と顧客側の双方が「我々」「御社」「弊社」を使う"
         "\n   - 研修・提案・教材・見積を語る発言はプレセナ側、社内制度・人事施策を語る発言は顧客側"
         "\n   - 一人称・社称の一括置換は禁止。文脈から主語が一意に判断できる場合のみ表記を整える"
-        "\n12. 入力は Google Pixel レコーダーアプリの音声認識テキストである。以下のPixel特有の誤変換パターンを最優先で復元すること："
-        "\n   - 「最高用」「最高用語」「最高業者」→「再雇用」「再雇用者」"
-        "\n   - 「天然」「天然前」→「定年」「定年前」"
-        "\n   - 「食卓社員」「食卓」→「嘱託社員」「嘱託」"
-        "\n   - 「公認育成」→「後輩育成」"
-        "\n   - 「軽S」「軽装」（経営の意味で使われている場合）→「経営」"
-        "\n   - 「リネン戦略」「リンチ」「ミンチ政策」→「理念戦略」「認知」「認知施策」"
-        "\n   - 「インギージメントサーベリー」「サーベリー」→「エンゲージメントサーベイ」「サーベイ」"
-        "\n   - 「mvv」「MVV」関連の語"
-        "\n   - 人名は会議内で表記が揺れることがある（例: 碓井／薄井／薄い／有馬／アメリカ→参加者リストの人名に統一）"
-        "\n   - 「天然」が「定年」を指している以外の用法（例: 「天然ガス」）は当然そのまま"
-        "\n13. 上記は例示であり、文脈から明らかに別の語を意味していると判断できる場合は同様の補正を行う。"
-        "\n14. 補正前の音声認識特有の冗長な相槌（「うん。」「はい。」の連続、「えっと」「あの」の多用）は、"
+        "\n12. 上記 Pixel 誤変換は例示であり、文脈から明らかに別の語を意味する場合は同様の補正を行う。"
+        "\n13. 補正前の音声認識特有の冗長な相槌（「うん。」「はい。」の連続、「えっと」「あの」の多用）は、"
         "発言の意味を変えない範囲で適度に整える。ただし話者の意図を改変するような言い換えは行わない。"
     )
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
@@ -304,9 +309,18 @@ def _compute_correction_max_tokens(char_count: int) -> int:
     return min(max(int(char_count * 1.5), 8192), OPUS_MAX_OUTPUT_TOKENS)
 
 
+_CHUNK_USER_INSTRUCTION = (
+    "\n\n【出力要件】"
+    "入力の末尾30字程度は表現を変えず、意味を保ったまま必ず出力末尾に含めること。"
+    "冒頭から末尾まで均等に補正し、前半の Pixel 誤変換（最高用→再雇用、天然→定年、"
+    "食卓→嘱託、公認育成→後輩育成、リネン→理念、インギージメント→エンゲージメント等）を"
+    "見落とさないこと。内容の省略・要約は禁止。"
+)
+
 _CHUNK_TAIL_RETRY_SUFFIX = (
-    "\n\n【重要】入力テキストの先頭から末尾まで、内容を省略・要約せずに"
-    "すべて補正して出力してください。途中で止めないでください。"
+    _CHUNK_USER_INSTRUCTION
+    + "\n\n【重要・リトライ】前回の出力では末尾が欠落していました。"
+    "入力テキストの先頭から末尾まで、すべて補正して出力してください。途中で止めないでください。"
 )
 
 # 会議終了に近い表現（C: 終了表現チェック）
@@ -327,7 +341,8 @@ _FILLER_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-_SEMANTIC_ANCHOR_LENGTHS = (80, 60, 45, 30)
+_SEMANTIC_ANCHOR_LENGTHS = (80, 60, 45, 30, 22, 18)
+_SEMANTIC_ANCHOR_MIN_LEN = 12
 _INPUT_TAIL_WINDOW = 400
 _OUTPUT_TAIL_WINDOW = 900
 _CLOSING_INPUT_TAIL_WINDOW = 800
@@ -335,8 +350,9 @@ _CLOSING_OUTPUT_SEARCH_WINDOW = 1200
 
 
 def _normalize_semantic_text(text: str) -> str:
-    """句読点・空白・フィラーを除き、仮名・漢字・数字のみ残す。"""
+    """句読点・空白・フィラーを除き、仮名・漢字・数字のみ残す（NFKC で表記揺れを吸収）。"""
     collapsed = _FILLER_RE.sub("", text)
+    collapsed = unicodedata.normalize("NFKC", collapsed)
     return re.sub(r"[^\u3040-\u30ff\u4e00-\u9fff0-9]", "", collapsed)
 
 
@@ -393,7 +409,7 @@ def _semantic_tail_anchor_covered(input_chunk: str, output_chunk: str) -> bool:
             anchor = norm_in
         else:
             anchor = norm_in[-length:]
-        if len(anchor) < 18:
+        if len(anchor) < _SEMANTIC_ANCHOR_MIN_LEN:
             continue
         if anchor in norm_out:
             return True
@@ -608,7 +624,11 @@ def correct_full_text(
             adopted_part: str | None = None
 
             for retry_idx in range(2):
-                user_message = chunk if retry_idx == 0 else chunk + _CHUNK_TAIL_RETRY_SUFFIX
+                user_message = (
+                    chunk + _CHUNK_USER_INSTRUCTION
+                    if retry_idx == 0
+                    else chunk + _CHUNK_TAIL_RETRY_SUFFIX
+                )
                 if retry_idx > 0:
                     chunk_meta["retry_count"] = retry_idx
                     print(
@@ -645,11 +665,11 @@ def correct_full_text(
                 if stop_reason == "max_tokens":
                     print(
                         f"[WARNING] correct_full_text: chunk {idx} hit max_tokens; "
-                        "using original chunk text"
+                        "using pixel-fixed mechanical chunk"
                     )
                     chunk_meta["used_original"] = True
                     chunk_meta["fallback_reason"] = "max_tokens"
-                    adopted_part = chunk
+                    adopted_part = apply_pixel_recognizer_fixes(chunk)
                     break
 
                 if (
@@ -657,7 +677,7 @@ def correct_full_text(
                     and chunk_ratio >= min_length_ratio
                     and tail_covered
                 ):
-                    adopted_part = part
+                    adopted_part = apply_pixel_recognizer_fixes(part)
                     break
 
                 if retry_idx == 0 and part and chunk_ratio >= min_length_ratio and not tail_covered:
@@ -678,11 +698,14 @@ def correct_full_text(
                 )
                 chunk_meta["used_original"] = True
                 chunk_meta["fallback_reason"] = reason
-                adopted_part = chunk
+                adopted_part = apply_pixel_recognizer_fixes(chunk)
                 break
 
             _LAST_CORRECT_FULL_TEXT_META["chunk_results"].append(chunk_meta)
-            corrected_parts.append(adopted_part if adopted_part is not None else chunk)
+            fallback_part = apply_pixel_recognizer_fixes(chunk)
+            corrected_parts.append(
+                adopted_part if adopted_part is not None else fallback_part
+            )
 
         corrected = "\n\n".join(corrected_parts).strip()
         output_chars = len(corrected)

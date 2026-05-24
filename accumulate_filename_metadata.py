@@ -92,6 +92,9 @@ def _build_qa_pairs_from_metadata(
 def _merge_filename_metadata_with_claude(
     existing_memos: list[str],
     qa_pairs: list[dict[str, str]],
+    *,
+    parsed_filename: dict[str, Any] | None = None,
+    meeting_profile: dict[str, Any] | None = None,
 ) -> dict:
     """ファイル名由来のメタ情報を、既存ナレッジと統合する。
 
@@ -218,7 +221,12 @@ def accumulate_filename_metadata(
         return {"error": str(e), "enabled": True, "updated": False}
 
     try:
-        merged = _merge_filename_metadata_with_claude(existing, qa_pairs)
+        merged = _merge_filename_metadata_with_claude(
+            existing,
+            qa_pairs,
+            parsed_filename=parsed_filename,
+            meeting_profile=meeting_profile,
+        )
     except Exception as e:
         _append_visible_log(
             visible_log_path,

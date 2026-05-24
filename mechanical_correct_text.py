@@ -24,6 +24,29 @@ PARTICLE_PAIR_REPLACEMENTS = {
     "とと": "と",
     "のの": "の",
 }
+# Google Pixel レコーダー音声認識の典型誤変換（長いキーを先に適用）
+PIXEL_RECOGNIZER_REPLACEMENTS: dict[str, str] = {
+    "食卓定年最高用": "嘱託定年再雇用",
+    "インギージメントサーベリー": "エンゲージメントサーベイ",
+    "最高用語": "再雇用後",
+    "最高用される": "再雇用される",
+    "最高業者": "再雇用者",
+    "天然デジャ": "定年で",
+    "天然再雇用": "定年再雇用",
+    "天然前": "定年前",
+    "天然から": "定年から",
+    "公認育成": "後輩育成",
+    "リネン戦略": "理念戦略",
+    "ミンチ政策": "認知施策",
+    "食卓社員": "嘱託社員",
+    "食卓定年": "嘱託定年",
+    "食卓の": "嘱託の",
+    "最高用": "再雇用",
+    "食卓": "嘱託",
+    "リンチ": "認知",
+    "サーベリー": "サーベイ",
+}
+
 COMMON_NOISE_REPLACEMENTS = {
     "ご質問をに": "ご質問に",
     "をにお答え": "にお答え",
@@ -234,6 +257,16 @@ def load_correction_dict(path: str) -> dict[str, str]:
         return {}
 
 
+def apply_pixel_recognizer_fixes(text: str) -> str:
+    """Pixel 特有の誤変換を辞書で復元する（AI補正のフォールバック／後処理用）。"""
+    s = text
+    for wrong in sorted(PIXEL_RECOGNIZER_REPLACEMENTS, key=len, reverse=True):
+        s = s.replace(wrong, PIXEL_RECOGNIZER_REPLACEMENTS[wrong])
+    # 「天然ガス」等は残す
+    s = re.sub(r"定年(?=ガス)", "天然", s)
+    return s
+
+
 def apply_dictionary_replacements(text: str, replacements: dict[str, str]) -> str:
     s = text
     # Apply longest keys first so shorter keys cannot accidentally match inside
@@ -329,6 +362,7 @@ def apply_mechanical_corrections(
 ) -> str:
     replacements = load_correction_dict(correction_dict_path)
     s = apply_dictionary_replacements(text, replacements)
+    s = apply_pixel_recognizer_fixes(s)
     s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)
     s = remove_fillers(s)
