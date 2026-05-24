@@ -13,19 +13,14 @@ from typing import Any
 
 from generate_minutes_other_sections import extract_title_and_transcript
 from generate_one_question import find_context
+from transcript_paths import resolve_transcript_path_for_minutes
 
 
 def _resolve_transcript_for_context(job_id: str, input_root: str) -> str:
-    job_dir = os.path.join(input_root, job_id)
-    for name in (
-        "merged_transcript_after_qa.txt",
-        "merged_transcript_ai.txt",
-        "merged_transcript.txt",
-    ):
-        p = os.path.join(job_dir, name)
-        if os.path.isfile(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return f.read()
+    path = resolve_transcript_path_for_minutes(job_id, None, input_root)
+    if path and os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
     return ""
 
 

@@ -5,7 +5,7 @@ import re
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
 from job_context import load_job_context
-from transcript_paths import resolve_transcript_path
+from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO, resolve_transcript_path
 
 
 def _load_question_result_for_job(job_id: str, input_root: str) -> dict | None:
@@ -283,6 +283,16 @@ def main() -> None:
             scope_quotes=scope_quotes,
             job_context=job_context,
         )
+        base_len = len(base_text.strip())
+        updated_len = len(updated.strip())
+        ratio = updated_len / max(base_len, 1)
+        if base_len >= 500 and ratio < MIN_TRANSCRIPT_LENGTH_RATIO:
+            print(
+                "[WARNING] recorrect_from_line_answer: incorporate output too short "
+                f"(ratio={ratio:.3f} < {MIN_TRANSCRIPT_LENGTH_RATIO}); "
+                "keeping original transcript unchanged"
+            )
+            updated = base_text
 
     out_path = args.output or os.path.join(
         args.input_root, args.job_id, "merged_transcript_after_qa.txt"

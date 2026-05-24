@@ -2,17 +2,7 @@ import argparse
 import os
 
 from meeting_profile import load_meeting_profile, resolve_display_title
-
-
-def resolve_input_path(job_id: str, input_path: str | None, input_root: str) -> str:
-    if input_path:
-        return input_path
-    job_dir = os.path.join(input_root, job_id)
-    for name in ("merged_transcript_after_qa.txt", "merged_transcript.txt"):
-        p = os.path.join(job_dir, name)
-        if os.path.isfile(p):
-            return p
-    return os.path.join(job_dir, "merged_transcript_after_qa.txt")
+from transcript_paths import resolve_transcript_path_for_minutes
 
 
 def build_minutes_text(title: str, transcript_text: str) -> str:
@@ -50,7 +40,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    in_path = resolve_input_path(args.job_id, args.input, args.input_root)
+    in_path = resolve_transcript_path_for_minutes(args.job_id, args.input, args.input_root)
     if not os.path.isfile(in_path):
         raise FileNotFoundError(f"input file not found: {in_path}")
 

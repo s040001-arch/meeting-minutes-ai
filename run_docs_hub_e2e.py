@@ -145,11 +145,8 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
 
 
 def cmd_after_answer(args: argparse.Namespace) -> None:
-    after_qa_path = os.path.join(
-        args.input_root,
-        args.job_id,
-        "merged_transcript_after_qa.txt",
-    )
+    job_dir = os.path.join(args.input_root, args.job_id)
+    log_path = os.path.join(job_dir, "e2e_run_log.txt")
     _run(
         [
             _py(),
@@ -161,6 +158,14 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             "--answers-json",
             args.answers_json,
         ]
+    )
+    from run_job_once import ensure_after_qa_exists
+
+    ensure_after_qa_exists(job_dir, log_path)
+    from transcript_paths import resolve_transcript_path_for_minutes
+
+    after_qa_path = resolve_transcript_path_for_minutes(
+        args.job_id, None, args.input_root
     )
     _run(
         [

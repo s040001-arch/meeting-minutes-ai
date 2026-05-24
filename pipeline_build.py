@@ -7,7 +7,7 @@ import subprocess
 from functools import lru_cache
 
 # Bump when Step 4.3 correction behavior changes materially.
-PIPELINE_CORRECTION_VERSION = "20260524-chunk-tail-anchor-v3"
+PIPELINE_CORRECTION_VERSION = "20260524-incorporate-length-guard-v1"
 
 
 @lru_cache(maxsize=1)

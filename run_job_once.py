@@ -143,13 +143,28 @@ def run_cmd_with_timeout_retry(
 
 def ensure_after_qa_exists(job_dir: str, log_path: str) -> None:
     after_qa = os.path.join(job_dir, "merged_transcript_after_qa.txt")
-    if os.path.isfile(after_qa):
-        return
     ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
     if not os.path.isfile(ai_path):
-        raise FileNotFoundError(f"missing ai transcript: {ai_path}")
-    shutil.copyfile(ai_path, after_qa)
-    log_line(log_path, "fallback: copied merged_transcript_ai.txt -> merged_transcript_after_qa.txt")
+        if not os.path.isfile(after_qa):
+            raise FileNotFoundError(f"missing ai transcript: {ai_path}")
+        return
+    if not os.path.isfile(after_qa):
+        shutil.copyfile(ai_path, after_qa)
+        log_line(log_path, "fallback: copied merged_transcript_ai.txt -> merged_transcript_after_qa.txt")
+        return
+    with open(ai_path, "r", encoding="utf-8") as f:
+        ai_text = f.read()
+    with open(after_qa, "r", encoding="utf-8") as f:
+        after_text = f.read()
+    ai_len = len(ai_text.strip())
+    after_len = len(after_text.strip())
+    if ai_len > 0 and after_len < ai_len * 0.85:
+        shutil.copyfile(ai_path, after_qa)
+        log_line(
+            log_path,
+            "after_qa_restore: merged_transcript_after_qa.txt was too short "
+            f"(after_qa_chars={after_len} ai_chars={ai_len}); restored from merged_transcript_ai.txt",
+        )
 
 
 def line_push_env_ready() -> bool:
@@ -1102,6 +1117,7 @@ def main() -> None:
                         timeout_sec=args.step_5_4_timeout_sec,
                         retry_count=args.step_5_4_retry_count,
                     )
+                    ensure_after_qa_exists(job_dir, log_path)
                     record_visible_progress(
                         log_path=log_path,
                         visible_log_path=visible_log_path,
