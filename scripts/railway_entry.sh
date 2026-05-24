@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1
 
 echo "[railway_entry] started"
+echo "[railway_entry] RAILWAY_GIT_COMMIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-<unset>}"
+echo "[railway_entry] RAILWAY_ENVIRONMENT_NAME=${RAILWAY_ENVIRONMENT_NAME:-<unset>}"
 python railway_bootstrap.py
 
 DRIVE_FOLDER_ID_PRESENT=0

@@ -8,11 +8,12 @@ from datetime import datetime
 from pathlib import Path
 
 from ai_correct_text import (
-    OPUS_CORRECTION_MODEL,
     correct_full_text,
     get_last_correct_full_text_meta,
+    resolve_correction_model,
     resolve_openai_api_key,
 )
+from pipeline_build import get_pipeline_build_info
 from accumulate_filename_metadata import accumulate_filename_metadata
 from accumulate_knowledge_step17 import accumulate_knowledge
 from detect_unknown_points import detect_unknown_points
@@ -651,6 +652,14 @@ def main() -> None:
     log_path = os.path.join(job_dir, "e2e_run_log.txt")
     visible_log_path = os.path.join(job_dir, "processing_visible_log.txt")
     log_line(log_path, f"job_id={args.job_id}")
+    build_info = get_pipeline_build_info()
+    log_line(
+        log_path,
+        "pipeline_build: "
+        + json.dumps(build_info, ensure_ascii=False)
+        + f" min_ai_length_ratio={args.min_ai_length_ratio}"
+        + f" correction_model={resolve_correction_model()}",
+    )
     init_job_progress(input_root=args.input_root, job_id=args.job_id)
     current_phase = "start"
     current_step_label = "初期化"
@@ -837,7 +846,9 @@ def main() -> None:
 
         log_line(
             log_path,
-            f"step_4_3_ai_correct: input_chars={len(mechanical_text)} model={OPUS_CORRECTION_MODEL}",
+            f"step_4_3_ai_correct: input_chars={len(mechanical_text)} "
+            f"model={resolve_correction_model()} "
+            f"min_ai_length_ratio={args.min_ai_length_ratio}",
         )
         update_job_progress(
             input_root=args.input_root,
@@ -898,8 +909,34 @@ def main() -> None:
             f"step_4_3_ai_correct: done input_chars={len(mechanical_text)} "
             f"output_chars={len(ai_text)} ratio={ratio:.3f} "
             f"stop_reason={stop_reason} fallback_reason={fallback_reason} "
-            f"chunk_count={correction_meta.get('chunk_count')}",
+            f"chunk_count={correction_meta.get('chunk_count')} "
+            f"model={correction_meta.get('model')} "
+            f"used_fallback={correction_meta.get('used_fallback')} "
+            f"pipeline_correction_version={correction_meta.get('pipeline_correction_version')} "
+            f"git_commit={correction_meta.get('git_commit')}",
         )
+        try:
+            chunk_summaries = []
+            for cr in correction_meta.get("chunk_results") or []:
+                chunk_summaries.append(
+                    f"c{cr.get('chunk_index')}:"
+                    f"in={cr.get('input_chars')}/out={cr.get('output_chars')}/"
+                    f"ratio={cr.get('ratio')}/tail={cr.get('tail_covered')}/"
+                    f"orig={cr.get('used_original')}/{cr.get('stop_reason')}"
+                )
+            append_log_to_drive(
+                args.job_id,
+                "Step4.3 AI補正完了 "
+                f"model={correction_meta.get('model')} "
+                f"chunks={correction_meta.get('chunk_count')} "
+                f"ratio={correction_meta.get('ratio')} "
+                f"used_fallback={correction_meta.get('used_fallback')} "
+                f"git={correction_meta.get('git_commit')} "
+                f"ver={correction_meta.get('pipeline_correction_version')} "
+                + (" ".join(chunk_summaries) if chunk_summaries else ""),
+            )
+        except Exception as e:  # noqa: BLE001
+            log_line(log_path, f"step_4_3_drive_log: skip error={e!r}")
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,

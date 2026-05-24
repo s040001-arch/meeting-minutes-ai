@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from job_context import format_context_for_prompt
 from knowledge_sheet_store import format_knowledge_for_prompt, load_knowledge_memos
 from meeting_profile import format_meeting_profile_for_prompt
+from pipeline_build import get_pipeline_build_info
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,14 @@ OPUS_MAX_OUTPUT_TOKENS = 128_000
 _CORRECTION_CHUNK_TARGET_CHARS = 7000
 _CORRECTION_MIN_LENGTH_RATIO_DEFAULT = 0.85
 CORRECTION_META_FILENAME = "correction_meta.json"
+
+
+def resolve_correction_model(model: str | None = None) -> str:
+    return (
+        model
+        or os.environ.get("ANTHROPIC_CORRECTION_MODEL", "").strip()
+        or OPUS_CORRECTION_MODEL
+    )
 
 _STREAM_MAX_RETRIES = 2
 _STREAM_CHUNK_PREVIEW_CHARS = 80
@@ -295,6 +304,46 @@ def _compute_correction_max_tokens(char_count: int) -> int:
     return min(max(int(char_count * 1.5), 8192), OPUS_MAX_OUTPUT_TOKENS)
 
 
+_TAIL_ANCHOR_SIZES = (200, 150, 100, 60)
+_CHUNK_TAIL_RETRY_SUFFIX = (
+    "\n\n【重要】入力テキストの先頭から末尾まで、内容を省略・要約せずに"
+    "すべて補正して出力してください。途中で止めないでください。"
+)
+
+
+def _normalize_for_anchor_match(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def chunk_output_covers_input_tail(
+    input_chunk: str,
+    output_chunk: str,
+    *,
+    is_last_chunk: bool = False,
+) -> bool:
+    """補正結果が入力チャンク末尾まで到達しているか（空白除去後の部分一致）。"""
+    stripped_in = input_chunk.strip()
+    stripped_out = output_chunk.strip()
+    if not stripped_in:
+        return True
+    if not stripped_out:
+        return False
+    if len(stripped_in) < 120:
+        return len(stripped_out) >= len(stripped_in) * 0.85
+
+    norm_out = _normalize_for_anchor_match(stripped_out)
+    sizes = _TAIL_ANCHOR_SIZES if is_last_chunk else _TAIL_ANCHOR_SIZES[:3]
+    for size in sizes:
+        if size > len(stripped_in):
+            continue
+        anchor = _normalize_for_anchor_match(stripped_in[-size:])
+        if len(anchor) < 24:
+            continue
+        if anchor in norm_out:
+            return True
+    return False
+
+
 def _split_text_for_correction(
     text: str,
     target_chars: int = _CORRECTION_CHUNK_TARGET_CHARS,
@@ -366,14 +415,16 @@ def correct_full_text(
     if not text:
         return text
 
-    resolved_model = (
-        model
-        or os.environ.get("ANTHROPIC_CORRECTION_MODEL", "").strip()
-        or OPUS_CORRECTION_MODEL
-    )
+    resolved_model = resolve_correction_model(model)
+    build_info = get_pipeline_build_info()
+    env_model_override = os.environ.get("ANTHROPIC_CORRECTION_MODEL", "").strip()
 
     input_chars = len(text)
-    print(f"correct_full_text: input_chars={input_chars} model={resolved_model}")
+    print(
+        f"correct_full_text: input_chars={input_chars} model={resolved_model} "
+        f"pipeline_correction_version={build_info['pipeline_correction_version']} "
+        f"git_commit={build_info['git_commit']}"
+    )
     global _LAST_CORRECT_FULL_TEXT_META
     chunks = _split_text_for_correction(text)
     _LAST_CORRECT_FULL_TEXT_META = {
@@ -385,11 +436,15 @@ def correct_full_text(
         "used_fallback": False,
         "max_tokens": None,
         "model": resolved_model,
+        "opus_correction_model_default": OPUS_CORRECTION_MODEL,
+        "anthropic_correction_model_env": env_model_override or None,
         "chunk_count": len(chunks),
         "chunk_results": [],
         "min_length_ratio": min_length_ratio,
+        "correction_chunk_target_chars": _CORRECTION_CHUNK_TARGET_CHARS,
         "ai_unknown_points": [],
         "ai_unknown_points_count": 0,
+        **build_info,
     }
     print(
         f"correct_full_text: chunk_count={len(chunks)} "
@@ -440,55 +495,101 @@ def correct_full_text(
         corrected_parts: list[str] = []
         last_stop_reason: object = None
         for idx, chunk in enumerate(chunks, start=1):
+            is_last_chunk = idx == len(chunks)
             chunk_max_tokens = _compute_correction_max_tokens(len(chunk))
             print(
                 f"correct_full_text: chunk={idx}/{len(chunks)} "
                 f"input_chars={len(chunk)} request_max_tokens={chunk_max_tokens}"
             )
-            full_response, stop_reason = _stream_anthropic_text(
-                api_key=api_key,
-                model=resolved_model,
-                system_prompt=system_prompt,
-                user_message=chunk,
-                max_tokens=chunk_max_tokens,
-                timeout_sec=timeout_sec,
-                log_label=f"AI correction streaming chunk {idx}/{len(chunks)}",
-                on_visible_progress=_on_stream_visible
-                if (visible_log_path or on_stream_progress)
-                else None,
-                input_chars=len(chunk),
-            )
-            last_stop_reason = stop_reason
-            chunk_ratio = len(full_response.strip()) / max(len(chunk), 1)
-            chunk_meta = {
+            chunk_meta: dict[str, object] = {
                 "chunk_index": idx,
                 "input_chars": len(chunk),
-                "output_chars": len(full_response.strip()),
-                "ratio": round(chunk_ratio, 3),
-                "stop_reason": stop_reason,
+                "output_chars": 0,
+                "ratio": 0.0,
+                "stop_reason": None,
                 "max_tokens": chunk_max_tokens,
+                "tail_covered": False,
+                "used_original": False,
+                "fallback_reason": None,
+                "retry_count": 0,
             }
-            _LAST_CORRECT_FULL_TEXT_META["chunk_results"].append(chunk_meta)
+            adopted_part: str | None = None
 
-            if stop_reason == "max_tokens":
-                print(
-                    f"[WARNING] correct_full_text: chunk {idx} hit max_tokens; "
-                    "using original chunk text"
+            for retry_idx in range(2):
+                user_message = chunk if retry_idx == 0 else chunk + _CHUNK_TAIL_RETRY_SUFFIX
+                if retry_idx > 0:
+                    chunk_meta["retry_count"] = retry_idx
+                    print(
+                        f"correct_full_text: chunk {idx} tail anchor retry "
+                        f"attempt={retry_idx + 1}/2"
+                    )
+                full_response, stop_reason = _stream_anthropic_text(
+                    api_key=api_key,
+                    model=resolved_model,
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    max_tokens=chunk_max_tokens,
+                    timeout_sec=timeout_sec,
+                    log_label=f"AI correction streaming chunk {idx}/{len(chunks)}",
+                    on_visible_progress=_on_stream_visible
+                    if (visible_log_path or on_stream_progress)
+                    else None,
+                    input_chars=len(chunk),
                 )
-                corrected_parts.append(chunk)
-                continue
+                last_stop_reason = stop_reason
+                part = full_response.strip()
+                chunk_ratio = len(part) / max(len(chunk), 1)
+                tail_covered = chunk_output_covers_input_tail(
+                    chunk,
+                    part,
+                    is_last_chunk=is_last_chunk,
+                )
+                chunk_meta["output_chars"] = len(part)
+                chunk_meta["ratio"] = round(chunk_ratio, 3)
+                chunk_meta["stop_reason"] = stop_reason
+                chunk_meta["tail_covered"] = tail_covered
 
-            part = full_response.strip()
-            if not part or chunk_ratio < min_length_ratio:
-                reason = "anthropic_text_missing" if not part else "output_too_short"
+                if stop_reason == "max_tokens":
+                    print(
+                        f"[WARNING] correct_full_text: chunk {idx} hit max_tokens; "
+                        "using original chunk text"
+                    )
+                    chunk_meta["used_original"] = True
+                    chunk_meta["fallback_reason"] = "max_tokens"
+                    adopted_part = chunk
+                    break
+
+                if (
+                    part
+                    and chunk_ratio >= min_length_ratio
+                    and tail_covered
+                ):
+                    adopted_part = part
+                    break
+
+                if retry_idx == 0 and part and chunk_ratio >= min_length_ratio and not tail_covered:
+                    print(
+                        f"[WARNING] correct_full_text: chunk {idx} tail not covered "
+                        f"(ratio={chunk_ratio:.3f}); retrying once"
+                    )
+                    continue
+
+                reason = "anthropic_text_missing"
+                if part and chunk_ratio < min_length_ratio:
+                    reason = "output_too_short"
+                elif part and not tail_covered:
+                    reason = "tail_not_covered"
                 print(
                     f"[WARNING] correct_full_text: chunk {idx} fallback ({reason}) "
-                    f"ratio={chunk_ratio:.3f} threshold={min_length_ratio}"
+                    f"ratio={chunk_ratio:.3f} tail_covered={tail_covered}"
                 )
-                corrected_parts.append(chunk)
-                continue
+                chunk_meta["used_original"] = True
+                chunk_meta["fallback_reason"] = reason
+                adopted_part = chunk
+                break
 
-            corrected_parts.append(part)
+            _LAST_CORRECT_FULL_TEXT_META["chunk_results"].append(chunk_meta)
+            corrected_parts.append(adopted_part if adopted_part is not None else chunk)
 
         corrected = "\n\n".join(corrected_parts).strip()
         output_chars = len(corrected)
@@ -501,6 +602,19 @@ def correct_full_text(
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
             _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
             _append_visible_log(visible_log_path, "  AI補正: 空の応答が返されたため元テキストを使用")
+            return text
+
+        if not chunk_output_covers_input_tail(text, corrected, is_last_chunk=True):
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "full_text_tail_not_covered"
+            print(
+                "[WARNING] correct_full_text: fallback to original. "
+                "reason=full_text_tail_not_covered"
+            )
+            _append_visible_log(
+                visible_log_path,
+                "  AI補正: 全文末尾が欠落しているため元テキストを使用",
+            )
             return text
 
         if ratio < min_length_ratio:
