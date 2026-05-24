@@ -142,20 +142,19 @@ def _merge_filename_metadata_with_claude(
         max_tokens=4000,
         temperature=0,
         system=system_prompt,
-        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        messages=[
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "assistant", "content": "{"},
+        ],
     )
     texts = []
     for block in getattr(resp, "content", []) or []:
         if getattr(block, "type", "") == "text":
             texts.append(str(getattr(block, "text", "") or ""))
-    raw = "\n".join(t for t in texts if t).strip()
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("json object not found in claude response")
-    parsed = json.loads(raw[start: end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("parsed JSON is not an object")
+    raw_text = "\n".join(t for t in texts if t).strip()
+    # 共有の寛容な抽出器を使用（プレフィル "{" の補完・コードフェンス除去対応）
+    from knowledge_sheet_store import _extract_json_object
+    parsed = _extract_json_object(raw_text)
     updated_raw = parsed.get("updated_knowledge", [])
     if not isinstance(updated_raw, list):
         updated_raw = []

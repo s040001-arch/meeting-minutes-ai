@@ -307,6 +307,75 @@ def _filter_pending_unknown_points(unknown_points: list[dict]) -> tuple[list[dic
     return pending, meta
 
 
+def _is_coherence_review_point(item: dict) -> bool:
+    return (
+        str(item.get("type") or "") == "coherence_review"
+        or str(item.get("source") or "") == "coherence_review"
+    )
+
+
+def _split_pending_by_source(pending: list[dict]) -> tuple[list[dict], list[dict]]:
+    """既存(proposal_impact評価)対象と coherence_review FIFO副キューを分離。"""
+    regular: list[dict] = []
+    coherence: list[dict] = []
+    for item in pending:
+        if _is_coherence_review_point(item):
+            coherence.append(item)
+        else:
+            regular.append(item)
+    return regular, coherence
+
+
+def _build_coherence_question_text(item: dict) -> str:
+    """整合性レビュー由来の質問は候補語を提示せず、文脈+該当語+質問の3要素で組み立てる。"""
+    context = str(item.get("text") or "").strip()
+    if len(context) > 60:
+        context = context[:60] + "…"
+    word = str(item.get("anomaly_word") or "").strip()
+    if not word:
+        word = "該当箇所"
+    lines = [
+        "議事録の以下の箇所について確認させてください。",
+        "",
+        f"「{context}」",
+        "",
+        f"「{word}」が音声認識誤りの可能性があります。正しくは何でしょうか?",
+    ]
+    return "\n".join(lines)
+
+
+def _make_coherence_question_payload(
+    *,
+    job_id: str,
+    selected: dict,
+    pending_meta: dict,
+    doc_url: str,
+) -> tuple[dict, str]:
+    question_id = str(uuid.uuid4())
+    question_text = _build_coherence_question_text(selected)
+    selection_audit = {
+        "selection_mode": "coherence_review_fifo",
+        "anomaly_id": selected.get("anomaly_id"),
+        "anomaly_type": selected.get("anomaly_type"),
+        "confidence": selected.get("confidence"),
+        "estimated_correction": selected.get("estimated_correction"),
+        "question_format": "free_text",
+        "proposal_impact": 0,
+    }
+    result_payload = {
+        "job_id": job_id,
+        "question_id": question_id,
+        "question_status": "generated",
+        "question_format": "free_text",
+        "message": "",
+        "selected_unknown": selected,
+        "doc_url": doc_url,
+        "selection_audit": {**pending_meta, **selection_audit},
+        "question_text": question_text,
+    }
+    return result_payload, question_id
+
+
 def _generate_one_question_by_ai(
     *,
     full_text: str,
@@ -536,7 +605,8 @@ def _mark_unknown_point_asked(
     target_text = str(selected_unknown.get("text") or "").strip()
     target_type = str(selected_unknown.get("type") or "").strip()
     target_hypo = str(selected_unknown.get("hypothesis") or "").strip()
-    if not target_text and not target_hypo:
+    target_anomaly_id = str(selected_unknown.get("anomaly_id") or "").strip()
+    if not target_text and not target_hypo and not target_anomaly_id:
         return 0
 
     try:
@@ -554,12 +624,15 @@ def _mark_unknown_point_asked(
         item_text = str(item.get("text") or "").strip()
         item_type = str(item.get("type") or "").strip()
         item_hypo = str(item.get("hypothesis") or "").strip()
+        item_anomaly_id = str(item.get("anomaly_id") or "").strip()
         # 型が違う候補は対象外（人名 vs 数値などを誤マークしない）
         if target_type and item_type and item_type != target_type:
             continue
-        # マッチ条件: ①text完全一致、②text類似、③hypothesis一致（両方ある場合）
+        # マッチ条件: ⓪anomaly_id一致(整合性レビュー用)、①text完全一致、②text類似、③hypothesis一致
         match = False
-        if target_text and item_text and item_text == target_text:
+        if target_anomaly_id and item_anomaly_id and item_anomaly_id == target_anomaly_id:
+            match = True
+        elif target_text and item_text and item_text == target_text:
             match = True
         elif target_text and item_text and _is_similar_text(item_text, target_text):
             match = True
@@ -660,7 +733,13 @@ def main() -> None:
     if not os.path.isfile(unknowns_path):
         raise FileNotFoundError(f"unknowns file not found: {unknowns_path}")
     unknown_points_all = load_unknown_points(unknowns_path)
-    unknown_points, pending_meta = _filter_pending_unknown_points(unknown_points_all)
+    pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)
+    regular_pending, coherence_pending = _split_pending_by_source(pending_all)
+    pending_meta["regular_pending_count"] = len(regular_pending)
+    pending_meta["coherence_pending_count"] = len(coherence_pending)
+    # 既存(proposal_impact)を優先。既存が空のときのみ整合性レビュー FIFO へフォールバック。
+    unknown_points = regular_pending if regular_pending else []
+    coherence_fallback_active = (not regular_pending) and bool(coherence_pending)
 
     context_text_path = resolve_context_text_path(args.job_id, args.input_root, args.text)
     full_text = ""
@@ -668,7 +747,22 @@ def main() -> None:
         with open(context_text_path, "r", encoding="utf-8") as f:
             full_text = f.read()
 
-    if not unknown_points:
+    if coherence_fallback_active:
+        selected = coherence_pending[0]
+        result_payload, _qid = _make_coherence_question_payload(
+            job_id=args.job_id,
+            selected=selected,
+            pending_meta=pending_meta,
+            doc_url=doc_url,
+        )
+        write_line_pending_context(
+            job_id=args.job_id,
+            question_id=str(result_payload["question_id"]),
+            question_text=str(result_payload["question_text"]),
+            selected_unknown=selected,
+            selection_audit=result_payload["selection_audit"],
+        )
+    elif not unknown_points:
         result_payload = {
             "job_id": args.job_id,
             "question_status": "none",

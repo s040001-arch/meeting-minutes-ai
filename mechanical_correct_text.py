@@ -45,6 +45,8 @@ PIXEL_RECOGNIZER_REPLACEMENTS: dict[str, str] = {
     "食卓": "嘱託",
     "リンチ": "認知",
     "サーベリー": "サーベイ",
+    "ノータン": "濃淡",
+    "のうたん": "濃淡",
 }
 
 COMMON_NOISE_REPLACEMENTS = {

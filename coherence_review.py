@@ -1,0 +1,404 @@
+"""Step 4.5 整合性レビュー(ユーザー設計の Step 4.4): Opusで議事録の違和感を検出する。
+
+- 入力: merged_transcript_ai.txt 全文 + meeting_profile + PIXEL辞書(参考)
+- 出力: transcript_anomalies.json
+- high+auto_fixable: 自動置換 → auto_corrections.json
+- medium: unknown_points.json に副キュー (source=coherence_review) として追加
+- low: 該当箇所に [要確認] タグ付与
+
+Step 4.3 のチャンクごと補正では拾えない違和感(造語/意味不明語/破綻箇所)を、
+全文一括で Opus に読ませて検出する。失敗してもパイプラインは止めない設計。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from typing import Any
+
+import anthropic
+
+from mechanical_correct_text import PIXEL_RECOGNIZER_REPLACEMENTS
+from meeting_profile import format_meeting_profile_for_prompt, load_meeting_profile
+from pipeline_build import get_pipeline_build_info
+
+
+COHERENCE_REVIEW_MODEL = "claude-opus-4-7"
+COHERENCE_REVIEW_MAX_TOKENS = 8000
+COHERENCE_REVIEW_TIMEOUT_SEC = 600
+
+TRANSCRIPT_ANOMALIES_FILENAME = "transcript_anomalies.json"
+AUTO_CORRECTIONS_FILENAME = "auto_corrections.json"
+UNKNOWN_POINTS_FILENAME = "unknown_points.json"
+
+COHERENCE_TYPE = "coherence_review"
+COHERENCE_SOURCE = "coherence_review"
+
+
+def _load_anthropic_api_key() -> str:
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+    return key
+
+
+def _build_system_prompt(meeting_profile: dict | None) -> str:
+    profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    known_patterns = ", ".join(sorted(PIXEL_RECOGNIZER_REPLACEMENTS.keys())[:30])
+    return (
+        "あなたは議事録の整合性レビュー担当です。"
+        "入力は Google Pixel レコーダーの音声認識を AI 補正した日本語議事録です。"
+        "人間が読んで違和感を持つ箇所を JSON 配列で挙げてください。"
+        + profile_block
+        + "\n\n【検出対象】"
+        "\nA. 明らかな造語(同一会議内に類似語が既出)"
+        "  例: 同テキスト内に『自分ごと』があるのに『自分語化』が出ている → A"
+        "\nB. 意味不明な単語・文脈と整合しない語"
+        "  例: 『言わないようにさせるためのご遠足』『モチベーションアップってノータンで』"
+        "\nC. 文として崩壊している箇所"
+        "  例: 『しゃないこと出る、そんなこと出てる言うてました』"
+        "\nD. 短語の誤認識(助詞・指示語)(気づいたら挙げる)"
+        "\nE. 同音異義語の選択ミス(気づいたら挙げる)"
+        "\nA/B/C は最優先、D/E は副次的。"
+        "\n\n【既知の Pixel 誤変換パターン(機械補正済み、再検出不要)】"
+        f"\n{known_patterns}"
+        "\n\n【出力スキーマ】JSON 配列のみを返すこと。説明文・コードフェンス・前置きは一切付けない。"
+        "各要素は次のキーを持つ:"
+        '\n{"context":"前後10-20字を含む引用",'
+        '"anomaly_word":"違和感のある語",'
+        '"anomaly_type":"A|B|C|D|E",'
+        '"estimated_correction":"推定正解語(無ければ空文字)",'
+        '"confidence":"high|medium|low",'
+        '"auto_fixable":true/false,'
+        '"reason":"判定根拠を簡潔に"}'
+        "\n\n【確信度の判定基準】"
+        "\n- high (auto_fixable=true): 推定正解語が同一テキスト内に既出 かつ "
+        "音声認識誤りまたは AI 造語であることが明白"
+        "\n- medium (auto_fixable=false): 推定正解語が1つあるが、同テキスト内に既出ではない / 確信が持てない"
+        "\n- low (auto_fixable=false): 候補が複数 / 推定不能"
+        "\n\n違和感が無ければ空配列 [] を返してください。"
+    )
+
+
+def _extract_text_from_anthropic(resp) -> str:
+    parts: list[str] = []
+    for block in getattr(resp, "content", []) or []:
+        if getattr(block, "type", "") == "text":
+            parts.append(str(getattr(block, "text", "") or ""))
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _parse_json_array(raw: str) -> list[dict]:
+    """寛容な JSON 配列抽出: コードフェンス除去・最大の [...] ブロックを抽出する。"""
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        nl = s.find("\n")
+        s = s[nl + 1:] if nl >= 0 else s
+    if s.endswith("```"):
+        s = s[:-3].strip()
+    # 1. 直接 parse
+    try:
+        loaded = json.loads(s)
+        if isinstance(loaded, list):
+            return [x for x in loaded if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        pass
+    # 2. 最大の [...] ブロックを抽出
+    start = s.find("[")
+    end = s.rfind("]")
+    if start >= 0 and end > start:
+        try:
+            loaded = json.loads(s[start: end + 1])
+            if isinstance(loaded, list):
+                return [x for x in loaded if isinstance(x, dict)]
+        except json.JSONDecodeError:
+            pass
+    # 3. 空応答は anomalies なしと解釈
+    if not s or s in {"[]", "[ ]"}:
+        return []
+    raise RuntimeError(f"coherence anomalies JSON parse failed: head={s[:200]!r}")
+
+
+def _call_opus_for_anomalies(text: str, meeting_profile: dict | None) -> list[dict]:
+    client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
+    system_prompt = _build_system_prompt(meeting_profile)
+    # 全文渡し。安全のため60k字を上限(本案件は約2万字なので余裕)
+    payload_text = text if len(text) <= 60_000 else text[:60_000]
+    # claude-opus-4-7 は temperature/assistant prefill を受け付けない (deprecated)。
+    # system prompt で「JSON 配列のみ」を強く要求し、robust parser でフェンス等を除去する。
+    resp = client.messages.create(
+        model=COHERENCE_REVIEW_MODEL,
+        max_tokens=COHERENCE_REVIEW_MAX_TOKENS,
+        timeout=COHERENCE_REVIEW_TIMEOUT_SEC,
+        system=system_prompt,
+        messages=[
+            {"role": "user", "content": payload_text},
+        ],
+    )
+    raw = _extract_text_from_anthropic(resp)
+    return _parse_json_array(raw)
+
+
+# 〜化、〜性、〜的など、AI造語で付与されやすい接尾辞。stem 一致判定に使う。
+_STEM_SUFFIXES = ("化", "性", "的", "論", "感", "観", "者", "型", "風", "派", "系")
+
+
+def _is_estimated_known_in_text(estimated: str, text: str) -> bool:
+    """推定正解語(または接尾辞を除いた語幹)が同テキスト内に既出かを判定する。
+
+    LLM が「自分語化 → 自分ごと化」のように『〜化』付き造語を提案するとき、
+    厳密に『自分ごと化』完全一致を求めると false になる(本文には『自分ごと』のみ)。
+    そこで語幹(『自分ごと』)が存在すれば既出扱いとする。
+    """
+    if not estimated or not text:
+        return False
+    if estimated in text:
+        return True
+    if len(estimated) >= 2 and estimated[-1] in _STEM_SUFFIXES:
+        stem = estimated[:-1]
+        if stem and stem in text:
+            return True
+    return False
+
+
+def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
+    word = str(item.get("anomaly_word") or "").strip()
+    ctx = str(item.get("context") or "").strip()
+    pos = -1
+    if word:
+        pos = text.find(word)
+    if pos < 0 and ctx:
+        pos = text.find(ctx[:20])
+    confidence = str(item.get("confidence") or "low").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "low"
+    estimated = str(item.get("estimated_correction") or "").strip()
+    anomaly_type = str(item.get("anomaly_type") or "B").strip().upper()
+    anomaly_type = anomaly_type[:1] if anomaly_type else "B"
+
+    # auto_fixable は LLM 判断より厳格に決定する:
+    # - confidence=high かつ word/estimated 共に非空・相異
+    # - word が同テキストに既出(置換対象が実在)
+    # - estimated またはその語幹が同テキストに既出(造語/誤変換の確証)
+    # - 候補が複数(／ や / で区切られている)場合は不可
+    # - estimated が短すぎる(1字)場合は誤置換リスクが高いので不可
+    has_multi_candidate = "／" in estimated or "/" in estimated
+    auto_fixable = (
+        confidence == "high"
+        and bool(estimated)
+        and bool(word)
+        and word != estimated
+        and word in text
+        and len(estimated) >= 2
+        and not has_multi_candidate
+        and _is_estimated_known_in_text(estimated, text)
+    )
+    return {
+        "anomaly_id": f"ta_{idx:03d}",
+        "context": ctx,
+        "anomaly_word": word,
+        "anomaly_type": anomaly_type,
+        "estimated_correction": estimated,
+        "confidence": confidence,
+        "auto_fixable": auto_fixable,
+        "reason": str(item.get("reason") or "").strip(),
+        "context_position_in_transcript": pos,
+    }
+
+
+def _apply_high_auto_fixes(
+    text: str, anomalies: list[dict], log_path: str
+) -> tuple[str, list[dict]]:
+    fixed = text
+    entries: list[dict] = []
+    for an in anomalies:
+        if not an.get("auto_fixable"):
+            continue
+        wrong = an.get("anomaly_word") or ""
+        right = an.get("estimated_correction") or ""
+        if not wrong or not right or wrong == right or wrong not in fixed:
+            continue
+        before_count = fixed.count(wrong)
+        fixed = fixed.replace(wrong, right)
+        entries.append(
+            {
+                "anomaly_id": an["anomaly_id"],
+                "before": wrong,
+                "after": right,
+                "occurrences_replaced": before_count,
+                "confidence": an.get("confidence"),
+                "reason": an.get("reason", ""),
+            }
+        )
+    if entries:
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False, indent=2)
+    return fixed, entries
+
+
+def _apply_low_confidence_tags(text: str, anomalies: list[dict]) -> str:
+    """low の anomaly_word の最初の出現箇所に [要確認] タグを付与する。"""
+    out = text
+    seen: set[str] = set()
+    for an in anomalies:
+        if an.get("confidence") != "low":
+            continue
+        word = (an.get("anomaly_word") or "").strip()
+        if not word or word in seen:
+            continue
+        seen.add(word)
+        idx = out.find(word)
+        if idx < 0:
+            continue
+        # 既に [要確認] が付いている場合は重複付与しない
+        tail_check_pos = idx + len(word)
+        if out[tail_check_pos: tail_check_pos + 6] == "[要確認]":
+            continue
+        out = out[:idx] + word + "[要確認]" + out[idx + len(word):]
+    return out
+
+
+def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
+    """medium 確信度を unknown_points 形式に変換(FIFO 副キュー扱い)。
+
+    high+auto_fixable は既に置換済みなので含めない。
+    high で auto_fixable=false(同テキスト既出ではないが確信度 high)も質問対象に含むが、
+    推定正解が空かつ word が長すぎる(文断片レベル)は LINE 質問が無意味なので除外する。
+    """
+    out: list[dict] = []
+    for an in anomalies:
+        conf = an.get("confidence")
+        if conf == "high" and an.get("auto_fixable"):
+            continue
+        if conf not in {"high", "medium"}:
+            continue
+        word = (an.get("anomaly_word") or "").strip()
+        if not word:
+            continue
+        # 30字超の "wordとして長すぎる断片" は LINE 質問に不向き(文崩壊扱い、low に倒すべき)
+        if len(word) > 30:
+            continue
+        # high なのに推定正解が空なものは false-positive の可能性が高い(『よいしょ!』等の口語)
+        if conf == "high" and not str(an.get("estimated_correction") or "").strip():
+            continue
+        out.append(
+            {
+                "type": COHERENCE_TYPE,
+                "source": COHERENCE_SOURCE,
+                "text": (an.get("context") or word)[:220],
+                "anomaly_word": word,
+                "anomaly_id": an.get("anomaly_id"),
+                "estimated_correction": an.get("estimated_correction") or "",
+                "confidence": conf,
+                "reason": an.get("reason", ""),
+                "anomaly_type": an.get("anomaly_type", "B"),
+                "context_position_in_transcript": an.get(
+                    "context_position_in_transcript", -1
+                ),
+                "status": "open",
+            }
+        )
+    return out
+
+
+def _merge_into_unknown_points(job_dir: str, coherence_points: list[dict]) -> int:
+    """unknown_points.json に副キューを追記する(重複は anomaly_id でガード)。"""
+    if not coherence_points:
+        return 0
+    path = os.path.join(job_dir, UNKNOWN_POINTS_FILENAME)
+    existing: list[dict] = []
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                existing = [x for x in data if isinstance(x, dict)]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    existing_ids = {
+        str(it.get("anomaly_id") or "") for it in existing if it.get("anomaly_id")
+    }
+    added = 0
+    for p in coherence_points:
+        if str(p.get("anomaly_id") or "") in existing_ids:
+            continue
+        existing.append(p)
+        added += 1
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+    return added
+
+
+def run_coherence_review(job_dir: str) -> dict:
+    ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
+    if not os.path.isfile(ai_path):
+        raise FileNotFoundError(f"ai transcript not found: {ai_path}")
+    with open(ai_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    profile = load_meeting_profile(job_dir)
+    build_info = get_pipeline_build_info()
+
+    anomalies_raw = _call_opus_for_anomalies(text, profile)
+    enriched = [_enrich_anomaly(a, i + 1, text) for i, a in enumerate(anomalies_raw)]
+
+    anomalies_path = os.path.join(job_dir, TRANSCRIPT_ANOMALIES_FILENAME)
+    with open(anomalies_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "job_id": os.path.basename(job_dir),
+                "model": COHERENCE_REVIEW_MODEL,
+                "pipeline_correction_version": build_info[
+                    "pipeline_correction_version"
+                ],
+                "git_commit": build_info["git_commit"],
+                "input_chars": len(text),
+                "anomalies": enriched,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    auto_log_path = os.path.join(job_dir, AUTO_CORRECTIONS_FILENAME)
+    fixed_text, auto_entries = _apply_high_auto_fixes(text, enriched, auto_log_path)
+    tagged_text = _apply_low_confidence_tags(fixed_text, enriched)
+    if tagged_text != text:
+        with open(ai_path, "w", encoding="utf-8") as f:
+            f.write(tagged_text)
+
+    coherence_points = _coherence_to_unknown_points(enriched)
+    added_to_unknowns = _merge_into_unknown_points(job_dir, coherence_points)
+
+    return {
+        "anomalies_total": len(enriched),
+        "high_count": sum(1 for a in enriched if a.get("confidence") == "high"),
+        "medium_count": sum(1 for a in enriched if a.get("confidence") == "medium"),
+        "low_count": sum(1 for a in enriched if a.get("confidence") == "low"),
+        "auto_fixed_count": len(auto_entries),
+        "coherence_question_candidates": len(coherence_points),
+        "added_to_unknown_points": added_to_unknowns,
+        "anomalies_path": anomalies_path,
+        "auto_corrections_path": auto_log_path if auto_entries else None,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Step 4.5 整合性レビュー (Opus): 議事録の違和感を検出"
+    )
+    parser.add_argument("--job-id", required=True)
+    parser.add_argument("--input-root", default="data/transcriptions")
+    args = parser.parse_args()
+    job_dir = os.path.join(args.input_root, args.job_id)
+    if not os.path.isdir(job_dir):
+        print(f"job_dir not found: {job_dir}", file=sys.stderr)
+        return 1
+    result = run_coherence_review(job_dir)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

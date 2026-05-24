@@ -1044,6 +1044,70 @@ def main() -> None:
             ),
         )
         update_doc_title_from_hub(hub_meta_path, f"【不明点検出完了】{display_title}", log_path)
+
+        # Step 4.5: 整合性レビュー(ユーザー設計の "Step 4.4 整合性レビュー")
+        # AI補正後の議事録全文を Opus に読ませて違和感(造語・意味不明語・破綻箇所)を検出する。
+        # high+auto_fixable は merged_transcript_ai.txt を直接書き換え、auto_corrections.json に記録。
+        # medium 確信度は unknown_points.json に副キュー(source=coherence_review)として追加され、
+        # Step 5 の既存質問が無いときに FIFO で LINE 質問に回される。
+        # low は本文に [要確認] タグを付与。
+        # 例外発生時もパイプラインは止めない(議事録生成は続行)。
+        current_phase = "step_4_5_coherence_review"
+        current_step_label = "Step 4.5: 整合性レビュー"
+        record_visible_progress(
+            log_path=log_path,
+            visible_log_path=visible_log_path,
+            job_id=args.job_id,
+            message="議事録全体の整合性レビューを実行中...（造語・意味不明語の検出）",
+        )
+        try:
+            coherence_result = subprocess.run(
+                [
+                    py,
+                    os.path.join(repo, "coherence_review.py"),
+                    "--job-id",
+                    args.job_id,
+                    "--input-root",
+                    args.input_root,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=900,
+            )
+            if coherence_result.stdout:
+                log_line(log_path, f"step_4_5_coherence_review: stdout\n{coherence_result.stdout}")
+            if coherence_result.stderr:
+                log_line(log_path, f"step_4_5_coherence_review: stderr\n{coherence_result.stderr}")
+            if coherence_result.returncode == 0:
+                log_line(log_path, "step_4_5_coherence_review: success")
+                record_visible_progress(
+                    log_path=log_path,
+                    visible_log_path=visible_log_path,
+                    job_id=args.job_id,
+                    message="整合性レビューが完了しました（違和感箇所を検出・記録）",
+                )
+            else:
+                log_line(
+                    log_path,
+                    f"step_4_5_coherence_review: non-zero exit={coherence_result.returncode} (non-fatal)",
+                )
+                record_visible_progress(
+                    log_path=log_path,
+                    visible_log_path=visible_log_path,
+                    job_id=args.job_id,
+                    message="整合性レビューでエラー（議事録生成は続行）",
+                )
+        except Exception as e:
+            log_line(log_path, f"step_4_5_coherence_review: exception={e!r} (non-fatal, pipeline continues)")
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"整合性レビューで例外発生（議事録生成は続行）: {type(e).__name__}",
+            )
+
         qcycle_cmd = [
             py,
             os.path.join(repo, "run_question_cycle_once.py"),

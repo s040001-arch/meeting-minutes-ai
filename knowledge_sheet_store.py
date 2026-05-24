@@ -46,12 +46,44 @@ def _extract_text_from_anthropic(resp) -> str:
     return "\n".join(t for t in texts if t).strip()
 
 
+def _strip_code_fences(text: str) -> str:
+    """```json ... ``` 形式のフェンスを除去する。"""
+    s = str(text or "").strip()
+    # Remove leading ```lang and trailing ```
+    if s.startswith("```"):
+        first_newline = s.find("\n")
+        if first_newline >= 0:
+            s = s[first_newline + 1 :]
+    if s.endswith("```"):
+        s = s[: -3]
+    return s.strip()
+
+
 def _extract_json_object(text: str) -> dict:
-    raw = str(text or "").strip()
+    """寛容な JSON オブジェクト抽出: コードフェンス除去・最大バランス {} を探索する。"""
+    raw = _strip_code_fences(text)
+    if not raw:
+        raise ValueError("json object not found (empty)")
+    # 1. 直接 parse 試行
+    try:
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            return loaded
+    except json.JSONDecodeError:
+        pass
+    # 2. プレフィルで先頭 { が欠落するケース（assistant prefill: "{"）に対応
+    if not raw.startswith("{"):
+        try:
+            loaded = json.loads("{" + raw)
+            if isinstance(loaded, dict):
+                return loaded
+        except json.JSONDecodeError:
+            pass
+    # 3. 最大の {...} ブロックを抽出
     start = raw.find("{")
     end = raw.rfind("}")
     if start < 0 or end < start:
-        raise ValueError("json object not found")
+        raise ValueError(f"json object not found in response: {raw[:200]!r}")
     payload = json.loads(raw[start : end + 1])
     if not isinstance(payload, dict):
         raise ValueError("parsed JSON is not an object")
@@ -180,7 +212,10 @@ def _merge_knowledge_memos_with_claude(
         max_tokens=3000,
         temperature=0,
         system=system_prompt,
-        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        messages=[
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "assistant", "content": "{"},
+        ],
     )
     parsed = _extract_json_object(_extract_text_from_anthropic(resp))
     updated = _normalize_knowledge_memos(parsed.get("updated_knowledge"))
@@ -246,7 +281,10 @@ def _merge_knowledge_memos_with_all_answers(
         max_tokens=3000,
         temperature=0,
         system=system_prompt,
-        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        messages=[
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "assistant", "content": "{"},
+        ],
     )
     parsed = _extract_json_object(_extract_text_from_anthropic(resp))
     updated = _normalize_knowledge_memos(parsed.get("updated_knowledge"))
