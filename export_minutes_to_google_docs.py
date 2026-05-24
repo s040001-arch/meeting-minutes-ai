@@ -558,6 +558,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if os.environ.get("DOCS_DRY_RUN", "").strip().lower() in ("1", "true", "yes"):
+        if args.push:
+            print("docs_dry_run=1 (Drive API push skipped; local artifacts only)")
+        args.push = False
+
     if args.update_doc_id and not args.push:
         raise ValueError("--update-doc-id requires --push (replace body is only meaningful when uploading)")
 

@@ -18,8 +18,12 @@ from meeting_profile import format_meeting_profile_for_prompt
 
 logger = logging.getLogger(__name__)
 
-# Claude 4 Opus — environment variable ANTHROPIC_CORRECTION_MODEL overrides this.
-OPUS_CORRECTION_MODEL = "claude-opus-4-20250514"
+# Claude Opus — environment variable ANTHROPIC_CORRECTION_MODEL overrides this.
+OPUS_CORRECTION_MODEL = "claude-opus-4-7"
+OPUS_MAX_OUTPUT_TOKENS = 128_000
+_CORRECTION_CHUNK_TARGET_CHARS = 7000
+_CORRECTION_MIN_LENGTH_RATIO_DEFAULT = 0.85
+CORRECTION_META_FILENAME = "correction_meta.json"
 
 _STREAM_MAX_RETRIES = 2
 _STREAM_CHUNK_PREVIEW_CHARS = 80
@@ -287,6 +291,60 @@ def get_last_correct_full_text_meta() -> dict[str, object]:
     return dict(_LAST_CORRECT_FULL_TEXT_META)
 
 
+def _compute_correction_max_tokens(char_count: int) -> int:
+    return min(max(int(char_count * 1.5), 8192), OPUS_MAX_OUTPUT_TOKENS)
+
+
+def _split_text_for_correction(
+    text: str,
+    target_chars: int = _CORRECTION_CHUNK_TARGET_CHARS,
+) -> list[str]:
+    """空行（段落）境界で分割し、1チャンクあたり target_chars 字を目安にする。"""
+    stripped = text.strip()
+    if not stripped:
+        return [""]
+    if len(stripped) <= target_chars:
+        return [stripped]
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_len = 0
+
+    for para in re.split(r"\n\n+", stripped):
+        para = para.strip()
+        if not para:
+            continue
+        para_len = len(para) + (2 if current_parts else 0)
+        if current_parts and current_len + para_len > target_chars:
+            chunks.append("\n\n".join(current_parts))
+            current_parts = []
+            current_len = 0
+        if len(para) > target_chars:
+            if current_parts:
+                chunks.append("\n\n".join(current_parts))
+                current_parts = []
+                current_len = 0
+            line_buf: list[str] = []
+            line_len = 0
+            for line in para.split("\n"):
+                llen = len(line) + (1 if line_buf else 0)
+                if line_buf and line_len + llen > target_chars:
+                    chunks.append("\n".join(line_buf))
+                    line_buf = []
+                    line_len = 0
+                line_buf.append(line)
+                line_len += llen
+            if line_buf:
+                chunks.append("\n".join(line_buf))
+            continue
+        current_parts.append(para)
+        current_len += para_len
+
+    if current_parts:
+        chunks.append("\n\n".join(current_parts))
+    return chunks or [stripped]
+
+
 def correct_full_text(
     text: str,
     model: str | None = None,
@@ -295,6 +353,7 @@ def correct_full_text(
     meeting_profile: dict | None = None,
     visible_log_path: str | None = None,
     on_stream_progress: Optional[Callable[[str], None]] = None,
+    min_length_ratio: float = _CORRECTION_MIN_LENGTH_RATIO_DEFAULT,
 ) -> str:
     """機械補正済みテキストを Claude 4 Opus に一括で渡し補正済み全文を返す。
 
@@ -313,20 +372,29 @@ def correct_full_text(
         or OPUS_CORRECTION_MODEL
     )
 
-    print(f"correct_full_text: input_chars={len(text)} model={resolved_model}")
+    input_chars = len(text)
+    print(f"correct_full_text: input_chars={input_chars} model={resolved_model}")
     global _LAST_CORRECT_FULL_TEXT_META
-    max_tokens = min(max(int(len(text) * 1.0), 8192), 40960)
+    chunks = _split_text_for_correction(text)
     _LAST_CORRECT_FULL_TEXT_META = {
-        "input_chars": len(text),
+        "input_chars": input_chars,
         "output_chars": 0,
+        "ratio": 0.0,
         "stop_reason": None,
         "fallback_reason": None,
         "used_fallback": False,
-        "max_tokens": max_tokens,
+        "max_tokens": None,
+        "model": resolved_model,
+        "chunk_count": len(chunks),
+        "chunk_results": [],
+        "min_length_ratio": min_length_ratio,
         "ai_unknown_points": [],
         "ai_unknown_points_count": 0,
     }
-    print(f"correct_full_text: request_max_tokens={max_tokens}")
+    print(
+        f"correct_full_text: chunk_count={len(chunks)} "
+        f"min_length_ratio={min_length_ratio}"
+    )
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
@@ -355,7 +423,6 @@ def correct_full_text(
                 f"  ナレッジシート読み込みエラー（補正は続行します）: {e!r}",
             )
 
-        # ── Opus 一括補正 ─────────────────────────────────────────────────
         if on_phase:
             on_phase("ai_correct")
         _append_visible_log(visible_log_path, "  AIにテキストを送信しました（応答を待っています...）")
@@ -370,48 +437,95 @@ def correct_full_text(
             if on_stream_progress:
                 on_stream_progress(msg)
 
-        full_response, stop_reason = _stream_anthropic_text(
-            api_key=api_key,
-            model=resolved_model,
-            system_prompt=system_prompt,
-            user_message=text,
-            max_tokens=max_tokens,
-            timeout_sec=timeout_sec,
-            log_label="AI correction streaming",
-            on_visible_progress=_on_stream_visible if (visible_log_path or on_stream_progress) else None,
-            input_chars=len(text),
-        )
-        _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = stop_reason
-
-        if stop_reason == "max_tokens":
-            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
-            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_max_tokens_reached"
+        corrected_parts: list[str] = []
+        last_stop_reason: object = None
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_max_tokens = _compute_correction_max_tokens(len(chunk))
             print(
-                f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=anthropic_max_tokens_reached input_chars={len(text)}"
+                f"correct_full_text: chunk={idx}/{len(chunks)} "
+                f"input_chars={len(chunk)} request_max_tokens={chunk_max_tokens}"
             )
-            _append_visible_log(visible_log_path, "  AI補正: トークン上限に到達したため元テキストを使用")
-            return text
+            full_response, stop_reason = _stream_anthropic_text(
+                api_key=api_key,
+                model=resolved_model,
+                system_prompt=system_prompt,
+                user_message=chunk,
+                max_tokens=chunk_max_tokens,
+                timeout_sec=timeout_sec,
+                log_label=f"AI correction streaming chunk {idx}/{len(chunks)}",
+                on_visible_progress=_on_stream_visible
+                if (visible_log_path or on_stream_progress)
+                else None,
+                input_chars=len(chunk),
+            )
+            last_stop_reason = stop_reason
+            chunk_ratio = len(full_response.strip()) / max(len(chunk), 1)
+            chunk_meta = {
+                "chunk_index": idx,
+                "input_chars": len(chunk),
+                "output_chars": len(full_response.strip()),
+                "ratio": round(chunk_ratio, 3),
+                "stop_reason": stop_reason,
+                "max_tokens": chunk_max_tokens,
+            }
+            _LAST_CORRECT_FULL_TEXT_META["chunk_results"].append(chunk_meta)
 
-        corrected = full_response.strip()
+            if stop_reason == "max_tokens":
+                print(
+                    f"[WARNING] correct_full_text: chunk {idx} hit max_tokens; "
+                    "using original chunk text"
+                )
+                corrected_parts.append(chunk)
+                continue
+
+            part = full_response.strip()
+            if not part or chunk_ratio < min_length_ratio:
+                reason = "anthropic_text_missing" if not part else "output_too_short"
+                print(
+                    f"[WARNING] correct_full_text: chunk {idx} fallback ({reason}) "
+                    f"ratio={chunk_ratio:.3f} threshold={min_length_ratio}"
+                )
+                corrected_parts.append(chunk)
+                continue
+
+            corrected_parts.append(part)
+
+        corrected = "\n\n".join(corrected_parts).strip()
+        output_chars = len(corrected)
+        ratio = output_chars / max(input_chars, 1)
+        _LAST_CORRECT_FULL_TEXT_META["stop_reason"] = last_stop_reason
+        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = output_chars
+        _LAST_CORRECT_FULL_TEXT_META["ratio"] = round(ratio, 3)
+
         if not corrected:
             _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
             _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = "anthropic_text_missing"
-            print(
-                f"[WARNING] correct_full_text: fallback to original. "
-                f"reason=anthropic_text_missing input_chars={len(text)}"
-            )
             _append_visible_log(visible_log_path, "  AI補正: 空の応答が返されたため元テキストを使用")
             return text
 
-        _LAST_CORRECT_FULL_TEXT_META["output_chars"] = len(corrected)
+        if ratio < min_length_ratio:
+            _LAST_CORRECT_FULL_TEXT_META["used_fallback"] = True
+            _LAST_CORRECT_FULL_TEXT_META["fallback_reason"] = (
+                f"output_ratio_below_threshold:{ratio:.3f}<{min_length_ratio}"
+            )
+            print(
+                f"[WARNING] correct_full_text: fallback to original. "
+                f"reason=output_ratio_below_threshold ratio={ratio:.3f} "
+                f"threshold={min_length_ratio} input_chars={input_chars}"
+            )
+            _append_visible_log(
+                visible_log_path,
+                f"  AI補正: 出力が短すぎるため元テキストを使用（{ratio:.0%}）",
+            )
+            return text
+
         print(
-            f"correct_full_text: final_chars={len(corrected)} "
-            f"(input was {len(text)}) stop_reason={stop_reason}"
+            f"correct_full_text: final_chars={output_chars} "
+            f"(input was {input_chars}) ratio={ratio:.3f} stop_reason={last_stop_reason}"
         )
         _append_visible_log(
             visible_log_path,
-            f"  AIからの応答を受信しました（{len(corrected):,}文字）",
+            f"  AIからの応答を受信しました（{output_chars:,}文字、比率{ratio:.0%}）",
         )
         return corrected
 

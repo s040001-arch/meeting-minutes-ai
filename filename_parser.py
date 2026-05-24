@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 _BRACKETED_RE = re.compile(r"[【\[\(（][^】\]\)）]*[】\]\)）]")
-_SPLIT_RE = re.compile(r"[_\-\s\u3000・/]+")
+_SPLIT_RE = re.compile(r"[_\-\s\u3000・、,/]+")
 _DATE_TOKEN_RE = re.compile(r"^\d{4,8}$")
 
 # 「プレセナ」を意味するトークン群（社内会議の判定キー）
@@ -201,7 +201,10 @@ def _split_attendees_from_topic(
             attendees.append(stripped)
             continue
         if _looks_like_person_name_token(t):
-            attendees.append(stripped if stripped else t)
+            if re.search(r"(?:さん|氏|様)$", t):
+                attendees.append(t)
+            else:
+                attendees.append(stripped if stripped else t)
         else:
             topics.append(t)
     return topics, attendees

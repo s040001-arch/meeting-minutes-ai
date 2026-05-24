@@ -75,23 +75,31 @@ def record_visible_progress(
 def run_cmd(log_path: str, args: list[str], step: str) -> str:
     cmd_text = " ".join(args)
     log_line(log_path, f"{step}: start cmd={cmd_text}")
-    completed = subprocess.run(args, capture_output=True, text=True)
-    if completed.stdout.strip():
-        log_line(log_path, f"{step}: stdout\n{completed.stdout.rstrip()}")
-    if completed.stderr.strip():
-        log_line(log_path, f"{step}: stderr\n{completed.stderr.rstrip()}")
-        print(f"[run_cmd][{step}] stderr:\n{completed.stderr.rstrip()}", flush=True)
+    completed = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if stdout.strip():
+        log_line(log_path, f"{step}: stdout\n{stdout.rstrip()}")
+    if stderr.strip():
+        log_line(log_path, f"{step}: stderr\n{stderr.rstrip()}")
+        print(f"[run_cmd][{step}] stderr:\n{stderr.rstrip()}", flush=True)
     if completed.returncode != 0:
         print(
             f"[run_cmd][{step}] FAILED rc={completed.returncode} "
-            f"stdout_len={len(completed.stdout)} stderr_len={len(completed.stderr)}\n"
-            f"STDOUT>>>{completed.stdout[:2000]}<<<\n"
-            f"STDERR>>>{completed.stderr[:2000]}<<<",
+            f"stdout_len={len(stdout)} stderr_len={len(stderr)}\n"
+            f"STDOUT>>>{stdout[:2000]}<<<\n"
+            f"STDERR>>>{stderr[:2000]}<<<",
             flush=True,
         )
         raise RuntimeError(f"{step} failed: exit_code={completed.returncode}")
     log_line(log_path, f"{step}: success")
-    return completed.stdout
+    return stdout
 
 
 def run_cmd_with_timeout_retry(
@@ -562,8 +570,8 @@ def main() -> None:
     parser.add_argument(
         "--min-ai-length-ratio",
         type=float,
-        default=0.6,
-        help="AI補正結果の最小文字量比率（補正前に対してこれ未満なら採用しない。デフォルト: 0.6）",
+        default=0.85,
+        help="AI補正結果の最小文字量比率（補正前に対してこれ未満なら採用しない。デフォルト: 0.85）",
     )
     parser.add_argument(
         "--docs-push",
@@ -869,16 +877,28 @@ def main() -> None:
             meeting_profile=meeting_profile,
             visible_log_path=visible_log_path,
             on_stream_progress=_on_ai_stream_progress,
+            min_length_ratio=args.min_ai_length_ratio,
         )
 
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)
 
         ratio = len(ai_text) / max(len(mechanical_text), 1)
+        correction_meta = get_last_correct_full_text_meta()
+        correction_meta_path = os.path.join(job_dir, "correction_meta.json")
+        try:
+            with open(correction_meta_path, "w", encoding="utf-8") as f:
+                json.dump(correction_meta, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            log_line(log_path, f"correction_meta save failed: {e!r}")
+        stop_reason = correction_meta.get("stop_reason")
+        fallback_reason = correction_meta.get("fallback_reason")
         log_line(
             log_path,
             f"step_4_3_ai_correct: done input_chars={len(mechanical_text)} "
-            f"output_chars={len(ai_text)} ratio={ratio:.3f}",
+            f"output_chars={len(ai_text)} ratio={ratio:.3f} "
+            f"stop_reason={stop_reason} fallback_reason={fallback_reason} "
+            f"chunk_count={correction_meta.get('chunk_count')}",
         )
         update_job_progress(
             input_root=args.input_root,
@@ -887,9 +907,6 @@ def main() -> None:
             status="success",
             detail={"chars": len(ai_text), "ratio": round(ratio, 3)},
         )
-        correction_meta = get_last_correct_full_text_meta()
-        stop_reason = correction_meta.get("stop_reason")
-        fallback_reason = correction_meta.get("fallback_reason")
         stop_label = fallback_reason or stop_reason or "unknown"
         record_visible_progress(
             log_path=log_path,

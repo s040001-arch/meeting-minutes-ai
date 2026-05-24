@@ -45,20 +45,19 @@ def _build_minutes_system_prompt() -> str:
     return (
         "あなたは日本語の議事録作成アシスタントです。"
         "与えられた発言録だけを根拠に、相原隆太郎（プレセナ提案担当）が会議後に次の打ち手を考えるための"
-        "論点整理メモと議事録セクションを作成してください。"
+        "議事録セクションを作成してください。"
         "推測や創作は禁止です。根拠が弱い情報は書かず、空配列にしてください。"
         "出力は必ずJSONオブジェクトのみとし、説明文・コードフェンスは禁止です。"
+        "\n\n【参加者リストについて（重要）】"
+        "\n- 参加者リストはファイル名から事前に確定済みです。あなたは participants を生成・変更してはいけません。"
+        "\n- 発言の有無で参加者を絞り込まないでください。"
         "\n\n【出力セクション】"
-        "\n以下のセクションを生成してください："
-        "\n- participants: 参加者リスト（meeting_profile と一致させる）"
+        "\n以下のセクションのみを生成してください："
         "\n- agenda: 議題（複数あれば列挙）"
-        "\n- key_discussion_points: 論点メモ。相原視点で『この会議の本質的な論点』を3-7個に整理。"
-        "  各論点について『議論の中身』と『現時点の到達点』を分けて記述。"
-        "  会議録の単なる要約ではなく、相原が後で読み返した時に『あの論点ね』と即座に思い出せる粒度で。"
         "\n- decisions: 会議内で明示的に合意した事項"
         "\n- open_issues: 残論点（次回以降に持ち越し）"
         "\n- next_actions: Next Action（誰が・いつまでに・何をするか可能な限り明示）"
-        "\n各値は文字列配列です（key_discussion_points も各要素1論点の文字列）。"
+        "\n各値は文字列配列です。"
         "発言録本文そのものは出力しないでください。"
         "\n\n【decisions に必ず含めるべき情報（該当する場合）】"
         "\n- 人数・回数・期間・形式（対面/オンライン）"
@@ -66,6 +65,7 @@ def _build_minutes_system_prompt() -> str:
         "\n- 日程上の制約（曜日回避、月末月初回避 等）"
         "\n- 1回あたりの受講人数の目安・上限"
         "\n- 今回見送った選択肢（例: 2日目の実務適用は見送り）"
+        "\n- スケジュール合意（例: 6月1週目の実施、6月中のミッション研修 等）"
         "\n\n【open_issues に含めるべき情報（該当する場合）】"
         "\n- 未確定の日程・人数配分"
         "\n- 評価・スキル測定手法の検討"
@@ -112,15 +112,24 @@ def _format_bullets(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+def _participants_from_profile(meeting_profile: dict[str, Any]) -> list[str]:
+    raw = meeting_profile.get("participants") or []
+    items: list[str] = []
+    for item in raw:
+        text = str(item).strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
 def _build_minutes_structured_md(
     title: str,
     transcript_md: str,
     sections: dict[str, Any],
     job_id: str,
+    participants: list[str],
 ) -> str:
-    participants = _normalize_items(sections.get("participants"))
     agenda = _normalize_items(sections.get("agenda"))
-    key_points = _normalize_items(sections.get("key_discussion_points"))
     decisions = _normalize_items(sections.get("decisions"))
     open_issues = _normalize_items(sections.get("open_issues"))
     next_actions = _normalize_items(sections.get("next_actions"))
@@ -129,8 +138,6 @@ def _build_minutes_structured_md(
         transcript = "（未設定）"
     return (
         f"# {title}\n\n"
-        "## 論点メモ\n\n"
-        f"{_format_bullets(key_points)}\n\n"
         "## 参加者\n\n"
         f"{_format_bullets(participants)}\n\n"
         "## 議題\n\n"
@@ -172,9 +179,7 @@ def _generate_minutes_sections_with_claude(
             "title": title,
             "transcript": transcript_md,
             "output_keys": [
-                "participants",
                 "agenda",
-                "key_discussion_points",
                 "decisions",
                 "open_issues",
                 "next_actions",
@@ -280,6 +285,7 @@ def main() -> None:
 
     meeting_profile = load_meeting_profile(job_dir)
     knowledge_memos = list(meeting_profile.get("relevant_knowledge") or [])
+    participants = _participants_from_profile(meeting_profile)
 
     _draft_title, transcript_md = extract_title_and_transcript(draft_text)
     title = resolve_display_title(meeting_profile, job_id=args.job_id, fallback=_draft_title)
@@ -301,6 +307,7 @@ def main() -> None:
         transcript_md=transcript_md,
         sections=sections,
         job_id=args.job_id,
+        participants=participants,
     )
 
     out_path = args.output or os.path.join(
