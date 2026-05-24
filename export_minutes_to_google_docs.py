@@ -6,12 +6,15 @@ Google Docs へ議事録をエクスポートする。
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 import textwrap
-from typing import List, Tuple
+import time
+from contextlib import contextmanager
+from typing import Iterator, List, Tuple
 
 from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
@@ -365,20 +368,78 @@ def split_text_into_chunks(text: str, max_chars: int) -> List[str]:
     return chunks
 
 
+def _read_structural_elements(elements: list) -> str:
+    parts: List[str] = []
+    for item in elements or []:
+        paragraph = item.get("paragraph")
+        if paragraph:
+            for e in paragraph.get("elements", []):
+                tr = e.get("textRun")
+                if tr and "content" in tr:
+                    parts.append(tr["content"])
+            continue
+        table = item.get("table")
+        if table:
+            for row in table.get("tableRows", []):
+                for cell in row.get("tableCells", []):
+                    parts.append(_read_structural_elements(cell.get("content", [])))
+    return "".join(parts)
+
+
 def fetch_google_doc_text(docs_service, doc_id: str) -> str:
     doc = docs_service.documents().get(documentId=doc_id).execute()
     body = doc.get("body", {})
-    content = body.get("content", [])
-    parts: List[str] = []
-    for item in content:
-        p = item.get("paragraph")
-        if not p:
-            continue
-        for e in p.get("elements", []):
-            tr = e.get("textRun")
-            if tr and "content" in tr:
-                parts.append(tr["content"])
-    return "".join(parts)
+    return _read_structural_elements(body.get("content", []))
+
+
+def fetch_google_doc_text_with_retry(
+    docs_service,
+    doc_id: str,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 1.5,
+) -> str:
+    """書き込み直後は API が空本文を返すことがあるためリトライする。"""
+    last = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        last = fetch_google_doc_text(docs_service, doc_id)
+        if attempt >= attempts:
+            break
+        time.sleep(delay_sec)
+    return last
+
+
+_DOCS_EXPORT_LOCK_DIR = os.path.join("data", "locks")
+
+
+@contextmanager
+def docs_export_lock(doc_id: str) -> Iterator[None]:
+    """同一 doc_id への同時 clear/insert を直列化する。"""
+    os.makedirs(_DOCS_EXPORT_LOCK_DIR, exist_ok=True)
+    h = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()[:16]
+    path = os.path.join(_DOCS_EXPORT_LOCK_DIR, f"docs_export_{h}.lock")
+    fd = None
+    for _ in range(120):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"doc_id={doc_id}\n".encode("utf-8"))
+            break
+        except FileExistsError:
+            time.sleep(0.5)
+    else:
+        raise TimeoutError(f"docs_export_lock timeout doc_id={doc_id}")
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def ensure_drive_subfolder(drive_service, parent_folder_id: str, subfolder_name: str) -> str:
@@ -605,12 +666,6 @@ def main() -> None:
 
     if args.update_doc_id:
         doc_id = args.update_doc_id.strip()
-        insert_logs = replace_google_doc_body(
-            docs_service=docs_service,
-            doc_id=doc_id,
-            text=text,
-            chunk_size=args.chunk_size,
-        )
     else:
         doc_id, insert_logs = create_google_doc_and_insert_text(
             docs_service=docs_service,
@@ -619,16 +674,23 @@ def main() -> None:
             chunk_size=args.chunk_size,
         )
 
-    # 見出しスタイルを適用（Title / Heading 2）
-    # 失敗してもテキスト挿入済みなので続行する（スタイルなしで Docs に残る）
-    heading_map = _parse_heading_map(md)
-    if heading_map:
-        try:
-            apply_heading_styles(docs_service, doc_id, heading_map)
-        except Exception as _heading_err:
-            print(f"apply_heading_styles_failed={_heading_err!r} (non-fatal, continuing)")
+    with docs_export_lock(doc_id):
+        if args.update_doc_id:
+            insert_logs = replace_google_doc_body(
+                docs_service=docs_service,
+                doc_id=doc_id,
+                text=text,
+                chunk_size=args.chunk_size,
+            )
 
-    actual_text = fetch_google_doc_text(docs_service, doc_id)
+        heading_map = _parse_heading_map(md)
+        if heading_map:
+            try:
+                apply_heading_styles(docs_service, doc_id, heading_map)
+            except Exception as _heading_err:
+                print(f"apply_heading_styles_failed={_heading_err!r} (non-fatal, continuing)")
+
+        actual_text = fetch_google_doc_text_with_retry(docs_service, doc_id)
     expected_chars = len(text)
     actual_chars = len(actual_text)
     same_content_raw = actual_text == text

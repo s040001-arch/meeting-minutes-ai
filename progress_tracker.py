@@ -160,6 +160,32 @@ def finalize_job_progress(*, input_root: str, job_id: str, overall_status: str =
     )
 
 
+def wait_for_job_pipeline_idle(
+    input_root: str,
+    job_id: str,
+    *,
+    timeout_sec: float = 3600.0,
+    poll_sec: float = 2.0,
+) -> bool:
+    """
+    run_job_once 等のメインパイプラインが終わるまで待つ。
+    after-answer が Step 6.3 Docs 更新と同時に走ると本文が空読み・上書きされるため。
+    """
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    terminal_overall = frozenset({"success", "failed", "error", "done"})
+    while time.monotonic() < deadline:
+        payload = read_job_progress(input_root, job_id)
+        if not payload:
+            time.sleep(poll_sec)
+            continue
+        overall = str(payload.get("overall_status") or "").strip().lower()
+        phase = str(payload.get("phase") or "").strip().lower()
+        if overall in terminal_overall or phase == "done":
+            return True
+        time.sleep(poll_sec)
+    return False
+
+
 def ensure_artifact_flags(*, input_root: str, job_id: str, artifacts: dict[str, Any]) -> None:
     """
     artifacts を progress.json の artifacts に反映（存在/サイズなど）。

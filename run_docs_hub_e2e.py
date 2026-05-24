@@ -145,6 +145,25 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
 
 
 def cmd_after_answer(args: argparse.Namespace) -> None:
+    from progress_tracker import wait_for_job_pipeline_idle
+
+    wait_sec = float(os.getenv("AFTER_ANSWER_PIPELINE_WAIT_SEC", "3600"))
+    print(
+        f"[run_docs_hub_e2e] waiting for main pipeline idle "
+        f"(job_id={args.job_id} timeout_sec={wait_sec})",
+        flush=True,
+    )
+    if not wait_for_job_pipeline_idle(
+        args.input_root, args.job_id, timeout_sec=wait_sec
+    ):
+        print(
+            "[run_docs_hub_e2e] WARN: pipeline did not become idle before after-answer; "
+            "Docs update may race with step_6_3",
+            flush=True,
+        )
+    else:
+        print("[run_docs_hub_e2e] main pipeline idle; starting after-answer", flush=True)
+
     job_dir = os.path.join(args.input_root, args.job_id)
     log_path = os.path.join(job_dir, "e2e_run_log.txt")
     _run(
