@@ -25,8 +25,12 @@ from pipeline_build import get_pipeline_build_info
 
 
 COHERENCE_REVIEW_MODEL = "claude-opus-4-7"
-COHERENCE_REVIEW_MAX_TOKENS = 8000
-COHERENCE_REVIEW_TIMEOUT_SEC = 600
+# 整合性レビューは全文(~20K字)に対し最大数十件の anomaly を JSON で返すため、
+# 出力 token 量が膨らみやすい。Opus は 128K まで対応するので 32K を確保して
+# truncation を防ぐ(本番ジョブ job_20260528_050751 で 8K では切り詰められて
+# parse 失敗 → 整合性レビュー成果物がゼロになる事象を観測)。
+COHERENCE_REVIEW_MAX_TOKENS = 32000
+COHERENCE_REVIEW_TIMEOUT_SEC = 900
 
 TRANSCRIPT_ANOMALIES_FILENAME = "transcript_anomalies.json"
 AUTO_CORRECTIONS_FILENAME = "auto_corrections.json"
@@ -89,14 +93,72 @@ def _extract_text_from_anthropic(resp) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+def _recover_complete_objects_from_truncated_array(text: str) -> list[dict]:
+    """JSON 配列が max_tokens で途中切れした場合でも、完了済みの {...} を回収する。
+
+    `[ {a},{b},{c... `のような truncated 入力から、完全に閉じている {a},{b} の
+    2件を取り出して返す。文字列内の `{}` も中括弧深度として計上されないよう
+    シンプルな state machine で走査する。
+    """
+    s = (text or "").lstrip()
+    if not s or s[0] != "[":
+        return []
+    out: list[dict] = []
+    depth = 0
+    in_string = False
+    escape = False
+    item_start = -1
+    i = 1  # skip leading '['
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if depth == 0:
+                    item_start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and item_start >= 0:
+                    candidate = s[item_start: i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict):
+                            out.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+                    item_start = -1
+            elif ch == "]" and depth == 0:
+                break
+        i += 1
+    return out
+
+
 def _parse_json_array(raw: str) -> list[dict]:
-    """寛容な JSON 配列抽出: コードフェンス除去・最大の [...] ブロックを抽出する。"""
+    """寛容な JSON 配列抽出: コードフェンス除去・truncation 耐性付き。
+
+    1. 直接 parse 成功なら返す。
+    2. 最大の [...] ブロックを試す。
+    3. 途中切れ(`]` が現れない、または末尾の `}` が不完全)の場合は、
+       state machine で完了済み top-level objects だけを取り出す。
+    """
     s = (raw or "").strip()
     if s.startswith("```"):
         nl = s.find("\n")
         s = s[nl + 1:] if nl >= 0 else s
     if s.endswith("```"):
         s = s[:-3].strip()
+    if not s or s in {"[]", "[ ]"}:
+        return []
     # 1. 直接 parse
     try:
         loaded = json.loads(s)
@@ -114,9 +176,11 @@ def _parse_json_array(raw: str) -> list[dict]:
                 return [x for x in loaded if isinstance(x, dict)]
         except json.JSONDecodeError:
             pass
-    # 3. 空応答は anomalies なしと解釈
-    if not s or s in {"[]", "[ ]"}:
-        return []
+    # 3. truncation リカバリ: 完了済み {...} だけ回収する
+    if start >= 0:
+        recovered = _recover_complete_objects_from_truncated_array(s[start:])
+        if recovered:
+            return recovered
     raise RuntimeError(f"coherence anomalies JSON parse failed: head={s[:200]!r}")
 
 

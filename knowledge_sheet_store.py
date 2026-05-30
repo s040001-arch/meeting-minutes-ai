@@ -59,8 +59,65 @@ def _strip_code_fences(text: str) -> str:
     return s.strip()
 
 
+def _recover_string_array_from_truncated(text: str, key: str) -> list[str]:
+    """`"key": [ "a", "b", "c", "d ...` のような truncated 入力から完全な文字列要素を回収する。
+
+    knowledge_sheet 更新で出力が max_tokens で切られたとき、`updated_knowledge`
+    配列の途中までを回収するためのリカバリ。文字列内のエスケープを尊重し、
+    閉じていない最後の要素は無視する。
+    """
+    needle = f'"{key}"'
+    pos = text.find(needle)
+    if pos < 0:
+        return []
+    # find first '[' after the key
+    bracket_start = text.find("[", pos + len(needle))
+    if bracket_start < 0:
+        return []
+    out: list[str] = []
+    i = bracket_start + 1
+    n = len(text)
+    in_string = False
+    escape = False
+    item_chars: list[str] = []
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                item_chars.append(ch)
+                escape = False
+            elif ch == "\\":
+                item_chars.append(ch)
+                escape = True
+            elif ch == '"':
+                in_string = False
+                try:
+                    parsed = json.loads('"' + "".join(item_chars) + '"')
+                    if isinstance(parsed, str):
+                        out.append(parsed)
+                except json.JSONDecodeError:
+                    pass
+                item_chars = []
+            else:
+                item_chars.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+                item_chars = []
+            elif ch == "]":
+                break
+            # その他(空白・カンマ等)はスキップ
+        i += 1
+    return out
+
+
 def _extract_json_object(text: str) -> dict:
-    """寛容な JSON オブジェクト抽出: コードフェンス除去・最大バランス {} を探索する。"""
+    """寛容な JSON オブジェクト抽出: コードフェンス除去・最大バランス {}・truncation 耐性。
+
+    knowledge sheet 更新では `{"updated_knowledge": [...], "action": "...", "reason": "..."}` を
+    返してほしいが、max_tokens で末尾が切れて `}` で閉じないケースがある。
+    その場合は `updated_knowledge` 配列だけでもリカバリして dict として返す。
+    """
     raw = _strip_code_fences(text)
     if not raw:
         raise ValueError("json object not found (empty)")
@@ -82,12 +139,24 @@ def _extract_json_object(text: str) -> dict:
     # 3. 最大の {...} ブロックを抽出
     start = raw.find("{")
     end = raw.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError(f"json object not found in response: {raw[:200]!r}")
-    payload = json.loads(raw[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("parsed JSON is not an object")
-    return payload
+    if start >= 0 and end > start:
+        try:
+            payload = json.loads(raw[start : end + 1])
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+    # 4. truncation リカバリ: updated_knowledge 配列だけでも救出して dict 形に整える
+    #    プレフィル使用時は raw が `"updated_knowledge":...` で始まる
+    candidate_text = raw if raw.startswith("{") else "{" + raw
+    recovered = _recover_string_array_from_truncated(candidate_text, "updated_knowledge")
+    if recovered:
+        return {
+            "updated_knowledge": recovered,
+            "action": "updated",
+            "reason": "recovered_from_truncated_response",
+        }
+    raise ValueError(f"json object not found in response: {raw[:200]!r}")
 
 
 def _normalize_knowledge_memos(items: object) -> list[str]:
@@ -209,7 +278,9 @@ def _merge_knowledge_memos_with_claude(
     }
     resp = client.messages.create(
         model=model,
-        max_tokens=3000,
+        # ナレッジ累積数が増えると出力 JSON も大きくなるため、Sonnet の上限近くまで確保。
+        # 3000 では本番 155 memos の更新で切り詰められ JSON parse 失敗を観測(2026-05-28)。
+        max_tokens=16000,
         temperature=0,
         system=system_prompt,
         messages=[
@@ -278,7 +349,9 @@ def _merge_knowledge_memos_with_all_answers(
     }
     resp = client.messages.create(
         model=model,
-        max_tokens=3000,
+        # Q&A 複数件統合時は出力もさらに膨らむ。3000→16000 に引き上げて
+        # truncation を防止(2026-05-28 ジョブで再発防止)。
+        max_tokens=16000,
         temperature=0,
         system=system_prompt,
         messages=[

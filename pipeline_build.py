@@ -7,7 +7,7 @@ import subprocess
 from functools import lru_cache
 
 # Bump when Step 4.3 correction behavior changes materially.
-PIPELINE_CORRECTION_VERSION = "20260524-coherence-review-v1"
+PIPELINE_CORRECTION_VERSION = "20260530-output-token-cap-fix-v2"
 
 
 @lru_cache(maxsize=1)
