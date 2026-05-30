@@ -3,6 +3,7 @@ import os
 
 from meeting_profile import load_meeting_profile, resolve_display_title
 from transcript_paths import resolve_transcript_path_for_minutes
+from transcript_section_summarizer import add_section_headings
 
 
 def build_minutes_text(title: str, transcript_text: str) -> str:
@@ -11,6 +12,17 @@ def build_minutes_text(title: str, transcript_text: str) -> str:
         "## 発言録（逐語）\n\n"
         f"{transcript_text.strip()}\n"
     )
+
+
+def _add_section_headings_safe(
+    transcript_text: str, meeting_profile: dict | None
+) -> str:
+    """発言録に分節サマリ見出しを付与する。失敗時は原文をそのまま返す(非致命)。"""
+    try:
+        return add_section_headings(transcript_text, meeting_profile)
+    except Exception as e:
+        print(f"transcript_section_headings_failed={e!r}")
+        return transcript_text
 
 
 def main() -> None:
@@ -49,11 +61,17 @@ def main() -> None:
     if not transcript_text.strip():
         raise ValueError("input transcript is empty.")
 
+    meeting_profile = load_meeting_profile(
+        os.path.join(args.input_root, args.job_id)
+    )
     title = args.title or resolve_display_title(
-        load_meeting_profile(os.path.join(args.input_root, args.job_id)),
+        meeting_profile,
         job_id=args.job_id,
     )
-    output_text = build_minutes_text(title=title, transcript_text=transcript_text)
+
+    # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。
+    annotated = _add_section_headings_safe(transcript_text, meeting_profile)
+    output_text = build_minutes_text(title=title, transcript_text=annotated)
 
     out_path = args.output or os.path.join(
         args.input_root, args.job_id, "minutes_draft.md"

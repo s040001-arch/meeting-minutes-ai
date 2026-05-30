@@ -122,15 +122,18 @@ def md_to_google_docs_text(md: str) -> str:
 
 
 def _parse_heading_map(md: str) -> dict:
-    """Markdown の # / ## 行から {プレーンテキスト: namedStyleType} の辞書を生成する。
+    """Markdown の # / ## / ### 行から {プレーンテキスト: namedStyleType} の辞書を生成する。
 
     # タイトル  → "TITLE"
     ## セクション → "HEADING_2"
+    ### 小見出し → "HEADING_3"  (発言録の分節サマリ ▼xxx 等で使用、太字+大きめで表示)
     """
     heading_map: dict = {}
     for line in md.splitlines():
         stripped = line.strip()
-        if stripped.startswith("## "):
+        if stripped.startswith("### "):
+            heading_map[stripped[4:].strip()] = "HEADING_3"
+        elif stripped.startswith("## "):
             heading_map[stripped[3:].strip()] = "HEADING_2"
         elif stripped.startswith("# "):
             heading_map[stripped[2:].strip()] = "TITLE"
