@@ -780,10 +780,20 @@ def main() -> None:
         print(f"question_generation_openai_api_key_found={bool(api_key)} source={key_source}")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set for AI question generation.")
-        # ナレッジを質問生成に渡す（既知の項目を質問対象から除外させる）
+        # Phase 2: Layer 2 由来の関連知識を渡す(空ならレガシー memos にフォールバック)。
+        # 質問生成側は文字列ブロックではなく list を期待するため、
+        # Layer 2 ブロックを 1要素の list として渡す。
         try:
-            knowledge_memos = load_knowledge_memos()
-            print(f"question_generation_knowledge_memos={len(knowledge_memos)}")
+            from world_knowledge_store import get_runtime_knowledge_block
+            meeting_profile_tmp = load_meeting_profile(job_dir)
+            world_block = get_runtime_knowledge_block(
+                meeting_profile=meeting_profile_tmp, purpose="detection",
+            )
+            if world_block.strip():
+                knowledge_memos = [world_block]
+            else:
+                knowledge_memos = load_knowledge_memos() or []
+            print(f"question_generation_knowledge_chars={sum(len(m) for m in knowledge_memos)}")
         except Exception as e:
             knowledge_memos = []
             print(f"question_generation_knowledge_load_failed={e!r}")

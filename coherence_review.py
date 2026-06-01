@@ -49,12 +49,22 @@ def _load_anthropic_api_key() -> str:
 
 def _build_system_prompt(meeting_profile: dict | None) -> str:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    # Phase 2: Layer 2 由来の世界モデルを inject (関連企業/人物/手法/相原氏のスタイル)
+    world_block = ""
+    try:
+        from world_knowledge_store import get_runtime_knowledge_block
+        world_block = get_runtime_knowledge_block(
+            meeting_profile=meeting_profile, purpose="coherence",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"coherence_world_knowledge_fetch_failed={e!r}")
     known_patterns = ", ".join(sorted(PIXEL_RECOGNIZER_REPLACEMENTS.keys())[:30])
     return (
         "あなたは議事録の整合性レビュー担当です。"
         "入力は Google Pixel レコーダーの音声認識を AI 補正した日本語議事録です。"
         "人間が読んで違和感を持つ箇所を JSON 配列で挙げてください。"
         + profile_block
+        + world_block
         + "\n\n【検出対象】"
         "\nA. 明らかな造語(同一会議内に類似語が既出)"
         "  例: 同テキスト内に『自分ごと』があるのに『自分語化』が出ている → A"

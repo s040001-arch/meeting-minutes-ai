@@ -7,7 +7,7 @@ import subprocess
 from functools import lru_cache
 
 # Bump when Step 4.3 correction behavior changes materially.
-PIPELINE_CORRECTION_VERSION = "20260601-learned-dict-phase1-v1"
+PIPELINE_CORRECTION_VERSION = "20260601-world-knowledge-phase2-v1"
 
 
 @lru_cache(maxsize=1)

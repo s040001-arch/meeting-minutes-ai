@@ -44,9 +44,14 @@ def _build_detection_prompt(
     meeting_profile: dict,
     knowledge_memos: list[str],
     answered_items: list[dict] | None = None,
+    knowledge_block_override: str | None = None,
 ) -> str:
     profile_block = format_meeting_profile_for_prompt(meeting_profile)
-    knowledge_block = _format_knowledge_as_exclusion(knowledge_memos)
+    # Phase 2: Layer 2 由来の整形済テキストがあれば優先(顧客/参加者でフィルタ済み)。
+    if knowledge_block_override is not None and knowledge_block_override.strip():
+        knowledge_block = knowledge_block_override
+    else:
+        knowledge_block = _format_knowledge_as_exclusion(knowledge_memos)
 
     scope = str(meeting_profile.get("meeting_scope") or "unknown")
 
@@ -182,16 +187,20 @@ def detect_unknown_points(
 
     profile = dict(meeting_profile or {})
     knowledge_memos: list[str] = list(profile.get("relevant_knowledge") or [])
-    if not knowledge_memos:
-        try:
-            knowledge_memos = load_knowledge_memos() or []
-            if knowledge_memos:
-                _append_visible_log(
-                    visible_log_path,
-                    f"  ナレッジシートから{len(knowledge_memos)}件の知識を参照",
-                )
-        except Exception as e:
-            _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
+    # Phase 2: Layer 2 由来の知識ブロックを取得(空ならレガシー memos にフォールバック)
+    knowledge_block_override = ""
+    try:
+        from world_knowledge_store import get_runtime_knowledge_block
+        knowledge_block_override = get_runtime_knowledge_block(
+            meeting_profile=profile, purpose="detection",
+        )
+        if knowledge_block_override.strip():
+            _append_visible_log(
+                visible_log_path,
+                f"  関連知識を読み込みました（{len(knowledge_block_override):,}文字）",
+            )
+    except Exception as e:
+        _append_visible_log(visible_log_path, f"  ナレッジ読み込みエラー（検出は続行）: {e!r}")
 
     _append_visible_log(
         visible_log_path,
@@ -202,6 +211,7 @@ def detect_unknown_points(
         meeting_profile=profile,
         knowledge_memos=knowledge_memos,
         answered_items=answered_items,
+        knowledge_block_override=knowledge_block_override,
     )
 
     try:

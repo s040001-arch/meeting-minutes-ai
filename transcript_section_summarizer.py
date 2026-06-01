@@ -89,12 +89,23 @@ def _clean_summary_line(raw: str) -> str:
 
 def _build_integrated_system_prompt(meeting_profile: dict[str, Any] | None) -> str:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    # Phase 2: Layer 2 由来の世界モデル(関連企業/人物/手法)を inject。
+    # 見出しの表記揃え(嘱託再雇用者・エンゲージメントサーベイ 等)に寄与する。
+    world_block = ""
+    try:
+        from world_knowledge_store import get_runtime_knowledge_block
+        world_block = get_runtime_knowledge_block(
+            meeting_profile=meeting_profile, purpose="correction",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"summary_world_knowledge_fetch_failed={e!r}")
     return (
         "あなたは議事録の発言録に分節サマリ見出しを差し込む担当です。"
         "渡された発言録全文を読み、議題・話題の自然な切れ目で分節し、"
         "各セクションを表す見出しを生成して返します。"
         "見出しは後で読者(相原)が斜め読みして「ここ詳しく見たい」と判断するための目印です。"
         + profile_block
+        + world_block
         + "\n\n【分節ルール(改善A)】"
         "\n- 話題が明確に切り替わる発言を境界に取る"
         "\n  例の境界フレーズ: 「次に〜の話なんですけど」「で、もう1つの話」「○○の方ですが」"

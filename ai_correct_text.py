@@ -238,6 +238,7 @@ def _append_visible_log(visible_log_path: str | None, message: str) -> None:
 def _build_opus_correction_system_prompt(
     meeting_profile: dict | None = None,
     knowledge_memos: list[str] | None = None,
+    knowledge_block: str | None = None,
 ) -> str:
     """Claude 4 Opus 向け一括補正プロンプト。"""
     pixel_block = (
@@ -290,8 +291,11 @@ def _build_opus_correction_system_prompt(
         "発言の意味を変えない範囲で適度に整える。ただし話者の意図を改変するような言い換えは行わない。"
     )
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
-    knowledge_block = format_knowledge_for_prompt(knowledge_memos or [])
-    return base + profile_block + knowledge_block
+    # Phase 2: knowledge_block(Layer 2 由来の整形済テキスト)を優先。
+    # 渡されない場合は従来の memos -> format_knowledge_for_prompt() 経路にフォールバック。
+    if knowledge_block is None:
+        knowledge_block = format_knowledge_for_prompt(knowledge_memos or [])
+    return base + profile_block + (knowledge_block or "")
 
 
 # ---------------------------------------------------------------------------
@@ -572,13 +576,19 @@ def correct_full_text(
 
     try:
         # ── ナレッジ読み込み ──────────────────────────────────────────────
+        # Phase 2: 関連する Layer 2 セクション(該当顧客/参加者)のみを抽出。
+        # Layer 2 が空の場合は内部で legacy free-form memos にフォールバックする。
         try:
-            knowledge_memos = load_knowledge_memos()
-            print(f"correct_full_text: knowledge_memos={len(knowledge_memos)}")
-            if knowledge_memos:
+            from world_knowledge_store import get_runtime_knowledge_block
+
+            knowledge_block = get_runtime_knowledge_block(
+                meeting_profile=meeting_profile, purpose="correction",
+            )
+            knowledge_memos = []  # ブロックを直接渡すので memos list は空(後段で再使用しない)
+            if knowledge_block.strip():
                 _append_visible_log(
                     visible_log_path,
-                    f"  ナレッジシートから{len(knowledge_memos)}件の知識を読み込みました",
+                    f"  関連知識を読み込みました（{len(knowledge_block):,}文字）",
                 )
             else:
                 _append_visible_log(
@@ -587,7 +597,8 @@ def correct_full_text(
                 )
         except Exception as e:
             knowledge_memos = []
-            print(f"correct_full_text: knowledge_memos_load_failed={e!r}")
+            knowledge_block = ""
+            print(f"correct_full_text: knowledge_load_failed={e!r}")
             _append_visible_log(
                 visible_log_path,
                 f"  ナレッジシート読み込みエラー（補正は続行します）: {e!r}",
@@ -600,6 +611,7 @@ def correct_full_text(
         system_prompt = _build_opus_correction_system_prompt(
             meeting_profile=meeting_profile,
             knowledge_memos=knowledge_memos,
+            knowledge_block=knowledge_block,
         )
 
         def _on_stream_visible(msg: str) -> None:

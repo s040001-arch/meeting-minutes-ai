@@ -1,0 +1,26 @@
+﻿# --- Secrets / credentials (NEVER let the agent read these) ---
+# 過去に .env を Read した内容が会話履歴に載り、Anthropic Usage Policy で
+# リクエストがブロックされた経緯から、エージェント側からアクセス不能にする。
+.env
+.env.*
+!.env.example
+
+# サービスアカウント / OAuth 認証ファイル
+credentials_service_account.json
+credentials_oauth.json
+token_*.json
+*.pem
+*.key
+
+# --- Learned knowledge / runtime artifacts ---
+# Phase 1/2 で構築する学習辞書・キャッシュ。git 管理外であると同時に
+# 会話履歴にも載せない(顧客名・人物名等の機微情報を含む)。
+data/knowledge/
+data/transcriptions/
+
+# --- Local logs / scratch ---
+*.log
+_smoke_*.py
+_local_test_*.py
+_inspect_*.py
+_make_summary.py

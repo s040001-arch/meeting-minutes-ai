@@ -172,10 +172,21 @@ def _generate_minutes_sections_with_claude(
         api_key=api_key,
         timeout=httpx.Timeout(timeout=float(timeout_sec), connect=30.0),
     )
+    # Phase 2: Layer 2 由来の関連知識を取得して payload に同梱(Layer 2 が空なら
+    # 内部で legacy memos にフォールバックされる)。
+    world_block = ""
+    try:
+        from world_knowledge_store import get_runtime_knowledge_block
+        world_block = get_runtime_knowledge_block(
+            meeting_profile=meeting_profile, purpose="minutes",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"minutes_world_knowledge_fetch_failed={e!r}")
     user_message = json.dumps(
         {
             "meeting_profile": meeting_profile,
             "knowledge_memos": knowledge_memos,
+            "world_knowledge": world_block,
             "title": title,
             "transcript": transcript_md,
             "output_keys": [
