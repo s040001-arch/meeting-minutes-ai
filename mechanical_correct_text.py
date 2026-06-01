@@ -362,8 +362,20 @@ def apply_mechanical_corrections(
     text: str,
     correction_dict_path: str = DEFAULT_CORRECTION_DICT_PATH,
 ) -> str:
+    # 適用順: 手動辞書 → 自動学習辞書 → Pixel(コード組込) → 共通ノイズ
+    # 手動辞書を先に適用するのは、人間が判断した置換を最優先するため。
     replacements = load_correction_dict(correction_dict_path)
     s = apply_dictionary_replacements(text, replacements)
+    # Phase 1 学習辞書 (coherence_review / LINE Q&A 由来の自動蓄積)
+    try:
+        from learned_corrections_store import load_learned_dict
+
+        learned = load_learned_dict()
+        if learned:
+            s = apply_dictionary_replacements(s, learned)
+    except Exception as e:  # noqa: BLE001
+        # 学習辞書の読み込み失敗は補正全体を止めない(非致命)
+        print(f"learned_corrections_apply_failed={e!r}")
     s = apply_pixel_recognizer_fixes(s)
     s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)

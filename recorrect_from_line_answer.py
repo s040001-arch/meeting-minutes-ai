@@ -7,6 +7,122 @@ from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_k
 from job_context import load_job_context
 from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO, resolve_transcript_path
 
+# 学習辞書追加で「無回答/わからない」と判断する文言
+_NEGATIVE_ANSWER_PATTERNS = (
+    "わからない", "分からない", "わかりません", "分かりません",
+    "不明", "わすれた", "忘れた", "覚えてない", "おぼえてない",
+    "そのまま", "そのままで", "問題ない", "問題なし", "間違ってない",
+    "間違いない", "正しい", "ok", "OK",
+)
+# 単一名詞っぽい回答かを判別する正規表現(句点・読点・接続詞のない短い表現)
+_SHORT_NOUN_ANSWER_RE = re.compile(
+    r"^[^\s。、！？!?]{1,20}$"
+)
+# 「正しくは X」「Xです」「Xのこと(を指して?います?)」「X(=表記|の意)」等から X を抽出
+_CORRECTION_EXTRACT_PATTERNS = [
+    re.compile(r"^正しくは\s*[「『]?([^\s。、！？!?「」『』]{1,20})[」』]?[\s。!]*"),
+    re.compile(r"^[「『]([^」』]{1,20})[」』]\s*(?:の(?:こと|意|誤り|誤字)|です)?[\s。!]*$"),
+    re.compile(r"^([^\s。、！？!?「」『』]{1,20})\s*(?:のこと|の意|の誤り|の誤字|の音声認識誤り)\s*(?:です|でした)?[\s。!]*$"),
+    re.compile(r"^([^\s。、！？!?「」『』]{1,20})\s*です(?:ね|よ)?[\s。!]*$"),
+    re.compile(r"^([^\s。、！？!?「」『』]{1,20})\s*でした[\s。!]*$"),
+]
+
+
+def _extract_correction_word_from_answer(answer_text: str) -> str:
+    """ユーザ回答から「正しい単語」を抽出する。失敗時は空文字列。
+
+    対応するパターン:
+      - そのまま短い名詞: "濃淡"
+      - 「○○」形式: "「ご援護」", "『監督』"
+      - "正しくは X" : "正しくは濃淡"
+      - "X のこと/誤り/音声認識誤り": "監督の音声認識誤り"
+      - "X です/でした" : "濃淡です"
+    無回答パターンや長文回答(説明調)は抽出失敗としてスキップ。
+    """
+    if not answer_text:
+        return ""
+    s = answer_text.strip()
+    if not s:
+        return ""
+    # 否定表現はスキップ
+    s_lower_compact = s.replace(" ", "").lower()
+    for pat in _NEGATIVE_ANSWER_PATTERNS:
+        if pat in s_lower_compact or pat in s:
+            return ""
+    # 抽出パターン
+    for pat in _CORRECTION_EXTRACT_PATTERNS:
+        m = pat.match(s)
+        if m:
+            candidate = m.group(1).strip().strip("「」『』\"'")
+            if candidate:
+                return candidate
+    # 短い単一名詞回答
+    if _SHORT_NOUN_ANSWER_RE.match(s):
+        return s.strip("「」『』\"'")
+    return ""
+
+
+def _persist_coherence_answer_to_learned_dict(
+    *, job_id: str, input_root: str, question_result: dict | None,
+    answer_text: str, base_text: str,
+    learned_path: str | None = None,
+) -> dict:
+    """Coherence 由来の質問への回答を学習辞書に追加する。
+
+    返り値: {"action": "added|updated|skipped|noop", "wrong": ..., "right": ..., "reason": ...}
+    本処理が失敗してもパイプライン全体は止めない(呼び出し側で warn ログのみ)。
+    """
+    if not isinstance(question_result, dict):
+        return {"action": "noop", "reason": "no_question_result"}
+    su = question_result.get("selected_unknown") or {}
+    if not isinstance(su, dict):
+        return {"action": "noop", "reason": "no_selected_unknown"}
+    source = str(su.get("source") or "").strip()
+    qtype = str(su.get("type") or "").strip()
+    # coherence_review 由来でない質問はスキップ(通常の不明点 Q&A は対象外)
+    if source != "coherence_review" and qtype != "coherence_review":
+        return {"action": "noop", "reason": "not_coherence_question"}
+    wrong = str(su.get("anomaly_word") or "").strip()
+    if not wrong:
+        return {"action": "noop", "reason": "no_anomaly_word"}
+    right = _extract_correction_word_from_answer(answer_text)
+    if not right:
+        return {
+            "action": "skipped",
+            "reason": "answer_not_short_correction",
+            "wrong": wrong,
+        }
+    # 例示用の context を本文から抽出
+    example = ""
+    idx = base_text.find(wrong)
+    if idx >= 0:
+        start = max(0, idx - 20)
+        end = min(len(base_text), idx + len(wrong) + 20)
+        example = base_text[start:end].strip()
+    try:
+        from learned_corrections_store import (
+            DEFAULT_LEARNED_PATH,
+            add_learned_correction,
+        )
+
+        result = add_learned_correction(
+            wrong=wrong,
+            right=right,
+            via="line_qa",
+            job_id=job_id,
+            example=example,
+            confidence="high",
+            path=learned_path or DEFAULT_LEARNED_PATH,
+        )
+        return result
+    except Exception as e:  # noqa: BLE001
+        return {
+            "action": "skipped",
+            "reason": f"persist_failed={e!r}",
+            "wrong": wrong,
+            "right": right,
+        }
+
 
 def _load_question_result_for_job(job_id: str, input_root: str) -> dict | None:
     path = os.path.join(input_root, job_id, "question_result.json")
@@ -300,6 +416,20 @@ def main() -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(updated)
+
+    # Phase 1 学習: coherence 由来の質問だったら、回答から正しい単語を抽出して
+    # 学習辞書に追加(次ジョブから機械補正で自動置換される)。非致命。
+    try:
+        learn_result = _persist_coherence_answer_to_learned_dict(
+            job_id=args.job_id,
+            input_root=args.input_root,
+            question_result=question_result,
+            answer_text=answer_text,
+            base_text=base_text,
+        )
+        print(f"learned_dict_from_qa={learn_result}")
+    except Exception as e:  # noqa: BLE001
+        print(f"learned_dict_from_qa_failed={e!r}")
 
     print(f"job_id={args.job_id}")
     print(f"answers_json={args.answers_json}")

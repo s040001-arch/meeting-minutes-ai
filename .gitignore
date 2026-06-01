@@ -44,6 +44,7 @@ _export_*.txt
 data/consolidated_knowledge.json
 data/extracted_knowledge.json
 data/extract_knowledge_log.txt
+data/knowledge/
 
 # ローカル個人作業ファイル
 新しいチャットに引き継ぐ際の指示書.docx

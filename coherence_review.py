@@ -432,6 +432,14 @@ def run_coherence_review(job_dir: str) -> dict:
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(tagged_text)
 
+    # Phase 1 学習: auto_fix された誤認識ペアを学習辞書に永続化(横断再発防止)。
+    # 学習失敗は本ステップ全体を止めない(非致命)。
+    learned_added = _persist_auto_fixes_to_learned_dict(
+        auto_entries=auto_entries,
+        anomalies=enriched,
+        job_id=os.path.basename(job_dir),
+    )
+
     coherence_points = _coherence_to_unknown_points(enriched)
     added_to_unknowns = _merge_into_unknown_points(job_dir, coherence_points)
 
@@ -443,9 +451,63 @@ def run_coherence_review(job_dir: str) -> dict:
         "auto_fixed_count": len(auto_entries),
         "coherence_question_candidates": len(coherence_points),
         "added_to_unknown_points": added_to_unknowns,
+        "learned_dict_added": learned_added,
         "anomalies_path": anomalies_path,
         "auto_corrections_path": auto_log_path if auto_entries else None,
     }
+
+
+def _persist_auto_fixes_to_learned_dict(
+    *, auto_entries: list[dict], anomalies: list[dict], job_id: str
+) -> int:
+    """auto_fix された (before, after) ペアを learned_corrections.json に追加する。
+
+    anomalies から例示用の context を引っ張ってきて、学習エントリに保存する。
+    返り値: 新規追加 + 既存更新の件数(skipped は含まない)。
+    """
+    if not auto_entries:
+        return 0
+    try:
+        from learned_corrections_store import add_learned_correction
+    except Exception as e:  # noqa: BLE001
+        print(f"learned_corrections_import_failed={e!r}")
+        return 0
+
+    # anomaly_id -> context のマップ(例示用)
+    ctx_by_id: dict[str, str] = {}
+    for an in anomalies:
+        aid = str(an.get("anomaly_id") or "").strip()
+        if aid:
+            ctx_by_id[aid] = str(an.get("context") or "").strip()
+
+    persisted = 0
+    for entry in auto_entries:
+        wrong = str(entry.get("before") or "").strip()
+        right = str(entry.get("after") or "").strip()
+        if not wrong or not right:
+            continue
+        aid = str(entry.get("anomaly_id") or "").strip()
+        example = ctx_by_id.get(aid, "")
+        try:
+            result = add_learned_correction(
+                wrong=wrong,
+                right=right,
+                via="coherence_review",
+                job_id=job_id,
+                example=example,
+                confidence=str(entry.get("confidence") or "high"),
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"learned_corrections_add_failed wrong={wrong!r} err={e!r}")
+            continue
+        if result.get("action") in ("added", "updated"):
+            persisted += 1
+        else:
+            print(
+                f"learned_corrections_skipped wrong={wrong!r} right={right!r} "
+                f"reason={result.get('reason')}"
+            )
+    return persisted
 
 
 def main() -> int:
