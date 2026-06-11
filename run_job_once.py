@@ -566,6 +566,30 @@ def restore_known_statuses(
             if old.get("answered_at"):
                 item["answered_at"] = old["answered_at"]
         result.append(item)
+
+    # coherence_review 由来(音声認識ゆれ = [要確認])は再補正サイクルで再生成されない。
+    # detect/regex で作った new_items には含まれないため、旧リストから引き継がないと
+    # 1 回の回答で queue 全体が消える。anomaly_id 単位でそのまま持ち越す。
+    def _is_coherence(it: dict) -> bool:
+        return (
+            str(it.get("source") or "") == "coherence_review"
+            or str(it.get("type") or "") == "coherence_review"
+        )
+
+    existing_anomaly_ids = {
+        str(it.get("anomaly_id") or "").strip()
+        for it in result
+        if str(it.get("anomaly_id") or "").strip()
+    }
+    for old_item in old_items:
+        if not _is_coherence(old_item):
+            continue
+        aid = str(old_item.get("anomaly_id") or "").strip()
+        if aid and aid in existing_anomaly_ids:
+            continue
+        if aid:
+            existing_anomaly_ids.add(aid)
+        result.append(dict(old_item))
     return result
 
 

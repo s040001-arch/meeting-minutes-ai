@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from generate_one_question import TYPE_PRIORITY
+from unknown_point_filters import is_non_answerable_unknown
 
 # run_question_cycle_once.RISKY_TYPE_PRIORITY と同一（循環 import 回避のためここに定義）
 RISKY_TYPE_PRIORITY: dict[str, str] = {
@@ -269,6 +270,8 @@ def compute_selection_value(
     Returns:
         value, impact, recoverability, misstatement_risk, dependency_anchor, late_document_bonus
     """
+    if is_non_answerable_unknown(item):
+        return 0, 0, 0, 0, 0, 0
     imp = compute_impact(item, full_text)
     rec = compute_recoverability(item, full_text)
     risk = compute_misstatement_risk(item, full_text)

@@ -122,8 +122,8 @@ def format_meeting_profile_for_prompt(profile: dict | None) -> str:
         lines.append(f"- 参加者: {', '.join(str(p) for p in participants)}")
     lines.append(f"- 会議種別: {scope_label}")
     lines.append(
-        "- 想定読者: 相原隆太郎（プレセナ・ストラテジック・パートナーズの提案担当）が"
-        "会議後にこの議事録を読む。次の打ち手を考えるための材料として使う。"
+        "- 想定読者: 相原隆太郎（プレセナ・ストラテジック・パートナーズの提案担当）。"
+        "会議で実際に発言された内容を正確に振り返るための議事録。"
     )
     return "\n".join(lines)
 

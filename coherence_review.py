@@ -4,7 +4,7 @@
 - 出力: transcript_anomalies.json
 - high+auto_fixable: 自動置換 → auto_corrections.json
 - medium: unknown_points.json に副キュー (source=coherence_review) として追加
-- low: 該当箇所に [要確認] タグ付与
+- low/medium: 該当箇所に [要確認] タグ付与
 
 Step 4.3 のチャンクごと補正では拾えない違和感(造語/意味不明語/破綻箇所)を、
 全文一括で Opus に読ませて検出する。失敗してもパイプラインは止めない設計。
@@ -60,21 +60,33 @@ def _build_system_prompt(meeting_profile: dict | None) -> str:
         print(f"coherence_world_knowledge_fetch_failed={e!r}")
     known_patterns = ", ".join(sorted(PIXEL_RECOGNIZER_REPLACEMENTS.keys())[:30])
     return (
-        "あなたは議事録の整合性レビュー担当です。"
+        "あなたは議事録（逐語録）の品質管理担当です。"
+        "目的は「会議で言ったことを正確な文字起こしとして残す」ことです。"
         "入力は Google Pixel レコーダーの音声認識を AI 補正した日本語議事録です。"
-        "人間が読んで違和感を持つ箇所を JSON 配列で挙げてください。"
+        "人間が読んで違和感を持つ箇所（とくに同音異義語の誤変換）を JSON 配列で挙げてください。"
         + profile_block
         + world_block
-        + "\n\n【検出対象】"
+        + "\n\n【検出の優先度（逐語録精度）】"
+        "\n最優先: 文脈上明らかにおかしい語（E/B）。人事・研修・価格・日程の会議で頻出する同音誤変換を積極的に拾う。"
+        "\n例:"
+        "\n- 『泳ぐ』『泳いで』→ 引き継ぎ文脈では『任せ』『任せて』"
+        "\n- 『学部』→ 人材の文脈では『若い』"
+        "\n- 『演習さん』→ 『演習2』『演習二』"
+        "\n- 『ベッド』→ 事前課題の文脈では『ベース』"
+        "\n- 『全部品』→ 会社名・製品名の誤変換の疑い"
+        "\n- 『ネストは奥』→ 『ネストは置く』『ネストは後回し』"
+        "\n- 『小さいA』→ 階層名『昇格者』『G3』等"
+        "\n- 『嬉しく1時間』等、意味が通らないフレーズ全体"
+        "\n- 『新交代』→ 『失礼します』『お待ちください』"
+        "\n\n【検出対象カテゴリ】"
         "\nA. 明らかな造語(同一会議内に類似語が既出)"
-        "  例: 同テキスト内に『自分ごと』があるのに『自分語化』が出ている → A"
-        "\nB. 意味不明な単語・文脈と整合しない語"
-        "  例: 『言わないようにさせるためのご遠足』『モチベーションアップってノータンで』"
+        "\nB. 文脈と整合しない語・意味不明語（上記例を含む）"
         "\nC. 文として崩壊している箇所"
-        "  例: 『しゃないこと出る、そんなこと出てる言うてました』"
-        "\nD. 短語の誤認識(助詞・指示語)(気づいたら挙げる)"
-        "\nE. 同音異義語の選択ミス(気づいたら挙げる)"
-        "\nA/B/C は最優先、D/E は副次的。"
+        "\nD. 助詞・指示語の誤認識"
+        "\nE. 同音異義語の選択ミス（A/B と同等に積極的に検出）"
+        "\n\n【検出量】"
+        "\n- 長文（8,000字超）では、見つかった違和感を最大30件まで列挙する（取りこぼしより過検出を優先）。"
+        "\n- 1件も見逃さないよう、同音誤変換を中心に丁寧に走査する。"
         "\n\n【既知の Pixel 誤変換パターン(機械補正済み、再検出不要)】"
         f"\n{known_patterns}"
         "\n\n【出力スキーマ】JSON 配列のみを返すこと。説明文・コードフェンス・前置きは一切付けない。"
@@ -82,15 +94,16 @@ def _build_system_prompt(meeting_profile: dict | None) -> str:
         '\n{"context":"前後10-20字を含む引用",'
         '"anomaly_word":"違和感のある語",'
         '"anomaly_type":"A|B|C|D|E",'
-        '"estimated_correction":"推定正解語(無ければ空文字)",'
+        '"estimated_correction":"推定正解語(文脈から最もありそうな1つ。無ければ空文字)",'
         '"confidence":"high|medium|low",'
         '"auto_fixable":true/false,'
         '"reason":"判定根拠を簡潔に"}'
         "\n\n【確信度の判定基準】"
         "\n- high (auto_fixable=true): 推定正解語が同一テキスト内に既出 かつ "
-        "音声認識誤りまたは AI 造語であることが明白"
-        "\n- medium (auto_fixable=false): 推定正解語が1つあるが、同テキスト内に既出ではない / 確信が持てない"
-        "\n- low (auto_fixable=false): 候補が複数 / 推定不能"
+        "音声認識誤りであることが明白"
+        "\n- medium: 文脈から推定正解が1つに絞れる（同テキスト未出でもよい）。"
+        "ユーザー確認用の候補として必ず列挙する"
+        "\n- low: 候補が複数 / 固有名詞で確信が持てない / 推定不能"
         "\n\n違和感が無ければ空配列 [] を返してください。"
     )
 
@@ -311,12 +324,12 @@ def _apply_high_auto_fixes(
     return fixed, entries
 
 
-def _apply_low_confidence_tags(text: str, anomalies: list[dict]) -> str:
-    """low の anomaly_word の最初の出現箇所に [要確認] タグを付与する。"""
+def _apply_review_tags(text: str, anomalies: list[dict]) -> str:
+    """medium/low の anomaly_word 最初の出現に [要確認] タグを付与する。"""
     out = text
     seen: set[str] = set()
     for an in anomalies:
-        if an.get("confidence") != "low":
+        if an.get("confidence") not in {"medium", "low"}:
             continue
         word = (an.get("anomaly_word") or "").strip()
         if not word or word in seen:
@@ -334,23 +347,28 @@ def _apply_low_confidence_tags(text: str, anomalies: list[dict]) -> str:
 
 
 def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
-    """medium 確信度を unknown_points 形式に変換(FIFO 副キュー扱い)。
+    """high/medium/low 確信度を unknown_points 形式に変換(FIFO 副キュー扱い)。
 
     high+auto_fixable は既に置換済みなので含めない。
-    high で auto_fixable=false(同テキスト既出ではないが確信度 high)も質問対象に含むが、
-    推定正解が空かつ word が長すぎる(文断片レベル)は LINE 質問が無意味なので除外する。
+    それ以外(high で auto_fixable=false / medium / low)は質問対象に含める。
+    low も含めることで、本文に [要確認] タグが付くだけで放置されていた
+    固有名詞・数値の音声認識ゆれを、相原氏に確認できるようにする。
+    ただし以下は LINE 質問として無意味なため除外する:
+      - anomaly_word が空
+      - word が長すぎる(30字超 = 文崩壊レベルの断片。単語確認の質問に不向き)
+      - high なのに推定正解が空(『よいしょ!』等の口語の false-positive)
     """
     out: list[dict] = []
     for an in anomalies:
         conf = an.get("confidence")
         if conf == "high" and an.get("auto_fixable"):
             continue
-        if conf not in {"high", "medium"}:
+        if conf not in {"high", "medium", "low"}:
             continue
         word = (an.get("anomaly_word") or "").strip()
         if not word:
             continue
-        # 30字超の "wordとして長すぎる断片" は LINE 質問に不向き(文崩壊扱い、low に倒すべき)
+        # 30字超の "wordとして長すぎる断片" は単語確認質問に不向き(文崩壊扱い)
         if len(word) > 30:
             continue
         # high なのに推定正解が空なものは false-positive の可能性が高い(『よいしょ!』等の口語)
@@ -361,6 +379,7 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
                 "type": COHERENCE_TYPE,
                 "source": COHERENCE_SOURCE,
                 "text": (an.get("context") or word)[:220],
+                "context": str(an.get("context") or "").strip()[:220],
                 "anomaly_word": word,
                 "anomaly_id": an.get("anomaly_id"),
                 "estimated_correction": an.get("estimated_correction") or "",
@@ -437,7 +456,7 @@ def run_coherence_review(job_dir: str) -> dict:
 
     auto_log_path = os.path.join(job_dir, AUTO_CORRECTIONS_FILENAME)
     fixed_text, auto_entries = _apply_high_auto_fixes(text, enriched, auto_log_path)
-    tagged_text = _apply_low_confidence_tags(fixed_text, enriched)
+    tagged_text = _apply_review_tags(fixed_text, enriched)
     if tagged_text != text:
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(tagged_text)

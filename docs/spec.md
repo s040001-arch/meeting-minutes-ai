@@ -10,7 +10,9 @@ Railway 上で稼働し、Google Drive / Google Docs / Google Sheets / LINE Mess
 
 **入力経路（2026-05 以降）:** 本番パイプラインは **`.txt` のみ** を処理する。`.m4a` 等の音声ファイルは Drive 検知後 `run_job_once.py` で静かに終了（exit 0）する。Whisper / ffmpeg 依存は Dockerfile から削除済み。
 
-**品質目標:** AI 補正による Pixel 誤変換修正、相原視点の論点整理、不明点の `proposal_impact` スコアリング。
+**品質目標:** 会議で言ったことを正確な文字起こしとして残す。AI 補正による Pixel 誤変換修正、音声認識ゆれの確認、合意済み・未決定の区別を議事録に忠実に反映する。
+
+**質問機能の目的（North star）:** 文字起こし上の誤り（固有名詞・数値・意味不明語）を直すための補助。**会議で言われていないこと・決まっていないことをユーザーに決めさせる用途ではない。**
 
 ### 不変条件（境界線契約）
 
@@ -149,7 +151,7 @@ Step⑥（Step 4.0）Google Doc を新規作成（--docs-push 時）
 ```
 Step 4.2  機械補正（correction_dict.json）
 Step 4.3  AI 補正（Claude Opus 4）— meeting_profile + ナレッジ全件をプロンプト注入
-Step 4.35 AI 不明点検出 — proposal_impact (1-10)、evidence 必須、合意済み事項は除外
+Step 4.35 AI 不明点検出 — 文字起こし精度向上のための候補抽出（固有名詞・数値・誤変換）。`proposal_impact` = 議事録正確さへの影響(1-10)。未決定・検討中・顧客確認予定は除外
 Step 4.4  Regex ハイブリッド検出 → unknown_points.json にマージ
 Step 5    質問選定（run_question_cycle_once.py）— min-question-value デフォルト 7
 Step 6.1  発言録ドラフト（generate_minutes_transcript.py）
@@ -201,7 +203,9 @@ Step⑧  AI 補正（Claude 4 Opus）
 
 Step⑨  AI 不明点検出（Claude 4 Opus）
         Step⑧と同時または直後に実行
-        Claude が検出した不明箇所を unknown_points.json に出力
+        目的: 文字起こし（逐語録）の正確さを上げるため、相原本人に確認すれば
+        確定できる箇所（固有名詞・数値・誤変換）のみを unknown_points.json に出力
+        会議で『未定』『検討中』等と言われた論点は抽出しない（議事録にそのまま書けば足りる）
         → タイトルを「【AI補正完了】{stem}」に変更
 
         重複質問防止のために以下を参照する:
@@ -229,9 +233,10 @@ Step⑰  ナレッジ蓄積（Step⑪完了直後に実行）
         この処理は次回以降のジョブのためであり、現在のジョブの補正には影響しない
 
 Step⑫  質問選定
-        unknown_points.json から未回答の不明点を1つ選定
-        選定基準: 単語単位の確認に限らず、逐語録全体の文意を最も回復できる論点を優先する
-        少しでも不安が残る場合は質問するが、優先順位は「全体インパクト」を最上位とする
+        unknown_points.json から未回答の候補を選定
+        【最優先】音声認識ゆれ（coherence_review / [要確認]）→ 1 語 1 問（LINE 1通 = 1回答）
+        認識ゆれの回答は都度本文を書き換えず、全件回答後に一括補正する
+        detect 由来は文字起こし精度（固有名詞・数値・誤変換）のみ。未決定論点は質問しない
         不明点がゼロの場合 → Step⑬へ（完了通知）
 
 Step⑬  LINE 通知
@@ -706,7 +711,7 @@ Step③ でソースファイルをサブフォルダへ移動した直後に処
 | Phase 1 | Whisper/ffmpeg パイプライン削除、Dockerfile 軽量化 |
 | Phase 2 | `meeting_profile.py` 導入 |
 | Phase 3 | Step 4.3 Pixel 誤変換ルール・meeting_profile 注入 |
-| Phase 4 | Step 4.35 `proposal_impact`・相原視点の不明点定義 |
+| Phase 4 | Step 4.35 文字起こし精度向け不明点定義・`proposal_impact`=議事録正確さ |
 | Phase 5 | Step 5 質問選定 `min-question-value=7` |
 | Phase 6 | `## 論点メモ` 先頭配置 |
 | Fix ① | `run_docs_hub_e2e` デフォルト skip-compose、`--compose-from-scratch` で旧形式のみ |

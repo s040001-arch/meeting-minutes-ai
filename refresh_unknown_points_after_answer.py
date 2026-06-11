@@ -187,6 +187,22 @@ def main() -> None:
         if str(item.get("status") or "").strip().lower() == "answered"
     ]
 
+    # coherence_review 由来(音声認識ゆれ = [要確認])は regex 再抽出では拾えず、
+    # coherence_review も再実行されない。未回答のものは raw のまま持ち越して
+    # anomaly_id 等を保持し、次サイクルでも 1 件ずつ確認できるようにする。
+    def _is_coherence(it: dict) -> bool:
+        return (
+            str(it.get("source") or "") == "coherence_review"
+            or str(it.get("type") or "") == "coherence_review"
+        )
+
+    coherence_carryover = [
+        dict(item)
+        for item in existing_unknowns
+        if _is_coherence(item)
+        and str(item.get("status") or "").strip().lower() != "answered"
+    ]
+
     record, selection_note = load_answer_record(
         answers_json_path=args.answers_json,
         answer_index=args.answer_index,
@@ -231,8 +247,11 @@ def main() -> None:
         except Exception as e:
             print(f"refresh_unknown_points_llm_filter_failed={e!r}")
 
-    final_unknowns = _dedupe_unknown_points(answered_unknowns + pending_unknowns)
+    final_unknowns = _dedupe_unknown_points(
+        answered_unknowns + coherence_carryover + pending_unknowns
+    )
     _save_unknown_points(output_path, final_unknowns)
+    print(f"coherence_carryover_count={len(coherence_carryover)}")
 
     print(f"job_id={args.job_id}")
     print(f"transcript={transcript_path}")

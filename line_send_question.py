@@ -34,22 +34,42 @@ def build_line_message(result: dict) -> str:
         selected = result.get("selected_unknown")
         if not isinstance(selected, dict):
             selected = {}
+
+        # 認識ゆれの一括確認(バッチ)は、本文に番号付きリストを含むため、
+        # 該当箇所・背景は付けずにそのまま送る。
+        if question_format == "recognition_batch":
+            parts = ["[確認したいこと（番号ごとに回答可・OK/不明でも可）]"]
+            if question_text:
+                parts.append(question_text)
+            if doc_url:
+                parts.append(f"議事録: {doc_url}")
+            return "\n".join(parts)
+
         selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=180)
         why = ""
         audit = result.get("selection_audit")
         if isinstance(audit, dict):
             why = _trim_preview(str(audit.get("why_this_question", "")).strip(), limit=100)
 
+        is_coherence = (
+            str(selected.get("type") or "") == "coherence_review"
+            or str(selected.get("source") or "") == "coherence_review"
+            or str(audit.get("selection_mode") if isinstance(audit, dict) else "") == "coherence_review_fifo"
+        )
+
         # Yes/No 質問はヘッダーで一目でわかるようにする
         if question_format == "yes_no":
             header = "[確認したいこと（はい/いいえで回答可・補足歓迎）]"
+        elif is_coherence:
+            header = "[確認したいこと（正しい語 / OK / 不明）]"
         else:
             header = "[確認したいこと]"
 
         parts = [header]
         if question_text:
             parts.append(question_text)
-        if selected_text:
+        # 認識ゆれは question_text 内に前後文脈を含むため、該当箇所の重複表示はしない
+        if selected_text and not is_coherence:
             parts.append(f"該当箇所: 「{selected_text}」")
         if why:
             parts.append(f"背景: {why}")

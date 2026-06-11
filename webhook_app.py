@@ -787,7 +787,8 @@ def _mark_unknown_points_answered(
         return 0
     target_text = str(selected_unknown.get("text") or "").strip()
     target_type = str(selected_unknown.get("type") or "").strip()
-    if not target_text:
+    target_anomaly_id = str(selected_unknown.get("anomaly_id") or "").strip()
+    if not target_text and not target_anomaly_id:
         return 0
     unknown_points = _load_unknown_points_for_job(job_id)
     if not unknown_points:
@@ -799,7 +800,10 @@ def _mark_unknown_points_answered(
             continue
         item_text = str(item.get("text") or "").strip()
         item_type = str(item.get("type") or "").strip()
-        if item_text != target_text:
+        item_anomaly_id = str(item.get("anomaly_id") or "").strip()
+        if target_anomaly_id and item_anomaly_id == target_anomaly_id:
+            pass
+        elif item_text != target_text:
             continue
         if target_type and item_type and item_type != target_type:
             continue

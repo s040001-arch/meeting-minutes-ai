@@ -17,7 +17,12 @@ from question_value_selection import (
     pop_value_fields,
     select_one_unknown_value_based,
 )
+from recognition_batch import select_next_coherence_point
 from repo_env import load_dotenv_local
+from unknown_point_filters import (
+    filter_answerable_unknown_points,
+    question_targets_non_answerable_topic,
+)
 
 LINE_PENDING_CONTEXT_PATH = os.path.join("data", "line_pending_context.json")
 ASKED_QUESTIONS_FILENAME = "asked_questions.json"
@@ -315,7 +320,7 @@ def _is_coherence_review_point(item: dict) -> bool:
 
 
 def _split_pending_by_source(pending: list[dict]) -> tuple[list[dict], list[dict]]:
-    """既存(proposal_impact評価)対象と coherence_review FIFO副キューを分離。"""
+    """detect 由来(文字起こし精度)と coherence_review(音声認識ゆれ)副キューを分離。"""
     regular: list[dict] = []
     coherence: list[dict] = []
     for item in pending:
@@ -326,20 +331,81 @@ def _split_pending_by_source(pending: list[dict]) -> tuple[list[dict], list[dict
     return regular, coherence
 
 
-def _build_coherence_question_text(item: dict) -> str:
-    """整合性レビュー由来の質問は候補語を提示せず、文脈+該当語+質問の3要素で組み立てる。"""
-    context = str(item.get("text") or "").strip()
-    if len(context) > 60:
-        context = context[:60] + "…"
+COHERENCE_SNIPPET_RADIUS = 70
+COHERENCE_SNIPPET_MAX = 220
+
+
+def _extract_snippet_around_word(
+    full_text: str,
+    word: str,
+    position: int = -1,
+    *,
+    radius: int = COHERENCE_SNIPPET_RADIUS,
+    max_total: int = COHERENCE_SNIPPET_MAX,
+) -> str:
+    """逐語録から anomaly_word の前後文脈を切り出す（LINE で読める長さ）。"""
+    if not full_text or not word:
+        return ""
+    idx = position if isinstance(position, int) and position >= 0 else -1
+    if idx < 0 or full_text[idx: idx + len(word)] != word:
+        idx = full_text.find(word)
+    if idx < 0:
+        return ""
+    start = max(0, idx - radius)
+    end = min(len(full_text), idx + len(word) + radius)
+    snippet = " ".join(full_text[start:end].split())
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(full_text) else ""
+    out = f"{prefix}{snippet}{suffix}"
+    if len(out) <= max_total:
+        return out
+    # 長すぎる場合は word 中心に切り詰める
+    word_in = out.find(word)
+    if word_in < 0:
+        return out[: max_total - 1].rstrip() + "…"
+    half = (max_total - len(word)) // 2
+    clip_start = max(0, word_in - half)
+    clip_end = min(len(out), clip_start + max_total)
+    if clip_end - clip_start < max_total:
+        clip_start = max(0, clip_end - max_total)
+    clipped = out[clip_start:clip_end]
+    if clip_start > 0 and not clipped.startswith("…"):
+        clipped = "…" + clipped.lstrip("…")
+    if clip_end < len(out) and not clipped.endswith("…"):
+        clipped = clipped.rstrip("…") + "…"
+    return clipped
+
+
+def _build_coherence_question_text(item: dict, *, full_text: str = "") -> str:
+    """整合性レビュー由来の質問。前後文脈＋該当語を LINE だけで判断できる形にする。"""
     word = str(item.get("anomaly_word") or "").strip()
     if not word:
         word = "該当箇所"
+    pos_raw = item.get("context_position_in_transcript", -1)
+    try:
+        pos = int(pos_raw)
+    except (TypeError, ValueError):
+        pos = -1
+
+    snippet = _extract_snippet_around_word(full_text, word, pos)
+    if not snippet:
+        stored = str(item.get("context") or item.get("text") or "").strip()
+        snippet = stored if stored else word
+        if len(snippet) > COHERENCE_SNIPPET_MAX:
+            snippet = snippet[: COHERENCE_SNIPPET_MAX - 1].rstrip() + "…"
+
+    if word in snippet:
+        display = snippet.replace(word, f"【{word}】", 1)
+    else:
+        display = snippet
+
     lines = [
         "議事録の以下の箇所について確認させてください。",
         "",
-        f"「{context}」",
+        display,
         "",
-        f"「{word}」が音声認識誤りの可能性があります。正しくは何でしょうか?",
+        f"「{word}」が音声認識誤りの可能性があります。",
+        "正しい表記を教えてください（合っていれば OK）。",
     ]
     return "\n".join(lines)
 
@@ -350,9 +416,10 @@ def _make_coherence_question_payload(
     selected: dict,
     pending_meta: dict,
     doc_url: str,
+    full_text: str = "",
 ) -> tuple[dict, str]:
     question_id = str(uuid.uuid4())
-    question_text = _build_coherence_question_text(selected)
+    question_text = _build_coherence_question_text(selected, full_text=full_text)
     selection_audit = {
         "selection_mode": "coherence_review_fifo",
         "anomaly_id": selected.get("anomaly_id"),
@@ -374,6 +441,38 @@ def _make_coherence_question_payload(
         "question_text": question_text,
     }
     return result_payload, question_id
+
+
+def _build_coherence_single_question_payload(
+    *,
+    job_id: str,
+    coherence_pending: list[dict],
+    pending_meta: dict,
+    doc_url: str,
+    full_text: str = "",
+) -> dict | None:
+    """coherence 副キューから 1 件だけ選び、1 問 1 答の確認質問を作る。
+
+    回答は recorrect 側で記録のみ行い、全件回答後に一括補正する。
+    """
+    selected = select_next_coherence_point(coherence_pending)
+    if not selected:
+        return None
+    result_payload, question_id = _make_coherence_question_payload(
+        job_id=job_id,
+        selected=selected,
+        pending_meta=pending_meta,
+        doc_url=doc_url,
+        full_text=full_text,
+    )
+    write_line_pending_context(
+        job_id=job_id,
+        question_id=question_id,
+        question_text=str(result_payload.get("question_text") or ""),
+        selected_unknown=selected,
+        selection_audit=result_payload.get("selection_audit") or {},
+    )
+    return result_payload
 
 
 def _generate_one_question_by_ai(
@@ -413,7 +512,7 @@ def _generate_one_question_by_ai(
         "question_status": "generated|none",
         "question_text": "string（質問本文）",
         "question_format": "yes_no | free_text（hypothesisがあればyes_no優先）",
-        "proposal_impact": "integer 1-10（選んだ不明点の proposal_impact）",
+        "proposal_impact": "integer 1-10（選んだ不明点の議事録正確さへの影響）",
         "selected_unknown": {"type": "string", "text": "string", "reason": "string"},
         "selection_audit": {
             "selection_mode": "ai_global_context",
@@ -433,36 +532,50 @@ def _generate_one_question_by_ai(
     profile_section = format_meeting_profile_for_prompt(meeting_profile or {})
     system_prompt = (
         "あなたは議事録品質管理アシスタントです。"
-        "目的は、全文の文脈が最も繋がるように、ユーザーへの質問を1問だけ選ぶことです。"
+        "目的は、議事録（逐語録）の正確さを上げるために、ユーザーへの質問を1問だけ選ぶことです。"
+        "未決定のスケジュール・意思決定・顧客確認予定の論点は、議事録にそのまま書けば足りるため質問しません。"
         + profile_section
         + "\n\n【1問の選び方】"
-        "\n- 【最優先】proposal_impact が高いもの（次の打ち手への影響が大きい）"
-        "\n- 音声認識の誤変換・意味不明語句（固有名詞/数値/文字化け）"
-        "\n- 解釈確認（『この運用方針で合っていますか？』系）は原則出さない。"
-        "文脈から読み取れる合意内容を疑う質問はユーザー負担が高く価値が低い"
+        "\n- 【最優先】音声認識の誤変換・固有名詞・数値・意味不明語句の確認"
+        "\n- 解釈確認（『この運用方針で合っていますか？』系）・未決定事項の選択確認は出さない"
+        "\n- proposal_impact が高くても、未決定・検討中・AかBかで迷っている論点は question_status='none'"
         "\n- 細かな表記ゆれより、誤変換の修正に直結する論点を優先する"
         "\n- 質問の結果で本文全体がどこまで確定するかを重視する"
         "\n- 候補の context_window（前後文脈）を必ず読んで判断する"
         "\n- ユーザー側の回答コストが極端に高いものは避ける"
         "\n- 【既に送信済みの質問】と論点・該当箇所・仮説が類似するものは絶対に再質問しない"
         "\n\n【選定基準】"
-        "\n- proposal_impact が高いものを優先（次の打ち手への影響が大きい）"
+        "\n- 議事録の正確さ（proposal_impact）が高いものを優先"
         "\n- 同じ impact なら、確認のしやすさ（Yes/Noで答えられる > 自由記述）を優先"
         "\n- 同じ impact かつ同じ形式なら、会議の前半で言及された論点を優先"
         "\n\n【質問文の形式】"
         "\n- 誤変換・固有名詞の確認は free_text を優先"
         "（例: 『〇〇』は『△△』の誤変換でしょうか？正しい表記を教えてください）"
         "\n- hypothesis（推測の正解）が候補に存在し、Yes/No で十分な場合のみ"
-        "『○○で合っていますか？「はい」または「いいえ」で教えてください。』形式にし、"
-        "question_format='yes_no' を返す"
+        "『○○で合っていますか？』形式にし question_format='yes_no' を返す。"
+        "ただし Yes/No は固有名詞・数値の表記確認（聞き取り誤り）に限る。"
+        "来期予算・交渉方針・70万/85万の方向感・講師予約時期の具体化には使わない"
+        "\n- 次は絶対に質問しない（question_status='none'）:"
+        "\n  × 来期70万円前後で交渉する認識で合っていますか？"
+        "\n  × 宮本講師を早めに抑える具体的な時期はいつですか？"
+        "\n  × 値上げ交渉の落としどころを教えてください"
+        "\n  これらは会議で決まっていない／曖昧なままの話題。議事録にそのまま書けば足りる"
         "\n- 解釈確認・運用方針の再確認のような低価値質問は question_status='none' を選ぶ"
         "\n- いずれの場合も、ユーザーが該当箇所を思い出しやすいよう、context_window から要点を1〜2文で含める"
         "\n- question_text は LINE 送信用の自然な日本語、原則120字以内（Yes/No質問は150字までOK）"
         "\n- question_text に job_id や question_id のような内部IDを書かない"
         "\n- selected_unknown.text の長文引用をそのまま貼らない"
+        "\n\n【最重要：答えを持つのはユーザー本人か】"
+        "\n- 送る質問は、ユーザー（相原）本人が今答えを持っているものに限る。"
+        "\n- transcript_excerpt を読み、会議内で『未定』『これから決める』『今後検討』"
+        "『顧客に確認する』『先方に聞く』『持ち帰る』等とされ、現時点で答えが存在しない論点は"
+        "質問しない（ユーザーは『まだ決まっていない』『顧客に確認する話だ』としか答えられず無価値）。"
+        "\n- まだ候補・選択肢すら挙がっていない将来の意思決定も質問しない。"
+        "\n- 該当候補しか残らない場合は question_status='none' を返す。"
         "\n\n【質問しない判断（question_status=none）】"
         "\n- 全候補が【既知情報】に該当する場合"
         "\n- 全候補が文脈から一意に解釈可能な場合"
+        "\n- 全候補が上記『答えがまだ存在しない論点』に該当する場合"
         "\n- 議事録としてそのまま提出可能と判断できる場合"
         "\n\n出力は必ずJSONオブジェクトのみ。説明文を付けないでください。"
         + knowledge_section
@@ -714,7 +827,7 @@ def main() -> None:
         "--min-question-value",
         type=int,
         default=7,
-        help="この proposal_impact 未満の候補は質問せず完了扱い（デフォルト: 7）",
+        help="この議事録正確さスコア(proposal_impact)未満の候補は質問せず完了扱い（デフォルト: 7）",
     )
     parser.add_argument(
         "--question-model",
@@ -735,11 +848,13 @@ def main() -> None:
     unknown_points_all = load_unknown_points(unknowns_path)
     pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)
     regular_pending, coherence_pending = _split_pending_by_source(pending_all)
+    # 未決定・検討中・顧客確認予定など、相原に聞いても答えられない論点を除外。
+    regular_pending, dropped_non_answerable = filter_answerable_unknown_points(regular_pending)
     pending_meta["regular_pending_count"] = len(regular_pending)
     pending_meta["coherence_pending_count"] = len(coherence_pending)
-    # 既存(proposal_impact)を優先。既存が空のときのみ整合性レビュー FIFO へフォールバック。
+    pending_meta["dropped_non_answerable_count"] = dropped_non_answerable
+    # 音声認識ゆれ(coherence)が残っていれば、detect 由来より先に 1 件ずつ確認する。
     unknown_points = regular_pending if regular_pending else []
-    coherence_fallback_active = (not regular_pending) and bool(coherence_pending)
 
     context_text_path = resolve_context_text_path(args.job_id, args.input_root, args.text)
     full_text = ""
@@ -747,22 +862,20 @@ def main() -> None:
         with open(context_text_path, "r", encoding="utf-8") as f:
             full_text = f.read()
 
-    if coherence_fallback_active:
-        selected = coherence_pending[0]
-        result_payload, _qid = _make_coherence_question_payload(
+    result_payload: dict | None = None
+
+    if coherence_pending:
+        coherence_payload = _build_coherence_single_question_payload(
             job_id=args.job_id,
-            selected=selected,
+            coherence_pending=coherence_pending,
             pending_meta=pending_meta,
             doc_url=doc_url,
+            full_text=full_text,
         )
-        write_line_pending_context(
-            job_id=args.job_id,
-            question_id=str(result_payload["question_id"]),
-            question_text=str(result_payload["question_text"]),
-            selected_unknown=selected,
-            selection_audit=result_payload["selection_audit"],
-        )
-    elif not unknown_points:
+        if coherence_payload is not None:
+            result_payload = coherence_payload
+
+    if result_payload is None and not unknown_points:
         result_payload = {
             "job_id": args.job_id,
             "question_status": "none",
@@ -775,7 +888,8 @@ def main() -> None:
             },
             "question_text": "",
         }
-    else:
+
+    if result_payload is None and unknown_points:
         api_key, key_source = resolve_openai_api_key()
         print(f"question_generation_openai_api_key_found={bool(api_key)} source={key_source}")
         if not api_key:
@@ -833,25 +947,53 @@ def main() -> None:
             selection_audit["proposal_impact"] = selected_impact
             message = str(ai_result.get("message", "")).strip()
 
+            blocked_non_answerable = question_targets_non_answerable_topic(
+                question_text, selected_unknown
+            )
+            if (
+                question_format == "yes_no"
+                and re.search(r"(合っていますか|で合って|認識で)", question_text)
+                and re.search(r"(万|交渉|予算|来期|値上|内示|抑え|予約|講師|宮本)", question_text)
+            ):
+                blocked_non_answerable = True
+            if blocked_non_answerable:
+                print(f"question_blocked_non_answerable=1 text={question_text[:100]!r}")
+
             if (
                 question_status == "none"
                 or not question_text
                 or selected_impact < args.min_question_value
+                or blocked_non_answerable
             ):
-                result_payload = {
-                    "job_id": args.job_id,
-                    "question_status": "none",
-                    "message": message or (
-                        f"proposal_impact={selected_impact} が閾値 {args.min_question_value} 未満のため、"
-                        "追加質問は行いません。"
-                        if selected_impact < args.min_question_value and question_text
-                        else "全文文脈は提出可能水準のため、追加質問は行いません。"
-                    ),
-                    "selected_unknown": selected_unknown,
-                    "doc_url": doc_url,
-                    "selection_audit": {**pending_meta, **selection_audit},
-                    "question_text": "",
-                }
+                # detect 由来に高価値質問が無くても、音声認識ゆれは 1 件ずつ確認する。
+                fallthrough = _build_coherence_single_question_payload(
+                    job_id=args.job_id,
+                    coherence_pending=coherence_pending,
+                    pending_meta=pending_meta,
+                    doc_url=doc_url,
+                    full_text=full_text,
+                )
+                if fallthrough is not None:
+                    result_payload = fallthrough
+                else:
+                    result_payload = {
+                        "job_id": args.job_id,
+                        "question_status": "none",
+                        "message": message or (
+                            "未決定・検討中の論点のため質問しません。"
+                            if blocked_non_answerable
+                            else (
+                                f"proposal_impact={selected_impact} が閾値 {args.min_question_value} 未満のため、"
+                                "追加質問は行いません。"
+                                if selected_impact < args.min_question_value and question_text
+                                else "全文文脈は提出可能水準のため、追加質問は行いません。"
+                            )
+                        ),
+                        "selected_unknown": selected_unknown,
+                        "doc_url": doc_url,
+                        "selection_audit": {**pending_meta, **selection_audit},
+                        "question_text": "",
+                    }
             else:
                 question_id = str(uuid.uuid4())
                 result_payload = {
@@ -882,18 +1024,29 @@ def main() -> None:
             value = int(selection_audit.get("value", 0))
             if value < args.min_question_value:
                 pop_value_fields(selected)
-                result_payload = {
-                    "job_id": args.job_id,
-                    "question_status": "none",
-                    "message": (
-                        "推測に頼らず読める水準に達しているため、追加質問は行いません。"
-                        f"（top_value={value}, threshold={args.min_question_value}）"
-                    ),
-                    "selected_unknown": selected,
-                    "doc_url": doc_url,
-                    "selection_audit": {**pending_meta, **selection_audit},
-                    "question_text": "",
-                }
+                # 閾値割れ時も coherence 副キュー(認識ゆれ)を 1 件ずつ拾う。
+                fallthrough = _build_coherence_single_question_payload(
+                    job_id=args.job_id,
+                    coherence_pending=coherence_pending,
+                    pending_meta=pending_meta,
+                    doc_url=doc_url,
+                    full_text=full_text,
+                )
+                if fallthrough is not None:
+                    result_payload = fallthrough
+                else:
+                    result_payload = {
+                        "job_id": args.job_id,
+                        "question_status": "none",
+                        "message": (
+                            "推測に頼らず読める水準に達しているため、追加質問は行いません。"
+                            f"（top_value={value}, threshold={args.min_question_value}）"
+                        ),
+                        "selected_unknown": selected,
+                        "doc_url": doc_url,
+                        "selection_audit": {**pending_meta, **selection_audit},
+                        "question_text": "",
+                    }
             else:
                 pop_value_fields(selected)
                 question_text = _normalize_question_text(build_user_friendly_question(selected))
@@ -954,7 +1107,6 @@ def main() -> None:
         )
         if result_payload.get("question_status") == "generated":
             line_push = "sent_question"
-            # 送信済みとしてマーク（同一質問の重複送信防止）
             _mark_unknown_point_asked(
                 unknowns_path=unknowns_path,
                 selected_unknown=result_payload.get("selected_unknown"),
