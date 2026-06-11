@@ -1,66 +1,56 @@
 #!/usr/bin/env python3
-"""ローカルから Railway 上で restore + coherence 再実行（Windows の SSH クォート問題回避）。"""
+"""ローカルから Railway 上の railway_remote_resume_job.py を起動する。"""
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 
 
-def _run(cmd: list[str]) -> int:
-    print(" ".join(cmd), flush=True)
-    completed = subprocess.run(cmd, text=True, encoding="utf-8", errors="replace")
-    return int(completed.returncode)
+def _railway_cmd() -> list[str]:
+    if sys.platform == "win32":
+        path = shutil.which("railway")
+        if path and path.lower().endswith(".ps1"):
+            return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path]
+        if path:
+            return [path]
+    exe = shutil.which("railway")
+    if not exe:
+        raise SystemExit("railway CLI not found in PATH")
+    return [exe]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--service", default="meeting-minutes-ai")
-    parser.add_argument("--job-id", required=True)
-    parser.add_argument(
-        "--subfolder-contains",
-        required=True,
-        help="Drive サブフォルダ名の部分一致",
-    )
+    parser.add_argument("--key", default="20260611_030404")
     parser.add_argument("--send-line", action="store_true")
     parser.add_argument("--push", action="store_true")
+    parser.add_argument("--skip-restore", action="store_true")
     args = parser.parse_args()
 
-    restore_cmd = [
-        "railway",
+    cmd = [
+        *_railway_cmd(),
         "ssh",
         "-s",
         args.service,
         "--",
         "python3",
-        "/app/restore_job_from_drive.py",
-        "--job-id",
-        args.job_id,
-        "--subfolder-contains",
-        args.subfolder_contains,
-        "--rebuild-ai",
-    ]
-    code = _run(restore_cmd)
-    if code != 0:
-        return code
-
-    resume_cmd = [
-        "railway",
-        "ssh",
-        "-s",
-        args.service,
-        "--",
-        "python3",
-        "/app/run_resume_from_coherence.py",
-        "--job-id",
-        args.job_id,
+        "/app/scripts/railway_remote_resume_job.py",
+        "--key",
+        args.key,
     ]
     if args.send_line:
-        resume_cmd.append("--send-line")
+        cmd.append("--send-line")
     if args.push:
-        resume_cmd.append("--push")
+        cmd.append("--push")
+    if args.skip_restore:
+        cmd.append("--skip-restore")
 
-    return _run(resume_cmd)
+    print(" ".join(cmd), flush=True)
+    completed = subprocess.run(cmd)
+    return int(completed.returncode)
 
 
 if __name__ == "__main__":
