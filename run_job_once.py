@@ -1491,6 +1491,7 @@ def main() -> None:
             job_id=args.job_id,
             message="===== 全ての処理が完了しました =====",
         )
+        update_doc_title_from_hub(hub_meta_path, f"【処理完了】{display_title}", log_path)
         print(f"job_id={args.job_id}")
         print(f"log={log_path}")
         print(f"visible_log={visible_log_path}")

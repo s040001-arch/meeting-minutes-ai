@@ -246,7 +246,135 @@ def _normalize_answer_surface(s: str) -> str:
     return t.strip()
 
 
+_DELETE_PATTERNS = [
+    re.compile(r"削除"),
+    re.compile(r"消して"),
+    re.compile(r"取り除"),
+    re.compile(r"意味をなさ"),
+    re.compile(r"意味がない"),
+    re.compile(r"意味不明"),
+    re.compile(r"ナンセンス"),
+    re.compile(r"不要"),
+    re.compile(r"聞き.?取り.?ミス"),
+    re.compile(r"幻聴"),
+    re.compile(r"存在しない"),
+    re.compile(r"なかった"),
+]
+
+
+def _normalize_span_for_match(s: str) -> str:
+    t = str(s or "")
+    t = t.replace(VERIFY_TAG, "")
+    t = re.sub(r"[【】「」『』\"'（）()]", "", t)
+    t = re.sub(r"\s+", "", t)
+    return t
+
+
+def _is_delete_answer(s: str) -> bool:
+    surface = str(s or "").strip()
+    if not surface:
+        return False
+    return any(p.search(surface) for p in _DELETE_PATTERNS)
+
+
+def _extract_delete_span_from_answer(s: str) -> str:
+    quoted = [q.strip() for q in re.findall(r"「([^」]+)」", str(s or "")) if q.strip()]
+    if quoted:
+        return max(quoted, key=len)
+    m = re.search(r"[「『\"]([^」』\"]{8,})[」』\"]", str(s or ""))
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def _expand_to_delete_span(text: str, idx: int, length: int) -> tuple[int, int]:
+    start = idx
+    while start > 0 and text[start - 1] not in "。！？!?\n":
+        start -= 1
+    end = idx + length
+    commas = 0
+    while end < len(text):
+        ch = text[end]
+        if ch in "。！？!?\n":
+            end += 1
+            break
+        if ch == "、":
+            commas += 1
+            end += 1
+            if commas >= 2:
+                break
+            continue
+        end += 1
+    return start, end
+
+
+def _expand_to_sentence_span(text: str, idx: int, length: int) -> tuple[int, int]:
+    start = idx
+    end = idx + length
+    while start > 0 and text[start - 1] not in "。！？!?\n":
+        start -= 1
+    while end < len(text) and text[end] not in "。！？!?\n":
+        end += 1
+    if end < len(text) and text[end] in "。！？!?":
+        end += 1
+    return start, end
+
+
+def _find_delete_span(transcript: str, *, span_hint: str, word: str) -> tuple[int, int] | None:
+    w = str(word or "").strip()
+    if not w:
+        return None
+    idx = find_standalone_word(transcript, w)
+    tagged = f"{w}{VERIFY_TAG}"
+    if idx < 0:
+        idx = transcript.find(tagged)
+    if idx < 0:
+        idx = transcript.find(w)
+    if idx < 0:
+        return None
+    if transcript[idx : idx + len(tagged)] == tagged:
+        core_len = len(tagged)
+    else:
+        core_len = len(w)
+    start = idx
+    if span_hint and w in span_hint:
+        hp = span_hint.find(w)
+        raw_prefix = span_hint[max(0, hp - 24) : hp]
+        norm_prefix = _normalize_span_for_match(raw_prefix)
+        if len(norm_prefix) >= 8:
+            tail = norm_prefix[-10:]
+            for back in range(idx, max(-1, idx - 40), -1):
+                seg = _normalize_span_for_match(transcript[back:idx])
+                if not seg:
+                    continue
+                if seg.endswith(tail) or (len(seg) >= 6 and tail.endswith(seg)):
+                    start = back
+                    break
+    length = (idx - start) + core_len
+    return _expand_to_delete_span(transcript, start, length)
+
+
+def _apply_delete_to_transcript(
+    transcript: str, *, span_hint: str, word: str
+) -> tuple[str, dict | None]:
+    span = _find_delete_span(transcript, span_hint=span_hint, word=word)
+    if span is None:
+        return transcript, None
+    start, end = span
+    deleted = transcript[start:end]
+    out = (transcript[:start] + transcript[end:]).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out, {
+        "before": deleted.strip(),
+        "after": "",
+        "action": "delete",
+        "word": word,
+    }
+
+
 def _looks_like_correction_answer(s: str, target_word: str = "") -> bool:
+    if _is_delete_answer(s):
+        return False
     if re.search(r"→|⇒|じゃなく|ではなく|じゃない|ではない|違う|誤り", s):
         return True
     quoted = re.findall(r"「([^」]+)」", s)
@@ -365,6 +493,8 @@ def _normalize_answer_token(token: str, target_word: str = "") -> tuple[str, str
     s = _normalize_answer_surface(token)
     if not s:
         return ("unknown", "")
+    if _is_delete_answer(s):
+        return ("delete", _extract_delete_span_from_answer(s))
     if _is_keep_answer(s, target_word):
         return ("keep", "")
     low = s.lower().replace(" ", "")
@@ -607,6 +737,22 @@ def apply_batch_corrections(transcript: str, parsed: list[dict]) -> tuple[str, l
         # 同じ語が返ってきた(=表記は正しい)場合は keep と同じく確定扱い(タグ除去)。
         if action == "correct" and (not correction or correction == word):
             action = "keep"
+        if action == "delete":
+            before = out
+            out, deleted = _apply_delete_to_transcript(
+                out, span_hint=correction, word=word
+            )
+            if out != before and deleted:
+                applied.append(
+                    {
+                        "anomaly_id": p.get("anomaly_id", ""),
+                        "before": deleted.get("before", ""),
+                        "after": "",
+                        "action": "delete",
+                        "word": word,
+                    }
+                )
+            continue
         if action == "correct":
             tagged = f"{word}{VERIFY_TAG}"
             before = out

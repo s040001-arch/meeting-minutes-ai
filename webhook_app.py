@@ -226,6 +226,32 @@ def _normalize_correction_pairs(raw_pairs: object) -> list[dict[str, str]]:
     return pairs
 
 
+def _salvage_line_message_extraction(
+    text: str, extraction: dict, pending_context: dict | None
+) -> dict:
+    """LLM が irrelevant ではないのに has_answer/pairs を返さなかった場合の救済。"""
+    if not isinstance(extraction, dict):
+        return extraction
+    if extraction.get("has_answer") or extraction.get("correction_pairs"):
+        return extraction
+    if not pending_context:
+        return extraction
+    qtext = str(pending_context.get("question_text") or "").strip()
+    if not qtext:
+        return extraction
+    msg = str(text or "").strip()
+    if not msg or extraction.get("is_irrelevant"):
+        return extraction
+
+    salvaged = dict(extraction)
+    salvaged["has_answer"] = True
+    salvaged["answer_text"] = msg
+    salvaged["is_irrelevant"] = False
+    reason = str(extraction.get("reason") or "").strip()
+    salvaged["reason"] = f"{reason};salvaged_pending_answer" if reason else "salvaged_pending_answer"
+    return salvaged
+
+
 def _looks_noninformative_message(text: str) -> bool:
     s = re.sub(r"\s+", "", str(text or "").strip()).lower()
     if not s:
@@ -290,7 +316,8 @@ def _extract_line_message_actions_with_claude(text: str, pending_context: dict |
         "目的は、受信メッセージから議事録補正に使える情報をできるだけ回収することです。"
         "『回答か修正依頼か』を1つに決めるのではなく、両方あれば両方を返してください。"
         "has_answer は、直前の質問に対する答えとして本文へ反映できる情報があるかを表します。"
-        "answer_text には、本文反映に使う部分だけを自然な日本語で短く入れてください。"
+        "削除指示（『〜を削除』『意味がないので消して』等）も、直前の確認質問への有効な回答として has_answer=true にしてください。"
+        "answer_text には、本文反映に使う部分だけを自然な日本語で短く入れてください（削除指示は原文のまま可）。"
         "correction_pairs には、『XではなくY』『Xの間違い』のような置換ペアを入れてください。"
         "雑談や挨拶だけで、議事録補正に使える情報がない場合のみ is_irrelevant=true にしてください。"
         "出力は必ずJSONオブジェクトのみ。"
@@ -923,6 +950,7 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
     if job_id_for_save:
         _record_job_visible_log(job_id_for_save, "Step 16: LINEメッセージ情報抽出開始")
     extraction = _extract_line_message_actions_with_claude(text, context)
+    extraction = _salvage_line_message_extraction(text, extraction, context)
     reason = str(extraction.get("reason") or "").strip()
     has_answer = bool(extraction.get("has_answer"))
     answer_text = str(extraction.get("answer_text") or "").strip()

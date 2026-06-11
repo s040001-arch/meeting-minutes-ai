@@ -275,6 +275,28 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     )
     args.skip_compose = True
     cmd_sync_docs(args)
+    question_result_path = os.path.join(args.input_root, args.job_id, "question_result.json")
+    try:
+        with open(question_result_path, encoding="utf-8") as f:
+            qresult = json.load(f)
+        if str(qresult.get("question_status") or "") != "generated":
+            from run_job_once import update_doc_title_from_hub
+
+            export_title = _resolve_export_title(args.job_id, args.input_root, args.title)
+            if export_title:
+                update_doc_title_from_hub(
+                    _meta_path(args.job_id, args.input_root),
+                    f"【処理完了】{export_title}",
+                    log_path,
+                )
+                record_visible_progress(
+                    log_path=log_path,
+                    visible_log_path=visible_log_path,
+                    job_id=args.job_id,
+                    message=f"Googleドキュメント名を【処理完了】に更新しました",
+                )
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
     record_visible_progress(
         log_path=log_path,
         visible_log_path=visible_log_path,

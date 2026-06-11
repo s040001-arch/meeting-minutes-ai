@@ -7,6 +7,7 @@ from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_k
 from job_context import load_job_context
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
+    _apply_delete_to_transcript,
     apply_batch_corrections,
     is_coherence_unknown_item,
     parse_batch_answer,
@@ -249,7 +250,7 @@ def _build_parsed_from_answered_coherence(job_id: str, input_root: str) -> list[
             {
                 "anomaly_id": item.get("anomaly_id", ""),
                 "word": word,
-                "action": action if action in {"correct", "keep", "unknown"} else "unknown",
+                "action": action if action in {"correct", "keep", "unknown", "delete"} else "unknown",
                 "correction": correction,
             }
         )
@@ -295,9 +296,18 @@ def _handle_coherence_single_answer(
     if remaining > 0:
         updated = base_text
         applied: list[dict] = []
+        if parsed_one.get("action") == "delete":
+            updated, deleted = _apply_delete_to_transcript(
+                base_text,
+                span_hint=str(parsed_one.get("correction") or ""),
+                word=word,
+            )
+            if deleted:
+                applied = [deleted]
         print(
             f"recorrect_incorporate_mode=coherence_deferred "
-            f"remaining={remaining} action={parsed_one.get('action')}"
+            f"remaining={remaining} action={parsed_one.get('action')} "
+            f"deleted={len(applied)}"
         )
     else:
         all_parsed = _build_parsed_from_answered_coherence(job_id, input_root)
