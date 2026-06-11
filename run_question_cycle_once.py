@@ -17,7 +17,10 @@ from question_value_selection import (
     pop_value_fields,
     select_one_unknown_value_based,
 )
-from recognition_batch import select_next_coherence_point
+from recognition_batch import (
+    find_standalone_word,
+    select_next_coherence_point,
+)
 from repo_env import load_dotenv_local
 from unknown_point_filters import (
     filter_answerable_unknown_points,
@@ -346,9 +349,11 @@ def _extract_snippet_around_word(
     """逐語録から anomaly_word の前後文脈を切り出す（LINE で読める長さ）。"""
     if not full_text or not word:
         return ""
-    idx = position if isinstance(position, int) and position >= 0 else -1
-    if idx < 0 or full_text[idx: idx + len(word)] != word:
-        idx = full_text.find(word)
+    hint = position if isinstance(position, int) and position >= 0 else -1
+    if hint >= 0 and full_text[hint: hint + len(word)] == word:
+        idx = hint
+    else:
+        idx = find_standalone_word(full_text, word, hint_pos=hint)
     if idx < 0:
         return ""
     start = max(0, idx - radius)

@@ -30,6 +30,101 @@ def is_coherence_unknown_item(item: dict | None) -> bool:
     )
 
 
+# LINE で 1 語ずつ確認する際の anomaly_word 最小長（「味」等の熟語内部分一致を除外）
+COHERENCE_MIN_QUESTION_WORD_LEN = 3
+
+_BOUNDARY_CHARS = set(
+    " \t\n\r。、.,!?！？…：:；;''\"()（）[]【】「」『』/／・｜|"
+)
+# 直後に付きやすい助詞（「味が」などは単語として独立とみなす）
+_TRAILING_PARTICLES = set("のにはがをでもとやかねよわ")
+# 直前がこれらの漢字/カナのとき、1〜2 字語は熟語の途中とみなす（意|味 など）
+_COMPOUND_INTERIOR_PREV = _TRAILING_PARTICLES  # の|味 は OK、意|味 は NG
+
+
+def is_valid_coherence_question_word(word: str) -> bool:
+    w = str(word or "").strip()
+    return len(w) >= COHERENCE_MIN_QUESTION_WORD_LEN
+
+
+def _is_cjk_letter(ch: str) -> bool:
+    if not ch:
+        return False
+    o = ord(ch)
+    return (
+        0x3040 <= o <= 0x30FF
+        or 0x4E00 <= o <= 0x9FFF
+        or 0x3400 <= o <= 0x4DBF
+    )
+
+
+def _is_kanji(ch: str) -> bool:
+    if not ch:
+        return False
+    o = ord(ch)
+    return 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF
+
+
+def _is_standalone_word_at(text: str, idx: int, length: int) -> bool:
+    """text[idx:idx+length] が熟語の途中でない独立した語か。"""
+    if idx < 0 or length <= 0 or idx + length > len(text):
+        return False
+
+    if idx == 0:
+        left_ok = True
+    else:
+        prev = text[idx - 1]
+        if prev in _BOUNDARY_CHARS:
+            left_ok = True
+        elif prev in _COMPOUND_INTERIOR_PREV:
+            left_ok = True
+        elif length <= 2 and _is_kanji(prev):
+            # 意|味 のように直前が漢字なら熟語の途中
+            left_ok = False
+        elif length <= 2 and _is_cjk_letter(prev):
+            # という|意味 のように直前がかななら独立語の可能性が高い
+            left_ok = True
+        else:
+            left_ok = not _is_cjk_letter(prev)
+
+    right_idx = idx + length
+    if right_idx >= len(text):
+        right_ok = True
+    else:
+        nxt = text[right_idx]
+        if nxt in _BOUNDARY_CHARS:
+            right_ok = True
+        elif nxt in _TRAILING_PARTICLES:
+            right_ok = True
+        elif length <= 2 and _is_cjk_letter(nxt):
+            right_ok = False
+        else:
+            right_ok = True
+
+    return left_ok and right_ok
+
+
+def find_standalone_word(text: str, word: str, hint_pos: int = -1) -> int:
+    """word の独立出現位置を返す。hint_pos に最も近い候補を優先。"""
+    w = str(word or "").strip()
+    if not w or not text:
+        return -1
+    candidates: list[int] = []
+    start = 0
+    while start <= len(text):
+        idx = text.find(w, start)
+        if idx < 0:
+            break
+        if _is_standalone_word_at(text, idx, len(w)):
+            candidates.append(idx)
+        start = idx + 1 if idx >= start else start + 1
+    if not candidates:
+        return -1
+    if isinstance(hint_pos, int) and hint_pos >= 0:
+        return min(candidates, key=lambda i: abs(i - hint_pos))
+    return candidates[0]
+
+
 # 1 通で確認する最大件数。長い逐語録では20件程度まで一括確認する。
 MAX_BATCH_ITEMS = 20
 # 各項目に添える前後文脈の最大文字数。
@@ -60,7 +155,7 @@ def select_next_coherence_point(coherence_points: list[dict]) -> dict | None:
         if not isinstance(p, dict):
             continue
         word = str(p.get("anomaly_word") or "").strip()
-        if not word:
+        if not word or not is_valid_coherence_question_word(word):
             continue
         conf = str(p.get("confidence") or "low").strip().lower()
         pos = p.get("context_position_in_transcript")
@@ -77,7 +172,9 @@ def select_next_coherence_point(coherence_points: list[dict]) -> dict | None:
 
 def parse_single_coherence_answer(answer_text: str, *, word: str) -> dict:
     """1 語 1 問への回答を (action, correction) に正規化する。"""
-    action, correction = _normalize_answer_token(str(answer_text or "").strip())
+    action, correction = _normalize_answer_token(
+        str(answer_text or "").strip(), target_word=word
+    )
     if action == "correct":
         if not correction:
             action = "unknown"
@@ -100,7 +197,7 @@ def build_batch_items(coherence_points: list[dict], *, limit: int = MAX_BATCH_IT
     seen_words: set[str] = set()
     for idx, p in enumerate(coherence_points):
         word = str(p.get("anomaly_word") or "").strip()
-        if not word or word in seen_words:
+        if not word or word in seen_words or not is_valid_coherence_question_word(word):
             continue
         seen_words.add(word)
         conf = str(p.get("confidence") or "low").strip().lower()
@@ -143,24 +240,159 @@ def build_batch_question_text(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _normalize_answer_token(token: str) -> tuple[str, str]:
+def _normalize_answer_surface(s: str) -> str:
+    t = str(s or "").strip().strip("「」『』\"' 　")
+    t = re.sub(r"[。．.!！?？]+$", "", t)
+    return t.strip()
+
+
+def _looks_like_correction_answer(s: str, target_word: str = "") -> bool:
+    if re.search(r"→|⇒|じゃなく|ではなく|じゃない|ではない|違う|誤り", s):
+        return True
+    quoted = re.findall(r"「([^」]+)」", s)
+    tw = str(target_word or "").strip()
+    for q in quoted:
+        q = q.strip()
+        if not q:
+            continue
+        if tw and q == tw:
+            continue
+        if q in {"OK", "ok", "不明"}:
+            continue
+        return True
+    return False
+
+
+_KEEP_EXACT = {
+    "ok",
+    "okです",
+    "okです。",
+    "okay",
+    "そのまま",
+    "そのままで",
+    "そのままでいい",
+    "そのままでいいです",
+    "そのままで大丈夫",
+    "そのままで問題ない",
+    "合ってる",
+    "合ってます",
+    "合っています",
+    "合っています。",
+    "あってる",
+    "あってます",
+    "あっています",
+    "問題ない",
+    "問題なし",
+    "問題ありません",
+    "問題ありません。",
+    "正しい",
+    "正しいです",
+    "正しいです。",
+    "正しい表記",
+    "正しい表記です",
+    "正しい表記です。",
+    "表記は正しい",
+    "表記は正しいです",
+    "表記は正しいです。",
+    "そのとおり",
+    "そのとおりです",
+    "その通り",
+    "その通りです",
+    "はい",
+    "はい。",
+    "ええ",
+    "うん",
+    "大丈夫",
+    "大丈夫です",
+    "変更不要",
+    "修正不要",
+    "訂正不要",
+    "間違いない",
+    "間違いありません",
+    "誤りではない",
+    "誤変換ではない",
+    "ミスではない",
+    "このままで",
+    "このままでいい",
+    "このままで大丈夫",
+    "間違いなく正しい",
+    "認識は合っている",
+    "認識合ってます",
+}
+_KEEP_PATTERNS = [
+    re.compile(r"^ok[\.。!！]?$", re.I),
+    re.compile(r"正し(い|かった)"),
+    re.compile(r"正しい表記"),
+    re.compile(r"表記.{0,6}正し"),
+    re.compile(r"合ってい"),
+    re.compile(r"あってい"),
+    re.compile(r"問題(ない|なし|ありません)"),
+    re.compile(r"その(通り|とおり)"),
+    re.compile(r"変更不要|修正不要|訂正不要"),
+    re.compile(r"誤り(ではない|じゃない)|誤変換ではない|ミスではない"),
+    re.compile(r"間違い(ない|ありません|なく)"),
+    re.compile(r"大丈夫"),
+    re.compile(r"このまま(で)?(大丈夫|いい|よい|問題ない)?"),
+    re.compile(r"そのまま(で)?(大丈夫|いい|よい|問題ない)?"),
+    re.compile(r"^(はい|ええ|うん)([。.!！]?|、.*)?$"),
+    re.compile(r"間違いなく"),
+    re.compile(r"認識(は|も)?合っ"),
+    re.compile(r"特に問題(ない|なし)"),
+    re.compile(r"修正の必要(は|が)?ない"),
+]
+
+
+def _is_keep_answer(s: str, target_word: str = "") -> bool:
+    surface = _normalize_answer_surface(s)
+    if not surface:
+        return False
+    if _looks_like_correction_answer(surface, target_word):
+        return False
+    low = surface.lower().replace(" ", "")
+    if low in _KEEP_EXACT:
+        return True
+    compact = low.replace("です", "").replace("ます", "").replace("。", "")
+    if compact in {k.replace("です", "").replace("ます", "") for k in _KEEP_EXACT}:
+        return True
+    return any(p.search(surface) for p in _KEEP_PATTERNS)
+
+
+def _normalize_answer_token(token: str, target_word: str = "") -> tuple[str, str]:
     """単一項目の回答トークンを (action, correction) に正規化する。
 
     action: "keep"(そのまま) / "unknown"(不明) / "correct"(訂正あり)
     """
-    s = str(token or "").strip().strip("「」『』\"' 　")
+    s = _normalize_answer_surface(token)
     if not s:
         return ("unknown", "")
-    low = s.lower().replace(" ", "")
-    keep_words = {"ok", "okです", "okです。", "そのまま", "そのままで", "合ってる",
-                  "合ってます", "あってる", "あってます", "問題ない", "問題なし",
-                  "正しい", "正しいです", "そのとおり", "その通り", "はい"}
-    unknown_words = {"不明", "わからない", "分からない", "わかりません", "分かりません",
-                     "覚えてない", "おぼえてない", "忘れた", "わすれた", "スキップ", "skip"}
-    if low in keep_words:
+    if _is_keep_answer(s, target_word):
         return ("keep", "")
-    if low in unknown_words:
+    low = s.lower().replace(" ", "")
+    unknown_words = {
+        "不明",
+        "わからない",
+        "分からない",
+        "わかりません",
+        "分かりません",
+        "覚えてない",
+        "おぼえてない",
+        "忘れた",
+        "わすれた",
+        "スキップ",
+        "skip",
+        "パス",
+        "pass",
+        "未定",
+        "不明です",
+    }
+    if low in unknown_words or any(
+        low.startswith(p) for p in ("わから", "分から", "不明")
+    ):
         return ("unknown", "")
+    # 「〇〇です」で引用があれば訂正語として抽出
+    m = re.search(r"「([^」]+)」", s)
+    if m:
+        return ("correct", m.group(1).strip())
     return ("correct", s)
 
 
@@ -199,7 +431,7 @@ def _parse_numbered_answer_with_regex(answer_text: str, items: list[dict]) -> li
             # 言及されなかった項目は「不明(未回答)」扱い
             action, correction = ("unknown", "")
         else:
-            action, correction = _normalize_answer_token(token)
+            action, correction = _normalize_answer_token(token, target_word=str(it.get("word") or ""))
         out.append(
             {
                 "anomaly_id": it.get("anomaly_id", ""),

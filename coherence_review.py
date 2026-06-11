@@ -22,6 +22,7 @@ import anthropic
 from mechanical_correct_text import PIXEL_RECOGNIZER_REPLACEMENTS
 from meeting_profile import format_meeting_profile_for_prompt, load_meeting_profile
 from pipeline_build import get_pipeline_build_info
+from recognition_batch import find_standalone_word, is_valid_coherence_question_word
 
 
 COHERENCE_REVIEW_MODEL = "claude-opus-4-7"
@@ -254,7 +255,10 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
     ctx = str(item.get("context") or "").strip()
     pos = -1
     if word:
-        pos = text.find(word)
+        hint = -1
+        if ctx:
+            hint = text.find(ctx[:20])
+        pos = find_standalone_word(text, word, hint_pos=hint)
     if pos < 0 and ctx:
         pos = text.find(ctx[:20])
     confidence = str(item.get("confidence") or "low").strip().lower()
@@ -335,7 +339,12 @@ def _apply_review_tags(text: str, anomalies: list[dict]) -> str:
         if not word or word in seen:
             continue
         seen.add(word)
-        idx = out.find(word)
+        hint = an.get("context_position_in_transcript", -1)
+        try:
+            hint_pos = int(hint) if hint is not None else -1
+        except (TypeError, ValueError):
+            hint_pos = -1
+        idx = find_standalone_word(out, word, hint_pos=hint_pos)
         if idx < 0:
             continue
         # 既に [要確認] が付いている場合は重複付与しない
@@ -367,6 +376,8 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
             continue
         word = (an.get("anomaly_word") or "").strip()
         if not word:
+            continue
+        if not is_valid_coherence_question_word(word):
             continue
         # 30字超の "wordとして長すぎる断片" は単語確認質問に不向き(文崩壊扱い)
         if len(word) > 30:
