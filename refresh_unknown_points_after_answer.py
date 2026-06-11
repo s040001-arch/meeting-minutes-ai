@@ -6,6 +6,7 @@ import requests
 
 from ai_correct_text import resolve_openai_api_key
 from extract_unknown_points import extract_unknown_points
+from recognition_batch import is_coherence_unknown_item
 from recorrect_from_line_answer import load_answer_record
 
 
@@ -44,18 +45,47 @@ def _normalize_unknown(item: dict, *, source: str, default_status: str = "open")
         out["context"] = item["context"].strip()
     if isinstance(item.get("hypothesis"), str) and item["hypothesis"].strip():
         out["hypothesis"] = item["hypothesis"].strip()
+    if is_coherence_unknown_item(item):
+        for field in (
+            "anomaly_id",
+            "anomaly_word",
+            "context",
+            "confidence",
+            "estimated_correction",
+            "anomaly_type",
+            "context_position_in_transcript",
+            "correction_action",
+            "correction_word",
+        ):
+            val = item.get(field)
+            if val is not None and str(val).strip() != "":
+                out[field] = val
     return out
+
+
+def _dedupe_key(item: dict) -> tuple:
+    if is_coherence_unknown_item(item):
+        aid = str(item.get("anomaly_id") or "").strip()
+        if aid:
+            return ("coherence", aid)
+        word = str(item.get("anomaly_word") or "").strip()
+        if word:
+            return ("coherence_word", word)
+    return (
+        "regular",
+        str(item.get("type") or "").strip(),
+        str(item.get("text") or "").strip(),
+    )
 
 
 def _dedupe_unknown_points(unknown_points: list[dict]) -> list[dict]:
     deduped: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple] = set()
     for item in unknown_points:
-        key = (
-            str(item.get("type") or "").strip(),
-            str(item.get("text") or "").strip(),
-        )
-        if not key[1] or key in seen:
+        key = _dedupe_key(item)
+        if key in seen:
+            continue
+        if key[0] == "regular" and not key[2]:
             continue
         seen.add(key)
         deduped.append(item)
@@ -190,16 +220,10 @@ def main() -> None:
     # coherence_review 由来(音声認識ゆれ = [要確認])は regex 再抽出では拾えず、
     # coherence_review も再実行されない。未回答のものは raw のまま持ち越して
     # anomaly_id 等を保持し、次サイクルでも 1 件ずつ確認できるようにする。
-    def _is_coherence(it: dict) -> bool:
-        return (
-            str(it.get("source") or "") == "coherence_review"
-            or str(it.get("type") or "") == "coherence_review"
-        )
-
     coherence_carryover = [
         dict(item)
         for item in existing_unknowns
-        if _is_coherence(item)
+        if is_coherence_unknown_item(item)
         and str(item.get("status") or "").strip().lower() != "answered"
     ]
 

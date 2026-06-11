@@ -38,6 +38,15 @@ def _line_push_env_ready() -> bool:
     return bool(user_id and token)
 
 
+def _resolve_answers_json(job_id: str, input_root: str, explicit: str | None) -> str:
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    job_answers = os.path.join(input_root, job_id, "answers.json")
+    if os.path.isfile(job_answers):
+        return job_answers
+    return explicit or os.path.join("data", "line_answers.json")
+
+
 def _meta_path(job_id: str, input_root: str) -> str:
     return os.path.join(input_root, job_id, "google_doc_hub.json")
 
@@ -146,6 +155,7 @@ def cmd_sync_docs(args: argparse.Namespace) -> None:
 
 def cmd_after_answer(args: argparse.Namespace) -> None:
     from progress_tracker import wait_for_job_pipeline_idle
+    from run_job_once import record_visible_progress
 
     wait_sec = float(os.getenv("AFTER_ANSWER_PIPELINE_WAIT_SEC", "3600"))
     print(
@@ -166,6 +176,16 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
 
     job_dir = os.path.join(args.input_root, args.job_id)
     log_path = os.path.join(job_dir, "e2e_run_log.txt")
+    visible_log_path = os.path.join(job_dir, "processing_visible_log.txt")
+    answers_json = _resolve_answers_json(
+        args.job_id, args.input_root, args.answers_json
+    )
+    record_visible_progress(
+        log_path=log_path,
+        visible_log_path=visible_log_path,
+        job_id=args.job_id,
+        message="回答反映: 逐語録への反映を開始します",
+    )
     _run(
         [
             _py(),
@@ -175,7 +195,7 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             "--input-root",
             args.input_root,
             "--answers-json",
-            args.answers_json,
+            answers_json,
         ]
     )
     from run_job_once import ensure_after_qa_exists
@@ -198,6 +218,12 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     )
     # 回答反映後の全文から unknown_points を再評価し、必要なら「次の1問」を生成する。
     unknowns_path = os.path.join(args.input_root, args.job_id, "unknown_points.json")
+    record_visible_progress(
+        log_path=log_path,
+        visible_log_path=visible_log_path,
+        job_id=args.job_id,
+        message="不明点を再評価し、次のLINE質問を選定しています...",
+    )
     _run(
         [
             _py(),
@@ -207,7 +233,7 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             "--input-root",
             args.input_root,
             "--answers-json",
-            args.answers_json,
+            answers_json,
             "--input",
             after_qa_path,
         ]
@@ -231,6 +257,12 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     if send_line_enabled:
         qcycle_cmd.append("--send-line")
     _run(qcycle_cmd)
+    record_visible_progress(
+        log_path=log_path,
+        visible_log_path=visible_log_path,
+        job_id=args.job_id,
+        message="質問の選定とLINE通知が完了しました",
+    )
     _run(
         [
             _py(),
@@ -243,6 +275,12 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     )
     args.skip_compose = True
     cmd_sync_docs(args)
+    record_visible_progress(
+        log_path=log_path,
+        visible_log_path=visible_log_path,
+        job_id=args.job_id,
+        message="===== 回答反映サイクルが完了しました =====",
+    )
 
 
 def main() -> None:
@@ -277,8 +315,8 @@ def main() -> None:
     parser.add_argument(
         "--min-question-value",
         type=int,
-        default=8,
-        help="次質問を出す最小value（デフォルト: 8）",
+        default=7,
+        help="次質問を出す最小value（デフォルト: 7）",
     )
     parser.add_argument(
         "--include-internal-workspace",

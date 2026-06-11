@@ -8,6 +8,7 @@ from job_context import load_job_context
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
     apply_batch_corrections,
+    is_coherence_unknown_item,
     parse_batch_answer,
     parse_single_coherence_answer,
 )
@@ -138,10 +139,7 @@ def _is_coherence_review_question(question_result: dict | None) -> bool:
     su = question_result.get("selected_unknown")
     if not isinstance(su, dict):
         return False
-    return (
-        str(su.get("source") or "") == "coherence_review"
-        or str(su.get("type") or "") == "coherence_review"
-    )
+    return is_coherence_unknown_item(su)
 
 
 def _parse_coherence_single_answer(answer_text: str, *, word: str) -> dict:
@@ -174,10 +172,7 @@ def _save_unknown_points(job_id: str, input_root: str, unknown_points: list[dict
 
 
 def _is_coherence_item(item: dict) -> bool:
-    return (
-        str(item.get("source") or "") == "coherence_review"
-        or str(item.get("type") or "") == "coherence_review"
-    )
+    return is_coherence_unknown_item(item)
 
 
 def _count_unanswered_coherence(job_id: str, input_root: str) -> int:

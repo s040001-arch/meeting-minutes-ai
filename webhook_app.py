@@ -26,6 +26,7 @@ from googleapiclient.discovery import build
 
 
 from progress_tracker import read_job_progress, read_last_job_progress, update_job_progress
+from recognition_batch import is_coherence_unknown_item
 
 app = FastAPI()
 
@@ -521,6 +522,11 @@ def _launch_resume_subprocess(
         daemon=True,
     ).start()
     print(f"{launch_label}_launched job_id={jid!r} pid={proc.pid}")
+
+
+def _should_use_light_after_answer_resume(selected_unknown: dict | None) -> bool:
+    """認識ゆれ(coherence)への回答は Step⑦フル再実行ではなく after-answer 経路にする。"""
+    return is_coherence_unknown_item(selected_unknown)
 
 
 def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
@@ -1051,15 +1057,34 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 "correction_pairs": len(pairs),
             },
         )
+        use_light_answer_resume = has_answer and _should_use_light_after_answer_resume(
+            selected_unknown
+        )
         if job_id_for_save:
-            if has_answer and pairs:
-                _record_job_visible_log(job_id_for_save, "Step 17: 回答反映と修正辞書更新をあわせて再開します")
+            if use_light_answer_resume:
+                _record_job_visible_log(
+                    job_id_for_save,
+                    "Step 17: 認識ゆれ回答を軽量再開します（反映→次質問/完了LINE→Docs）",
+                )
+            elif has_answer and pairs:
+                _record_job_visible_log(
+                    job_id_for_save,
+                    "Step 17: 回答反映と修正辞書更新をあわせて再開します",
+                )
             elif has_answer:
                 _record_job_visible_log(job_id_for_save, "Step 17: 回答反映を再開します")
             else:
-                _record_job_visible_log(job_id_for_save, "Step 17: 修正辞書更新を反映して Step⑦ から再開します")
+                _record_job_visible_log(
+                    job_id_for_save,
+                    "Step 17: 修正辞書更新を反映して Step⑦ から再開します",
+                )
         try:
-            if has_answer and pairs:
+            if use_light_answer_resume:
+                maybe_launch_auto_after_answer(
+                    job_id_for_save,
+                    save_ok=(answer_save_ok and (correction_save_ok or not pairs)),
+                )
+            elif has_answer and pairs:
                 maybe_launch_auto_after_correction(
                     job_id_for_save,
                     save_ok=(answer_save_ok and correction_save_ok),

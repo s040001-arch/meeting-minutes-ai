@@ -17,6 +17,18 @@ import requests
 RECOGNITION_BATCH_FORMAT = "recognition_batch"
 RECOGNITION_BATCH_TYPE = "recognition_batch"
 VERIFY_TAG = "[要確認]"
+COHERENCE_SOURCE = "coherence_review"
+COHERENCE_TYPE = "coherence_review"
+
+
+def is_coherence_unknown_item(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return (
+        str(item.get("source") or "") == COHERENCE_SOURCE
+        or str(item.get("type") or "") == COHERENCE_TYPE
+    )
+
 
 # 1 通で確認する最大件数。長い逐語録では20件程度まで一括確認する。
 MAX_BATCH_ITEMS = 20
