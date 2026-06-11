@@ -7,6 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY data/correction_dict.json /app/seed/correction_dict.json
 
 RUN chmod +x scripts/railway_entry.sh
 
