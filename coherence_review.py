@@ -23,6 +23,7 @@ from mechanical_correct_text import PIXEL_RECOGNIZER_REPLACEMENTS
 from meeting_profile import format_meeting_profile_for_prompt, load_meeting_profile
 from pipeline_build import get_pipeline_build_info
 from recognition_batch import find_standalone_word, is_valid_coherence_question_word
+from span_correction import apply_span_corrections_batch, build_span_fields
 
 
 COHERENCE_REVIEW_MODEL = "claude-opus-4-7"
@@ -35,6 +36,7 @@ COHERENCE_REVIEW_TIMEOUT_SEC = 900
 
 TRANSCRIPT_ANOMALIES_FILENAME = "transcript_anomalies.json"
 AUTO_CORRECTIONS_FILENAME = "auto_corrections.json"
+CORRECTION_AUDIT_LOG_FILENAME = "correction_audit_log.json"
 UNKNOWN_POINTS_FILENAME = "unknown_points.json"
 
 COHERENCE_TYPE = "coherence_review"
@@ -275,12 +277,21 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
     # - 候補が複数(／ や / で区切られている)場合は不可
     # - estimated が短すぎる(1字)場合は誤置換リスクが高いので不可
     has_multi_candidate = "／" in estimated or "/" in estimated
+    span_fields = build_span_fields(
+        text,
+        word=word,
+        estimated=estimated,
+        hint_pos=pos,
+        context=ctx,
+        llm_span_text=str(item.get("span_text") or "").strip(),
+    )
+    span_start = int(span_fields.get("span_start") or -1)
     auto_fixable = (
         confidence == "high"
         and bool(estimated)
         and bool(word)
         and word != estimated
-        and word in text
+        and span_start >= 0
         and len(estimated) >= 2
         and not has_multi_candidate
         and _is_estimated_known_in_text(estimated, text)
@@ -294,37 +305,52 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
         "confidence": confidence,
         "auto_fixable": auto_fixable,
         "reason": str(item.get("reason") or "").strip(),
-        "context_position_in_transcript": pos,
+        "context_position_in_transcript": pos if pos >= 0 else span_start,
+        "span_text": span_fields.get("span_text") or "",
+        "span_start": span_fields.get("span_start", -1),
+        "span_end": span_fields.get("span_end", -1),
+        "span_corrected": span_fields.get("span_corrected") or estimated,
     }
 
 
-def _apply_high_auto_fixes(
-    text: str, anomalies: list[dict], log_path: str
-) -> tuple[str, list[dict]]:
-    fixed = text
-    entries: list[dict] = []
-    for an in anomalies:
-        if not an.get("auto_fixable"):
+def _write_correction_audit_log(path: str, entries: list[dict]) -> None:
+    """Persist high-confidence auto_fix audit entries (correct/delete only, no keep)."""
+    audit_rows: list[dict] = []
+    for entry in entries:
+        action = str(entry.get("action") or "correct").strip().lower()
+        if action not in {"correct", "delete"}:
             continue
-        wrong = an.get("anomaly_word") or ""
-        right = an.get("estimated_correction") or ""
-        if not wrong or not right or wrong == right or wrong not in fixed:
-            continue
-        before_count = fixed.count(wrong)
-        fixed = fixed.replace(wrong, right)
-        entries.append(
+        audit_rows.append(
             {
-                "anomaly_id": an["anomaly_id"],
-                "before": wrong,
-                "after": right,
-                "occurrences_replaced": before_count,
-                "confidence": an.get("confidence"),
-                "reason": an.get("reason", ""),
+                "anomaly_id": entry.get("anomaly_id"),
+                "action": action,
+                "before": entry.get("before"),
+                "after": entry.get("after"),
+                "confidence": entry.get("confidence"),
+                "reason": entry.get("reason", ""),
+                "span_start": entry.get("span_start"),
+                "span_end": entry.get("span_end"),
+                "span_text": entry.get("span_text") or "",
+                "span_corrected": entry.get("span_corrected") or entry.get("after") or "",
             }
         )
+    if not audit_rows:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(audit_rows, f, ensure_ascii=False, indent=2)
+
+
+def _apply_high_auto_fixes(
+    text: str,
+    anomalies: list[dict],
+    auto_log_path: str,
+    audit_log_path: str,
+) -> tuple[str, list[dict]]:
+    fixed, entries = apply_span_corrections_batch(text, anomalies)
     if entries:
-        with open(log_path, "w", encoding="utf-8") as f:
+        with open(auto_log_path, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
+        _write_correction_audit_log(audit_log_path, entries)
     return fixed, entries
 
 
@@ -466,7 +492,10 @@ def run_coherence_review(job_dir: str) -> dict:
         )
 
     auto_log_path = os.path.join(job_dir, AUTO_CORRECTIONS_FILENAME)
-    fixed_text, auto_entries = _apply_high_auto_fixes(text, enriched, auto_log_path)
+    audit_log_path = os.path.join(job_dir, CORRECTION_AUDIT_LOG_FILENAME)
+    fixed_text, auto_entries = _apply_high_auto_fixes(
+        text, enriched, auto_log_path, audit_log_path
+    )
     tagged_text = _apply_review_tags(fixed_text, enriched)
     if tagged_text != text:
         with open(ai_path, "w", encoding="utf-8") as f:
@@ -494,6 +523,7 @@ def run_coherence_review(job_dir: str) -> dict:
         "learned_dict_added": learned_added,
         "anomalies_path": anomalies_path,
         "auto_corrections_path": auto_log_path if auto_entries else None,
+        "correction_audit_log_path": audit_log_path if auto_entries else None,
     }
 
 
