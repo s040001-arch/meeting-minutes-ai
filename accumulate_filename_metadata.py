@@ -103,6 +103,8 @@ def _merge_filename_metadata_with_claude(
     """
     import anthropic
 
+    from anthropic_prompt_cache import cached_system
+
     client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
     profile = meeting_profile or {}
     customer = str(profile.get("customer_name") or parsed_filename.get("customer") or "").strip()
@@ -114,13 +116,12 @@ def _merge_filename_metadata_with_claude(
         profile_hint = (
             f"\n\n【今回の会議コンテキスト】顧客: {customer or '不明'} / 議題: {topic or '不明'}"
         )
-    system_prompt = (
+    static_prompt = (
         "あなたは議事録AIの再利用ナレッジ管理アシスタントです。"
         "入力として、既存のナレッジメモ一覧と、議事録ファイル名から自動抽出された"
         "会議メタ情報（顧客企業・参加者・案件名）の質問・回答ペアが与えられます。"
         "目的は、各情報にジョブ横断で再利用価値があるかを判断し、"
         "既存ナレッジと重複・類似があれば統合整理したうえで、更新後のナレッジ一覧全体を返すことです。"
-        + profile_hint
         + "\n\n【ルール】"
         "\n- correction_dict のような置換辞書は作らず、1行1件の自由記述メモだけを管理する"
         "\n- 既存メモに同じ顧客企業や同じ参加者の情報があれば、合成して情報量を増やす（追記）"
@@ -132,6 +133,7 @@ def _merge_filename_metadata_with_claude(
         "\n- 出力は JSON オブジェクトのみ"
         '\n- 形式: {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"}'
     )
+    system_prompt = cached_system(static_prompt, profile_hint)
     payload = {
         "existing_knowledge": existing_memos,
         "qa_pairs": qa_pairs,

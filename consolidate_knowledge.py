@@ -7,6 +7,7 @@ import time
 import anthropic
 import httpx
 
+from anthropic_prompt_cache import cached_system
 from repo_env import load_dotenv_local
 from knowledge_sheet_store import load_knowledge_memos, save_knowledge_memos
 
@@ -44,7 +45,7 @@ def consolidate_batch(client: anthropic.Anthropic, items: list[str], label: str)
     with client.messages.stream(
         model=_MODEL,
         max_tokens=8000,
-        system=_SYSTEM_PROMPT,
+        system=cached_system(_SYSTEM_PROMPT),
         messages=[{"role": "user", "content": payload}],
     ) as stream:
         for chunk in stream.text_stream:

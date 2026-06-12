@@ -23,6 +23,7 @@ from typing import Any
 
 import anthropic
 
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 from meeting_profile import format_meeting_profile_for_prompt
 
 # --- 機械分割フォールバック用 (粒度を細かく: 改善C) ---
@@ -36,7 +37,7 @@ SUMMARY_TIMEOUT_SEC = 120
 MAX_PARALLEL = 4
 
 # --- Opus (統合分節+要約) ---
-INTEGRATED_MODEL = "claude-opus-4-7"
+INTEGRATED_MODEL = OPUS_MODEL_ID
 # 3時間(~60K字)会議で 25-30 セクション × ~150 tokens = ~4500 tokens を想定し余裕を持たせる
 INTEGRATED_MAX_TOKENS = 8000
 # 3時間の入力で Opus は 3-5 分かかる可能性があるため余裕を持たせる
@@ -87,7 +88,7 @@ def _clean_summary_line(raw: str) -> str:
 # ============================================================
 
 
-def _build_integrated_system_prompt(meeting_profile: dict[str, Any] | None) -> str:
+def _build_integrated_system_prompt(meeting_profile: dict[str, Any] | None) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
     # Phase 2: Layer 2 由来の世界モデル(関連企業/人物/手法)を inject。
     # 見出しの表記揃え(嘱託再雇用者・エンゲージメントサーベイ 等)に寄与する。
@@ -99,13 +100,11 @@ def _build_integrated_system_prompt(meeting_profile: dict[str, Any] | None) -> s
         )
     except Exception as e:  # noqa: BLE001
         print(f"summary_world_knowledge_fetch_failed={e!r}")
-    return (
+    static_prompt = (
         "あなたは議事録の発言録に分節サマリ見出しを差し込む担当です。"
         "渡された発言録全文を読み、議題・話題の自然な切れ目で分節し、"
         "各セクションを表す見出しを生成して返します。"
         "見出しは後で読者(相原)が斜め読みして「ここ詳しく見たい」と判断するための目印です。"
-        + profile_block
-        + world_block
         + "\n\n【分節ルール(改善A)】"
         "\n- 話題が明確に切り替わる発言を境界に取る"
         "\n  例の境界フレーズ: 「次に〜の話なんですけど」「で、もう1つの話」「○○の方ですが」"
@@ -144,6 +143,7 @@ def _build_integrated_system_prompt(meeting_profile: dict[str, Any] | None) -> s
         "\n  ..."
         "\n]}"
     )
+    return cached_system(static_prompt, profile_block + world_block)
 
 
 def _strip_code_fences(raw: str) -> str:
@@ -363,13 +363,12 @@ def split_into_sections(
     return ["\n\n".join(sec) for sec in sections]
 
 
-def _build_fallback_system_prompt(meeting_profile: dict[str, Any] | None) -> str:
+def _build_fallback_system_prompt(meeting_profile: dict[str, Any] | None) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
-    return (
+    static_prompt = (
         "あなたは議事録の発言録分節サマリ担当です。"
         "渡された発言録の一部(数分間の会話塊)を読み、"
         "この塊で何が話されていたかを15〜30字の見出し1行で返してください。"
-        + profile_block
         + "\n\n【見出しルール】"
         "\n- 名詞句中心、体言止め推奨"
         "\n- 固有名詞・数字・具体的な決定/提案を1つ以上含める(改善B)"
@@ -381,10 +380,11 @@ def _build_fallback_system_prompt(meeting_profile: dict[str, Any] | None) -> str
         "\n- 文末に句点を付けない、引用符を付けない"
         "\n- 出力は見出しテキスト1行のみ。前置き・コードフェンス・説明文を一切付けない"
     )
+    return cached_system(static_prompt, profile_block)
 
 
 def _summarize_one_fallback(
-    client: anthropic.Anthropic, section_text: str, system_prompt: str
+    client: anthropic.Anthropic, section_text: str, system_prompt: str | list
 ) -> str:
     resp = client.messages.create(
         model=SUMMARY_MODEL,

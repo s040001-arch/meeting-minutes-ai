@@ -8,6 +8,7 @@ from typing import Any, Tuple
 import anthropic
 import httpx
 
+from anthropic_prompt_cache import cached_system
 from meeting_profile import load_meeting_profile, resolve_display_title
 from repo_env import load_dotenv_local
 
@@ -215,7 +216,7 @@ def _generate_minutes_sections_with_claude(
             with client.messages.stream(
                 model=model,
                 max_tokens=4000,
-                system=_build_minutes_system_prompt(),
+                system=cached_system(_build_minutes_system_prompt()),
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for text_chunk in stream.text_stream:

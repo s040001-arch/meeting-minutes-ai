@@ -28,6 +28,7 @@ import httpx
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from anthropic_prompt_cache import cached_system
 from repo_env import load_dotenv_local
 
 from knowledge_sheet_store import (
@@ -337,7 +338,7 @@ def extract_knowledge_from_text(
         client,
         model=model,
         max_tokens=4000,
-        system=_build_extract_prompt(),
+        system=cached_system(_build_extract_prompt()),
         user_message=user_msg,
         progress_label="AI抽出",
     )
@@ -394,7 +395,7 @@ def merge_knowledge_lists(
         client,
         model=model,
         max_tokens=4000,
-        system=_build_merge_prompt(),
+        system=cached_system(_build_merge_prompt()),
         user_message=payload,
         progress_label="マージ",
     )
