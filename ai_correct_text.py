@@ -22,7 +22,9 @@ from pipeline_build import get_pipeline_build_info
 logger = logging.getLogger(__name__)
 
 # Claude Opus — environment variable ANTHROPIC_CORRECTION_MODEL overrides this.
-OPUS_CORRECTION_MODEL = "claude-opus-4-7"
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
+
+OPUS_CORRECTION_MODEL = OPUS_MODEL_ID
 OPUS_MAX_OUTPUT_TOKENS = 128_000
 _CORRECTION_CHUNK_TARGET_CHARS = 7000
 _CORRECTION_MIN_LENGTH_RATIO_DEFAULT = 0.85
@@ -124,7 +126,7 @@ def _stream_anthropic_text(
     *,
     api_key: str,
     model: str,
-    system_prompt: str,
+    system_prompt: str | list,
     user_message: str,
     max_tokens: int,
     timeout_sec: int,
@@ -239,8 +241,8 @@ def _build_opus_correction_system_prompt(
     meeting_profile: dict | None = None,
     knowledge_memos: list[str] | None = None,
     knowledge_block: str | None = None,
-) -> str:
-    """Claude 4 Opus 向け一括補正プロンプト。"""
+) -> str | list:
+    """Claude Opus 向け一括補正プロンプト（固定ルール + ジョブ可変文脈）。"""
     pixel_block = (
         "\n\n【最優先: Google Pixel 特有の誤変換】"
         "入力は Pixel レコーダーの音声認識テキストです。冒頭から末尾まで均等に注意し、"
@@ -301,7 +303,8 @@ def _build_opus_correction_system_prompt(
     # 渡されない場合は従来の memos -> format_knowledge_for_prompt() 経路にフォールバック。
     if knowledge_block is None:
         knowledge_block = format_knowledge_for_prompt(knowledge_memos or [])
-    return base + profile_block + (knowledge_block or "")
+    variable = profile_block + (knowledge_block or "")
+    return cached_system(base, variable)
 
 
 # ---------------------------------------------------------------------------

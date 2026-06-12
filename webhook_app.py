@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 
 import anthropic
+
+from anthropic_prompt_cache import cached_system
 import requests
 
 from repo_env import load_dotenv_local
@@ -328,7 +330,7 @@ def _extract_line_message_actions_with_claude(text: str, pending_context: dict |
             model=LINE_EXTRACTOR_MODEL,
             max_tokens=800,
             temperature=0,
-            system=system_prompt,
+            system=cached_system(system_prompt),
             messages=[
                 {
                     "role": "user",

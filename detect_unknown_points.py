@@ -12,11 +12,12 @@ from ai_correct_text import (
 )
 from knowledge_sheet_store import load_knowledge_memos
 from meeting_profile import format_meeting_profile_for_prompt
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 from unknown_point_filters import filter_answerable_unknown_points
 
 logger = logging.getLogger(__name__)
 
-OPUS_DETECTION_MODEL = "claude-opus-4-20250514"
+OPUS_DETECTION_MODEL = OPUS_MODEL_ID
 
 
 def _resolve_detection_api_key() -> str:
@@ -46,7 +47,7 @@ def _build_detection_prompt(
     knowledge_memos: list[str],
     answered_items: list[dict] | None = None,
     knowledge_block_override: str | None = None,
-) -> str:
+) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile)
     # Phase 2: Layer 2 由来の整形済テキストがあれば優先(顧客/参加者でフィルタ済み)。
     if knowledge_block_override is not None and knowledge_block_override.strip():
@@ -55,6 +56,7 @@ def _build_detection_prompt(
         knowledge_block = _format_knowledge_as_exclusion(knowledge_memos)
 
     scope = str(meeting_profile.get("meeting_scope") or "unknown")
+    variable_parts = [profile_block]
 
     if scope == "external":
         purpose_frame = (
@@ -76,14 +78,13 @@ def _build_detection_prompt(
             "相原本人に確認すれば確定できる箇所だけを不明点として抽出することです。"
         )
 
-    prompt = (
+    static_prompt = (
         "あなたは議事録（逐語録）の品質管理アシスタントです。\n"
         "このステップの唯一の目的は、会議で実際に発言された内容を"
         "正確な文字起こしとして残すことです。\n"
         "会議で言われていないこと・決まっていないこと・これから決めることを"
         "ユーザーに確認したり、議事録に書き足したりするのは目的外です。\n"
         f"{purpose_frame}\n"
-        f"{profile_block}\n"
         "\n【優先度評価（proposal_impact = 議事録の正確さへの影響）】\n"
         "各候補に proposal_impact スコア（1-10）を付けてください：\n"
         "- 10: 固有名詞・数値の誤認識で、議事録の意味が大きく変わる\n"
@@ -126,7 +127,6 @@ def _build_detection_prompt(
         "- 「○○については別途」「この話はまた」と先送りされた論点（＝この場で答えは決まっておらず、"
         "相原に聞いても確定した回答は得られないため抽出しない）\n"
         "- 下記の既知情報に該当するもの\n"
-        f"{knowledge_block}\n"
         "\n【出力形式】\n"
         "JSON配列のみを出力してください。説明文・前置き・マークダウンのコードブロックは不要です。\n"
         "各要素は以下のフィールドを持つ：\n"
@@ -145,6 +145,7 @@ def _build_detection_prompt(
         "文字起こしの正確性に関係ない候補は1件も含めない。"
     )
 
+    variable_parts.append(knowledge_block)
     if answered_items:
         confirmed_lines = []
         for item in answered_items[:30]:
@@ -153,13 +154,13 @@ def _build_detection_prompt(
             if q_text and answer:
                 confirmed_lines.append(f"- 「{q_text}」→ 回答: {answer}")
         if confirmed_lines:
-            prompt += (
+            variable_parts.append(
                 "\n\n【確認済み情報（重複質問禁止・厳守）】\n"
                 "以下は過去のQ&Aで既に確認済みの内容です。同じ内容を再度不明点として挙げないでください。\n"
                 + "\n".join(confirmed_lines)
             )
 
-    return prompt
+    return cached_system(static_prompt, "".join(variable_parts))
 
 
 def _parse_proposal_impact(value: object) -> int:

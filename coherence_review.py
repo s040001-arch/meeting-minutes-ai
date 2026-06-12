@@ -23,10 +23,11 @@ from mechanical_correct_text import PIXEL_RECOGNIZER_REPLACEMENTS
 from meeting_profile import format_meeting_profile_for_prompt, load_meeting_profile
 from pipeline_build import get_pipeline_build_info
 from recognition_batch import find_standalone_word, is_valid_coherence_question_word
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 from span_correction import apply_span_corrections_batch, build_span_fields
 
 
-COHERENCE_REVIEW_MODEL = "claude-opus-4-7"
+COHERENCE_REVIEW_MODEL = OPUS_MODEL_ID
 # 整合性レビューは全文(~20K字)に対し最大数十件の anomaly を JSON で返すため、
 # 出力 token 量が膨らみやすい。Opus は 128K まで対応するので 32K を確保して
 # truncation を防ぐ(本番ジョブ job_20260528_050751 で 8K では切り詰められて
@@ -50,7 +51,7 @@ def _load_anthropic_api_key() -> str:
     return key
 
 
-def _build_system_prompt(meeting_profile: dict | None) -> str:
+def _build_system_prompt(meeting_profile: dict | None) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
     # Phase 2: Layer 2 由来の世界モデルを inject (関連企業/人物/手法/相原氏のスタイル)
     world_block = ""
@@ -62,13 +63,11 @@ def _build_system_prompt(meeting_profile: dict | None) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"coherence_world_knowledge_fetch_failed={e!r}")
     known_patterns = ", ".join(sorted(PIXEL_RECOGNIZER_REPLACEMENTS.keys())[:30])
-    return (
+    static_prompt = (
         "あなたは議事録（逐語録）の品質管理担当です。"
         "目的は「会議で言ったことを正確な文字起こしとして残す」ことです。"
         "入力は Google Pixel レコーダーの音声認識を AI 補正した日本語議事録です。"
         "人間が読んで違和感を持つ箇所（とくに同音異義語の誤変換）を JSON 配列で挙げてください。"
-        + profile_block
-        + world_block
         + "\n\n【検出の優先度（逐語録精度）】"
         "\n最優先: 文脈上明らかにおかしい語（E/B）。人事・研修・価格・日程の会議で頻出する同音誤変換を積極的に拾う。"
         "\n例:"
@@ -109,6 +108,7 @@ def _build_system_prompt(meeting_profile: dict | None) -> str:
         "\n- low: 候補が複数 / 固有名詞で確信が持てない / 推定不能"
         "\n\n違和感が無ければ空配列 [] を返してください。"
     )
+    return cached_system(static_prompt, profile_block + world_block)
 
 
 def _extract_text_from_anthropic(resp) -> str:
@@ -215,7 +215,7 @@ def _call_opus_for_anomalies(text: str, meeting_profile: dict | None) -> list[di
     system_prompt = _build_system_prompt(meeting_profile)
     # 全文渡し。安全のため60k字を上限(本案件は約2万字なので余裕)
     payload_text = text if len(text) <= 60_000 else text[:60_000]
-    # claude-opus-4-7 は temperature/assistant prefill を受け付けない (deprecated)。
+    # Opus 4.8 は temperature/assistant prefill を受け付けない。
     # system prompt で「JSON 配列のみ」を強く要求し、robust parser でフェンス等を除去する。
     resp = client.messages.create(
         model=COHERENCE_REVIEW_MODEL,

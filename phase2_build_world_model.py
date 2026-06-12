@@ -54,8 +54,10 @@ from world_knowledge_store import (
     world_store_enabled,
 )
 
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
+
 SONNET_MODEL = "claude-sonnet-4-20250514"
-OPUS_MODEL = "claude-opus-4-7"
+OPUS_MODEL = OPUS_MODEL_ID
 SUMMARIZE_MAX_TOKENS = 4000
 SUMMARIZE_TIMEOUT_SEC = 180
 SYNTHESIZE_MAX_TOKENS = 32000
@@ -126,7 +128,7 @@ def _call_sonnet_summarize(text: str, doc_meta: dict) -> dict[str, Any]:
         max_tokens=SUMMARIZE_MAX_TOKENS,
         temperature=0,
         timeout=SUMMARIZE_TIMEOUT_SEC,
-        system=_build_summarize_system_prompt(),
+        system=cached_system(_build_summarize_system_prompt()),
         messages=[
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             {"role": "assistant", "content": "{"},
@@ -266,7 +268,7 @@ def _call_opus_synthesize(summaries: list[dict], existing_memos: list[str]) -> d
         model=OPUS_MODEL,
         max_tokens=SYNTHESIZE_MAX_TOKENS,
         timeout=SYNTHESIZE_TIMEOUT_SEC,
-        system=_build_synthesize_system_prompt(),
+        system=cached_system(_build_synthesize_system_prompt()),
         messages=[{"role": "user", "content": payload_text}],
     )
     parts = []

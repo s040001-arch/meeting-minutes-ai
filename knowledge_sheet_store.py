@@ -2,6 +2,8 @@ import json
 import os
 
 import anthropic
+
+from anthropic_prompt_cache import cached_system
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -259,7 +261,7 @@ def _merge_knowledge_memos_with_claude(
     model: str = KNOWLEDGE_UPDATER_MODEL,
 ) -> dict:
     client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
-    system_prompt = (
+    static_prompt = (
         "あなたは議事録AIの再利用ナレッジ管理アシスタントです。"
         "入力として、既存のナレッジメモ一覧と、今回ユーザーに確認した質問文、回答文が与えられます。"
         "目的は、今回の回答にジョブ横断で再利用価値があるかを判断し、"
@@ -271,6 +273,7 @@ def _merge_knowledge_memos_with_claude(
         "出力は JSON オブジェクトのみ。"
         '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
     )
+    system_prompt = cached_system(static_prompt)
     payload = {
         "existing_knowledge": existing_memos,
         "question_text": question_text,
@@ -317,7 +320,7 @@ def _merge_knowledge_memos_with_all_answers(
             f"\n\n【今回の会議コンテキスト】顧客: {customer or '不明'} / 議題: {topic or '不明'}"
             "\nこの会議文脈に紐づく再利用価値のある知識を優先的に統合してください。"
         )
-    system_prompt = (
+    static_prompt = (
         "あなたは議事録AIの再利用ナレッジ管理アシスタントです。"
         "入力として、既存のナレッジメモ一覧と、今回のジョブで蓄積された複数の質問・回答ペアが与えられます。"
         "目的は、各回答にジョブ横断で再利用価値があるかを判断し、"
@@ -326,10 +329,10 @@ def _merge_knowledge_memos_with_all_answers(
         "会議固有の一時的な yes/no 回答や、その場限りの数字確認のように再利用価値が低いものは追加しないでください。"
         "一方で、用語説明、役割定義、社内固有の呼称、サービス説明、関係性の説明などは蓄積対象にしてください。"
         "既存メモの意味が変わらない範囲で、より自然で再利用しやすい表現に統合して構いません。"
-        + profile_hint
-        + "\n出力は JSON オブジェクトのみ。"
+        "\n出力は JSON オブジェクトのみ。"
         '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
     )
+    system_prompt = cached_system(static_prompt, profile_hint)
     qa_pairs = [
         {
             "question": str(a.get("question_text") or "").strip(),
