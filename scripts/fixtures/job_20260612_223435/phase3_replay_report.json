@@ -1,0 +1,198 @@
+{
+  "job": "job_20260612_223435",
+  "routing_replay_on_original_30": {
+    "legacy_questions": 27,
+    "phase3_routing_questions": 16,
+    "phase3_tag_only_low": 12,
+    "question_words": [
+      {
+        "word": "早く若い人",
+        "confidence": "medium",
+        "candidate": "その若い人"
+      },
+      {
+        "word": "発見とか契約",
+        "confidence": "medium",
+        "candidate": "派遣とか契約"
+      },
+      {
+        "word": "1年ください",
+        "confidence": "high",
+        "candidate": "1分ください"
+      },
+      {
+        "word": "ケースしたり",
+        "confidence": "medium",
+        "candidate": "ケースがあったり"
+      },
+      {
+        "word": "籍としては",
+        "confidence": "medium",
+        "candidate": "狙いとしては"
+      },
+      {
+        "word": "ネストは後回し",
+        "confidence": "medium",
+        "candidate": ""
+      },
+      {
+        "word": "確かまりましたね",
+        "confidence": "medium",
+        "candidate": "承知しました"
+      },
+      {
+        "word": "演習2",
+        "confidence": "medium",
+        "candidate": ""
+      },
+      {
+        "word": "白いな",
+        "confidence": "medium",
+        "candidate": "近いな"
+      },
+      {
+        "word": "嬉しく1時間",
+        "confidence": "medium",
+        "candidate": ""
+      },
+      {
+        "word": "演習1問",
+        "confidence": "medium",
+        "candidate": "演習1"
+      },
+      {
+        "word": "両手させていただきます",
+        "confidence": "medium",
+        "candidate": "完了させていただきます"
+      },
+      {
+        "word": "方の味だ",
+        "confidence": "medium",
+        "candidate": ""
+      },
+      {
+        "word": "朝にされる",
+        "confidence": "medium",
+        "candidate": "当てられる"
+      },
+      {
+        "word": "10倍ぐらい",
+        "confidence": "medium",
+        "candidate": "1.5倍ぐらい"
+      },
+      {
+        "word": "小さいAさん",
+        "confidence": "medium",
+        "candidate": "G3/A3"
+      }
+    ],
+    "tag_only_words": [
+      "任せていこう",
+      "万歳",
+      "全部品",
+      "できないかな",
+      "切れる",
+      "かかってる",
+      "吉田さん",
+      "9月のですか",
+      "85万円",
+      "58万円",
+      "値下げしないから",
+      "こう力だからな"
+    ],
+    "auto_fix": [
+      "プレイマネジメント"
+    ]
+  },
+  "filler_on_original_30": [
+    "任せていこう",
+    "できないかな",
+    "切れる",
+    "かかってる",
+    "こう力だからな"
+  ],
+  "new_opus_detect": {
+    "total_anomalies": 28,
+    "medium": 11,
+    "low": 17,
+    "questions": 10,
+    "question_words": [
+      {
+        "word": "早く若い人",
+        "confidence": "medium",
+        "candidate": "その若い人はあれですか？中途採用だけじゃなくて"
+      },
+      {
+        "word": "発見とか契約",
+        "confidence": "medium",
+        "candidate": "もともと派遣とか契約。あと障害者対応とかそこら辺"
+      },
+      {
+        "word": "籍としては",
+        "confidence": "medium",
+        "candidate": "演習の内容になります。で、あの狙いとしては当然受講者の方が"
+      },
+      {
+        "word": "確かまりましたね",
+        "confidence": "medium",
+        "candidate": "シンプルかなというところではありますね。シンプルでございます。決まりましたね"
+      },
+      {
+        "word": "嬉しく1時間",
+        "confidence": "medium",
+        "candidate": ""
+      },
+      {
+        "word": "両手させていただきます",
+        "confidence": "medium",
+        "candidate": "では一旦、事前課題に関しては終了させていただきます"
+      },
+      {
+        "word": "方の味だ",
+        "confidence": "medium",
+        "candidate": "打ち合わせもちょっとまず開催のきっかけとなった方針だという形に"
+      },
+      {
+        "word": "10倍ぐらい",
+        "confidence": "medium",
+        "candidate": "27万。1.5倍ぐらいの金額、1.5倍ぐらいですね"
+      },
+      {
+        "word": "朝にされる",
+        "confidence": "medium",
+        "candidate": "予定が空いてる人が当てられるってことすか？"
+      },
+      {
+        "word": "小さいAさん",
+        "confidence": "medium",
+        "candidate": "2クラスになるのが3年目とG3/A3のそうですね"
+      }
+    ],
+    "tag_only_words": [
+      "任せていこう",
+      "全部品",
+      "できないかな",
+      "切れる",
+      "かかってる",
+      "ケースしたり",
+      "吉田さん",
+      "後回し",
+      "演習2",
+      "白いな",
+      "演習1問",
+      "9月のですか",
+      "85万円",
+      "値下げしないから",
+      "58万円",
+      "こう力だからな",
+      "育ったりします"
+    ],
+    "fillers_detected": [
+      "任せていこう",
+      "できないかな",
+      "切れる",
+      "かかってる",
+      "こう力だからな"
+    ]
+  }
+}
