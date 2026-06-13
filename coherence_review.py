@@ -3,8 +3,9 @@
 - 入力: merged_transcript_ai.txt 全文 + meeting_profile + PIXEL辞書(参考)
 - 出力: transcript_anomalies.json
 - high+auto_fixable: 自動置換 → auto_corrections.json
-- medium: unknown_points.json に副キュー (source=coherence_review) として追加
-- low/medium: 該当箇所に [要確認] タグ付与
+- medium (+ high で auto_fix 不可): unknown_points.json 副キュー → LINE 質問
+- low: [要確認] タグのみ（質問キューには入れない）
+- medium/low: 該当箇所に [要確認] タグ付与
 
 Step 4.3 のチャンクごと補正では拾えない違和感(造語/意味不明語/破綻箇所)を、
 全文一括で Opus に読ませて検出する。失敗してもパイプラインは止めない設計。
@@ -68,44 +69,56 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "目的は「会議で言ったことを正確な文字起こしとして残す」ことです。"
         "入力は Google Pixel レコーダーの音声認識を AI 補正した日本語議事録です。"
         "人間が読んで違和感を持つ箇所（とくに同音異義語の誤変換）を JSON 配列で挙げてください。"
-        + "\n\n【検出の優先度（逐語録精度）】"
-        "\n最優先: 文脈上明らかにおかしい語（E/B）。人事・研修・価格・日程の会議で頻出する同音誤変換を積極的に拾う。"
+        + "\n\n【検出方針（Phase 3）】"
+        "\n- medium（ユーザー確認・質問対象）は**高精度を最優先**。確信が持てないものは medium にしない。"
+        "\n- low（タグのみ・質問しない）は recall 用。不確実・もっともらい・口語的な違和感は low に落とす。"
+        "\n- 取りこぼし防止のため low で拾ってよいが、medium は慎重に付ける。"
+        "\n\n【検出してはいけないもの（誤変換として扱わない）】"
+        "\n- 口語フィラー・相槌・言い淀み・比喩・会話上自然な疑問形"
+        "\n  例: 『切れる』『かかってる』『こう力だからな』『できないかな』『任せていこう』"
+        "\n- 文脈上ふつうに成立する数値・固有名詞・一般語"
+        "\n  例: 会議で実際に言及された『85万円』『58万円』『演習2』『吉田さん』"
+        "\n  → positive な誤変換根拠（同音異義・文脈不整合・意味不通）が無ければ出力しない"
+        "\n\n【検出の優先度（逐語録精度）】"
+        "\n最優先: 文脈上明らかにおかしい語（E/B）。人事・研修・価格・日程の会議で頻出する同音誤変換。"
         "\n例:"
-        "\n- 『泳ぐ』『泳いで』→ 引き継ぎ文脈では『任せ』『任せて』"
-        "\n- 『学部』→ 人材の文脈では『若い』"
-        "\n- 『演習さん』→ 『演習2』『演習二』"
-        "\n- 『ベッド』→ 事前課題の文脈では『ベース』"
+        "\n- 『朝にされる』→ 人員配置文脈では『当てられる』『アサインされる』"
+        "\n- 『方の味だ』→ 冒頭文脈では『方針だ』『アジェンダ』"
+        "\n- 『両手させていただきます』→ 『終了／完了させていただきます』"
+        "\n- 『小さいAさん』→ 階層名『G3/A3』『昇格者』"
+        "\n- 『10倍ぐらい』→ 直前の計算文脈では『1.5倍ぐらい』"
+        "\n- 『早く若い人』→ 『その若い人』"
+        "\n- 『発見とか契約』→ 『派遣とか契約』"
         "\n- 『全部品』→ 会社名・製品名の誤変換の疑い"
-        "\n- 『ネストは奥』→ 『ネストは置く』『ネストは後回し』"
-        "\n- 『小さいA』→ 階層名『昇格者』『G3』等"
-        "\n- 『嬉しく1時間』等、意味が通らないフレーズ全体"
-        "\n- 『新交代』→ 『失礼します』『お待ちください』"
+        "\n- 『嬉しく1時間』等、意味が通らないフレーズ"
         "\n\n【検出対象カテゴリ】"
         "\nA. 明らかな造語(同一会議内に類似語が既出)"
-        "\nB. 文脈と整合しない語・意味不明語（上記例を含む）"
+        "\nB. 文脈と整合しない語・意味不明語"
         "\nC. 文として崩壊している箇所"
         "\nD. 助詞・指示語の誤認識"
-        "\nE. 同音異義語の選択ミス（A/B と同等に積極的に検出）"
+        "\nE. 同音異義語の選択ミス"
         "\n\n【検出量】"
-        "\n- 長文（8,000字超）では、見つかった違和感を最大30件まで列挙する（取りこぼしより過検出を優先）。"
-        "\n- 1件も見逃さないよう、同音誤変換を中心に丁寧に走査する。"
+        "\n- medium は原則 15 件以下（質問品質優先）。"
+        "\n- low は追加で最大 15 件まで（目視用タグ）。合計 30 件上限。"
         "\n\n【既知の Pixel 誤変換パターン(機械補正済み、再検出不要)】"
         f"\n{known_patterns}"
         "\n\n【出力スキーマ】JSON 配列のみを返すこと。説明文・コードフェンス・前置きは一切付けない。"
         "各要素は次のキーを持つ:"
-        '\n{"context":"前後10-20字を含む引用",'
-        '"anomaly_word":"違和感のある語",'
+        '\n{"context":"前後10-20字を含む引用（後方互換・短い引用）",'
+        '"anomaly_word":"違和感の中心語（後方互換・必須）",'
         '"anomaly_type":"A|B|C|D|E",'
-        '"estimated_correction":"推定正解語(文脈から最もありそうな1つ。無ければ空文字)",'
+        '"estimated_correction":"推定正解語・短い候補（1〜15字程度。後方互換・質問に提示する語）",'
+        '"span_text":"異常を含む最小の文脈スパン（前後含む、20-80字程度）",'
+        '"span_corrected":"span_text 全体を修正した後のスパン（全文。estimated_correction を含む）",'
         '"confidence":"high|medium|low",'
         '"auto_fixable":true/false,'
-        '"reason":"判定根拠を簡潔に"}'
-        "\n\n【確信度の判定基準】"
+        '"reason":"判定根拠を1文（50字以内）"}'
+        "\n\n【確信度の判定基準（厳格化）】"
         "\n- high (auto_fixable=true): 推定正解語が同一テキスト内に既出 かつ "
-        "音声認識誤りであることが明白"
-        "\n- medium: 文脈から推定正解が1つに絞れる（同テキスト未出でもよい）。"
-        "ユーザー確認用の候補として必ず列挙する"
-        "\n- low: 候補が複数 / 固有名詞で確信が持てない / 推定不能"
+        "音声認識誤りであることが明白。span_corrected を必ず埋める。"
+        "\n- medium: **具体的な単一候補**がある、または文脈不整合が明確で span_corrected が定まる。"
+        "ユーザーへの質問対象。**口語・数値のみの違和感は medium にしない**。"
+        "\n- low: 候補が複数 / 不確実 / もっともらい / フィラー的 / 固有名詞で確信が持てない"
         "\n\n違和感が無ければ空配列 [] を返してください。"
     )
     return cached_system(static_prompt, profile_block + world_block)
@@ -267,6 +280,10 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
     estimated = str(item.get("estimated_correction") or "").strip()
+    llm_span_corrected = str(item.get("span_corrected") or "").strip()
+    # estimated が空のとき、短い span_corrected のみ候補語として流用（長文スパンは不可）
+    if not estimated and llm_span_corrected and len(llm_span_corrected) <= 40:
+        estimated = llm_span_corrected
     anomaly_type = str(item.get("anomaly_type") or "B").strip().upper()
     anomaly_type = anomaly_type[:1] if anomaly_type else "B"
 
@@ -280,11 +297,12 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
     span_fields = build_span_fields(
         text,
         word=word,
-        estimated=estimated,
+        estimated=estimated or llm_span_corrected,
         hint_pos=pos,
         context=ctx,
         llm_span_text=str(item.get("span_text") or "").strip(),
     )
+    span_corrected = llm_span_corrected or str(span_fields.get("span_corrected") or estimated or "").strip()
     span_start = int(span_fields.get("span_start") or -1)
     auto_fixable = (
         confidence == "high"
@@ -309,7 +327,7 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
         "span_text": span_fields.get("span_text") or "",
         "span_start": span_fields.get("span_start", -1),
         "span_end": span_fields.get("span_end", -1),
-        "span_corrected": span_fields.get("span_corrected") or estimated,
+        "span_corrected": span_corrected,
     }
 
 
@@ -382,23 +400,24 @@ def _apply_review_tags(text: str, anomalies: list[dict]) -> str:
 
 
 def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
-    """high/medium/low 確信度を unknown_points 形式に変換(FIFO 副キュー扱い)。
+    """medium + high(non-auto_fix) を unknown_points 副キューへ変換。
 
     high+auto_fixable は既に置換済みなので含めない。
-    それ以外(high で auto_fixable=false / medium / low)は質問対象に含める。
-    low も含めることで、本文に [要確認] タグが付くだけで放置されていた
-    固有名詞・数値の音声認識ゆれを、相原氏に確認できるようにする。
-    ただし以下は LINE 質問として無意味なため除外する:
+    **low は質問キューに入れない**（[要確認] タグのみ。目視用）。
+    除外条件:
       - anomaly_word が空
-      - word が長すぎる(30字超 = 文崩壊レベルの断片。単語確認の質問に不向き)
-      - high なのに推定正解が空(『よいしょ!』等の口語の false-positive)
+      - word が 3 字未満 / 30 字超
+      - high なのに推定正解が空
+      - confidence=low
     """
     out: list[dict] = []
     for an in anomalies:
         conf = an.get("confidence")
         if conf == "high" and an.get("auto_fixable"):
             continue
-        if conf not in {"high", "medium", "low"}:
+        if conf == "low":
+            continue
+        if conf not in {"high", "medium"}:
             continue
         word = (an.get("anomaly_word") or "").strip()
         if not word:
@@ -409,8 +428,11 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
         if len(word) > 30:
             continue
         # high なのに推定正解が空なものは false-positive の可能性が高い(『よいしょ!』等の口語)
-        if conf == "high" and not str(an.get("estimated_correction") or "").strip():
+        if conf == "high" and not str(
+            an.get("estimated_correction") or an.get("span_corrected") or ""
+        ).strip():
             continue
+        span_corrected = str(an.get("span_corrected") or an.get("estimated_correction") or "").strip()
         out.append(
             {
                 "type": COHERENCE_TYPE,
@@ -419,7 +441,9 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
                 "context": str(an.get("context") or "").strip()[:220],
                 "anomaly_word": word,
                 "anomaly_id": an.get("anomaly_id"),
-                "estimated_correction": an.get("estimated_correction") or "",
+                "estimated_correction": an.get("estimated_correction") or span_corrected,
+                "span_text": str(an.get("span_text") or "").strip(),
+                "span_corrected": span_corrected,
                 "confidence": conf,
                 "reason": an.get("reason", ""),
                 "anomaly_type": an.get("anomaly_type", "B"),

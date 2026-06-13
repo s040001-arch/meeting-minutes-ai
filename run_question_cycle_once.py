@@ -382,37 +382,42 @@ def _extract_snippet_around_word(
 
 
 def _build_coherence_question_text(item: dict, *, full_text: str = "") -> str:
-    """整合性レビュー由来の質問。前後文脈＋該当語を LINE だけで判断できる形にする。"""
+    """整合性レビュー由来の質問。span 文脈＋候補提示＋削除オプション。"""
     word = str(item.get("anomaly_word") or "").strip()
     if not word:
         word = "該当箇所"
-    pos_raw = item.get("context_position_in_transcript", -1)
-    try:
-        pos = int(pos_raw)
-    except (TypeError, ValueError):
-        pos = -1
-
-    snippet = _extract_snippet_around_word(full_text, word, pos)
-    if not snippet:
+    candidate = str(item.get("estimated_correction") or "").strip()
+    if not candidate:
+        span_corr = str(item.get("span_corrected") or "").strip()
+        if span_corr and len(span_corr) <= 40 and "。" not in span_corr:
+            candidate = span_corr
+    display = str(item.get("span_text") or "").strip()
+    if not display:
+        pos_raw = item.get("context_position_in_transcript", -1)
+        try:
+            pos = int(pos_raw)
+        except (TypeError, ValueError):
+            pos = -1
+        display = _extract_snippet_around_word(full_text, word, pos)
+    if not display:
         stored = str(item.get("context") or item.get("text") or "").strip()
-        snippet = stored if stored else word
-        if len(snippet) > COHERENCE_SNIPPET_MAX:
-            snippet = snippet[: COHERENCE_SNIPPET_MAX - 1].rstrip() + "…"
+        display = stored if stored else word
+        if len(display) > COHERENCE_SNIPPET_MAX:
+            display = display[: COHERENCE_SNIPPET_MAX - 1].rstrip() + "…"
+    if word in display and "【" not in display:
+        display = display.replace(word, f"【{word}】", 1)
 
-    if word in snippet:
-        display = snippet.replace(word, f"【{word}】", 1)
+    if candidate:
+        question = (
+            f"「{display}」は「{candidate}」では？ "
+            "合っていれば「正しい」、違えば正しい語、議事録に不要なら「削除」と返信してください。"
+        )
     else:
-        display = snippet
-
-    lines = [
-        "議事録の以下の箇所について確認させてください。",
-        "",
-        display,
-        "",
-        f"「{word}」が音声認識誤りの可能性があります。",
-        "正しい表記を教えてください（合っていれば OK）。",
-    ]
-    return "\n".join(lines)
+        question = (
+            f"「{display}」はこの文脈に合いません。"
+            "正しい語があれば返信、不要なら「削除」と返信してください。"
+        )
+    return question
 
 
 def _make_coherence_question_payload(
