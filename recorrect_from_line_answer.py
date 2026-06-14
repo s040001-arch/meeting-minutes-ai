@@ -4,6 +4,7 @@ import os
 import re
 
 from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
+from correction_audit import append_audit_entries, build_manual_delete_audit_entry
 from job_context import load_job_context
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
@@ -304,6 +305,10 @@ def _handle_coherence_single_answer(
             )
             if deleted:
                 applied = [deleted]
+                _record_manual_delete_audit(
+                    job_dir=os.path.join(input_root, job_id),
+                    applied=[{**deleted, "anomaly_id": su.get("anomaly_id", "")}],
+                )
         print(
             f"recorrect_incorporate_mode=coherence_deferred "
             f"remaining={remaining} action={parsed_one.get('action')} "
@@ -312,6 +317,10 @@ def _handle_coherence_single_answer(
     else:
         all_parsed = _build_parsed_from_answered_coherence(job_id, input_root)
         updated, applied = apply_batch_corrections(base_text, all_parsed)
+        _record_manual_delete_audit(
+            job_dir=os.path.join(input_root, job_id),
+            applied=applied,
+        )
         learned = _persist_batch_corrections_to_learned_dict(
             job_id=job_id, applied=applied, base_text=base_text
         )
@@ -323,6 +332,22 @@ def _handle_coherence_single_answer(
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(updated)
+
+
+def _record_manual_delete_audit(*, job_dir: str, applied: list[dict]) -> None:
+    entries = []
+    for item in applied:
+        if str(item.get("action") or "").strip().lower() != "delete":
+            continue
+        entries.append(
+            build_manual_delete_audit_entry(
+                anomaly_id=str(item.get("anomaly_id") or ""),
+                before=str(item.get("before") or ""),
+                word=str(item.get("word") or ""),
+            )
+        )
+    if entries:
+        append_audit_entries(job_dir, entries)
 
 
 def _is_recognition_batch_question(question_result: dict | None) -> bool:

@@ -25,6 +25,15 @@ from meeting_profile import format_meeting_profile_for_prompt, load_meeting_prof
 from pipeline_build import get_pipeline_build_info
 from recognition_batch import find_standalone_word, is_valid_coherence_question_word
 from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
+from correction_audit import (
+    CORRECTION_AUDIT_LOG_FILENAME,
+    apply_conservative_auto_deletes,
+    merge_audit_entries,
+    normalize_content_nature,
+    normalize_materiality,
+    resolve_coherence_auto_delete_mode,
+    write_audit_log,
+)
 from span_correction import apply_span_corrections_batch, build_span_fields
 
 
@@ -38,7 +47,6 @@ COHERENCE_REVIEW_TIMEOUT_SEC = 900
 
 TRANSCRIPT_ANOMALIES_FILENAME = "transcript_anomalies.json"
 AUTO_CORRECTIONS_FILENAME = "auto_corrections.json"
-CORRECTION_AUDIT_LOG_FILENAME = "correction_audit_log.json"
 UNKNOWN_POINTS_FILENAME = "unknown_points.json"
 
 COHERENCE_TYPE = "coherence_review"
@@ -111,8 +119,17 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         '"span_text":"異常を含む最小の文脈スパン（前後含む、20-80字程度）",'
         '"span_corrected":"span_text 全体を修正した後のスパン（全文。estimated_correction を含む）",'
         '"confidence":"high|medium|low",'
+        '"materiality":"high|low",'
+        '"content_nature":"substantive|filler|backchannel|hesitation|metaphor|colloquial|interjection|unknown",'
         '"auto_fixable":true/false,'
         '"reason":"判定根拠を1文（50字以内）"}'
+        "\n\n【材料性（materiality）】"
+        "\n- high: 決定・事実・論点・アクション・価格・日程・固有名詞など会議の内容に関わる"
+        "\n- low: フィラー・相槌・言い淀み・比喩・会話のノイズ（削除候補になり得るが内容ではない）"
+        "\n\n【content_nature 判定】"
+        "\n- substantive: 会議内容になり得る（**自動削除禁止**）"
+        "\n- filler/backchannel/hesitation/metaphor/colloquial/interjection: 非内容語"
+        "\n- unknown: 判断不能 → materiality=high 扱いに近い慎重さ（**自動削除禁止**）"
         "\n\n【確信度の判定基準（厳格化）】"
         "\n- high (auto_fixable=true): 推定正解語が同一テキスト内に既出 かつ "
         "音声認識誤りであることが明白。span_corrected を必ず埋める。"
@@ -323,6 +340,8 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
         "confidence": confidence,
         "auto_fixable": auto_fixable,
         "reason": str(item.get("reason") or "").strip(),
+        "materiality": normalize_materiality(item.get("materiality")),
+        "content_nature": normalize_content_nature(item.get("content_nature")),
         "context_position_in_transcript": pos if pos >= 0 else span_start,
         "span_text": span_fields.get("span_text") or "",
         "span_start": span_fields.get("span_start", -1),
@@ -332,30 +351,8 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
 
 
 def _write_correction_audit_log(path: str, entries: list[dict]) -> None:
-    """Persist high-confidence auto_fix audit entries (correct/delete only, no keep)."""
-    audit_rows: list[dict] = []
-    for entry in entries:
-        action = str(entry.get("action") or "correct").strip().lower()
-        if action not in {"correct", "delete"}:
-            continue
-        audit_rows.append(
-            {
-                "anomaly_id": entry.get("anomaly_id"),
-                "action": action,
-                "before": entry.get("before"),
-                "after": entry.get("after"),
-                "confidence": entry.get("confidence"),
-                "reason": entry.get("reason", ""),
-                "span_start": entry.get("span_start"),
-                "span_end": entry.get("span_end"),
-                "span_text": entry.get("span_text") or "",
-                "span_corrected": entry.get("span_corrected") or entry.get("after") or "",
-            }
-        )
-    if not audit_rows:
-        return
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(audit_rows, f, ensure_ascii=False, indent=2)
+    """Persist audit entries (correct/delete only, no keep)."""
+    write_audit_log(path, entries)
 
 
 def _apply_high_auto_fixes(
@@ -520,7 +517,13 @@ def run_coherence_review(job_dir: str) -> dict:
     fixed_text, auto_entries = _apply_high_auto_fixes(
         text, enriched, auto_log_path, audit_log_path
     )
-    tagged_text = _apply_review_tags(fixed_text, enriched)
+    delete_mode = resolve_coherence_auto_delete_mode()
+    deleted_text, delete_entries = apply_conservative_auto_deletes(
+        fixed_text, enriched, mode=delete_mode
+    )
+    if delete_entries:
+        merge_audit_entries(audit_log_path, delete_entries)
+    tagged_text = _apply_review_tags(deleted_text, enriched)
     if tagged_text != text:
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(tagged_text)
@@ -542,12 +545,16 @@ def run_coherence_review(job_dir: str) -> dict:
         "medium_count": sum(1 for a in enriched if a.get("confidence") == "medium"),
         "low_count": sum(1 for a in enriched if a.get("confidence") == "low"),
         "auto_fixed_count": len(auto_entries),
+        "auto_delete_candidates": len(delete_entries),
+        "auto_delete_mode": delete_mode,
         "coherence_question_candidates": len(coherence_points),
         "added_to_unknown_points": added_to_unknowns,
         "learned_dict_added": learned_added,
         "anomalies_path": anomalies_path,
         "auto_corrections_path": auto_log_path if auto_entries else None,
-        "correction_audit_log_path": audit_log_path if auto_entries else None,
+        "correction_audit_log_path": audit_log_path
+        if (auto_entries or delete_entries)
+        else None,
     }
 
 

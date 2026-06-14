@@ -9,6 +9,7 @@ import anthropic
 import httpx
 
 from anthropic_prompt_cache import cached_system
+from correction_audit import append_audit_section_to_structured_md
 from meeting_profile import load_meeting_profile, resolve_display_title
 from repo_env import load_dotenv_local
 
@@ -324,6 +325,8 @@ def main() -> None:
         job_id=args.job_id,
         participants=participants,
     )
+
+    output_text = append_audit_section_to_structured_md(output_text, job_dir)
 
     out_path = args.output or os.path.join(
         args.input_root, args.job_id, "minutes_structured.md"
