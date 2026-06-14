@@ -1,0 +1,296 @@
+{
+  "counts": {
+    "auto_delete_candidate": 4,
+    "question": 17,
+    "tag_only": 8,
+    "auto_fix": 1
+  },
+  "question_queue_count": 16,
+  "buckets": {
+    "auto_delete_candidate": [
+      {
+        "word": "万歳",
+        "confidence": "low",
+        "materiality": "low",
+        "content_nature": "interjection",
+        "reason": "人員増加で楽になるという文脈。『万歳』は誤変換の可能性",
+        "span_text": "あの人が増えて万歳なのかなと思ったら",
+        "estimated_correction": "楽"
+      },
+      {
+        "word": "切れる",
+        "confidence": "low",
+        "materiality": "low",
+        "content_nature": "metaphor",
+        "reason": "関わりが減る文脈で『切れる』は妥当だが念のため確認",
+        "span_text": "…ちょっと減ってしまうのかなと、若干心配をしたんですが、これで切れるっていうこと？すごい冷たい表現ですね。ま、かかってる？大丈夫…",
+        "estimated_correction": "",
+        "restore_text": "切れる",
+        "delete_span": "切れる"
+      },
+      {
+        "word": "かかってる",
+        "confidence": "low",
+        "materiality": "low",
+        "content_nature": "backchannel",
+        "reason": "文意が崩壊しており聞き取り誤りの可能性",
+        "span_text": "…すが、これで切れるっていうこと？すごい冷たい表現ですね。ま、かかってる？大丈夫です。引き続きよろしくお願いいたします。ということで…",
+        "estimated_correction": "",
+        "restore_text": "かかってる",
+        "delete_span": "かかってる"
+      },
+      {
+        "word": "こう力だからな",
+        "confidence": "low",
+        "materiality": "low",
+        "content_nature": "colloquial",
+        "reason": "文として崩壊し意味不明",
+        "span_text": "…けど、ちょっとその、よろしくお願いします。え、これなですか？こう力だからな。ちょっと頑張ってもらってたところが、最近足かせになるな。逆…",
+        "estimated_correction": "",
+        "restore_text": "こう力だからな",
+        "delete_span": "こう力だからな"
+      }
+    ],
+    "question": [
+      {
+        "word": "早く若い人",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "『学部』→『若い』類似の誤変換文脈。『早く』が意味不明で『その』等の可能性",
+        "span_text": "…はなるってことですね。なかなか、それもハードそうですね。\n\n早く若い人はあれですか？中途採用だけじゃなくて、新卒とかそういうのも全…",
+        "estimated_correction": "その若い人"
+      },
+      {
+        "word": "発見とか契約",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "採用・人事文脈で『発見』は不自然。『派遣』の誤変換と推定",
+        "span_text": "…っていうか、つい最近からキャリアを始めたんですけど、もともと発見とか契約。\n\nあと障害者対応とかそこら辺をやってたんですけど、この度…",
+        "estimated_correction": "派遣とか契約"
+      },
+      {
+        "word": "毎週",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "子会社・グループ化の文脈で『毎週』は意味不明。『会社』の誤変換と推定",
+        "span_text": "なんか作られた、毎週みたいな感じがあったので",
+        "estimated_correction": "会社"
+      },
+      {
+        "word": "1年ください",
+        "confidence": "high",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "その場で認識共有する文脈。『1年』は明白な誤変換で『1分』が正解",
+        "span_text": "…うですか？ごめんなさい、俺、森川さんに何も伝えてなかったので1年ください。なので、はい、これで今認識していただいたかと思います。はい…",
+        "estimated_correction": "1分ください"
+      },
+      {
+        "word": "ケースしたり",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "文として崩壊。『ケースがあったり』等の誤認識",
+        "span_text": "…には内容は全く変わらず、あの出題文はこんな感じで、あの2つのケースしたりですね。あの、ちょっと登場人物のやり取りをあのしているような…",
+        "estimated_correction": "ケースがあったり"
+      },
+      {
+        "word": "籍としては",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "受講者の目的醸成を説明する文脈で『籍』は意味不明。『狙い』等の誤変換",
+        "span_text": "…いてきていただくというのが、ま演習の内容になります。で、あの籍としては当然受講者の方が、ま研修に参加する前に、あの何に困ってるのか…",
+        "estimated_correction": "狙いとしては"
+      },
+      {
+        "word": "ネストは後回し",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "『ネストは奥』→『ネストは後回し』の既知パターンに合致。文脈整合し妥当",
+        "span_text": "…の配信っていうところはまできなくなるんですが、ま一旦ちょっとネストは後回しだなということであれば、ま一旦こっちを置いて、あの使わずに、…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "確かまりましたね",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "文として崩壊。『承知しました』『決まりましたね』等の誤認識",
+        "span_text": "…ンプルかなというところではありますね。シンプルでございます。確かまりましたね。はい、ちょっとなのでそうですね。一旦、あのこちらのeラーニ…",
+        "estimated_correction": "承知しました"
+      },
+      {
+        "word": "演習2",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "『演習さん』→『演習2』の既知パターン。後に演習1・2・3が登場し整合",
+        "span_text": "…ばいいのかな？っていう感じになりそうだなって。もちろん、あの演習2のところに関しては、期待することに関してはそういった指導員に…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "白いな",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "業務が自分に直結する文脈で『白い』は意味不明。『近い』等の誤変換",
+        "span_text": "…、なんとなくイメージ、自分に対しての部分に直結する、ちょっと白いなと、そうですね、うって感じなんですけど、ちょっとこれまたお手…",
+        "estimated_correction": "近いな"
+      },
+      {
+        "word": "嬉しく1時間",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "意味が通らないフレーズ全体。既知の典型誤変換パターン",
+        "span_text": "…はい、ちょっとご負担をおかけしちゃう方かな？うんと、話。\n\n嬉しく1時間——で、まこう、これの意図としては、うーんと、その人の仕事が…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "演習1問",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "演習番号の文脈。『演習1問』は『演習1』の誤変換と推定",
+        "span_text": "…ら書いてお渡ししようかなと思ってまして。今のお話整理すると、演習1問にも指導員としての仕事や課題っていうよりは、普段の業務におけ…",
+        "estimated_correction": "演習1"
+      },
+      {
+        "word": "両手させていただきます",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "議題締めの文脈で『両手』は意味不明。『完了』『以上』等の誤変換",
+        "span_text": "…か？はい、ありがとうございます。では一旦、事前課題に関しては両手させていただきます。ありがとうございます。\n\nもう1つ、続いてのアジェンダって…",
+        "estimated_correction": "完了させていただきます"
+      },
+      {
+        "word": "方の味だ",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "文として崩壊。価格改定の話の導入部で意味不明",
+        "span_text": "開催のきっかけとなった方の味だという形",
+        "estimated_correction": ""
+      },
+      {
+        "word": "朝にされる",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "講師の割当文脈で『朝にされる』は意味不明。『当てられる』等の誤変換",
+        "span_text": "…の暇な人っていうのはあれですけど、ちょっと予定が空いてる人が朝にされるってことすか？完全に皆さん比較的忙しく、研修講師をさせていた…",
+        "estimated_correction": "当てられる"
+      },
+      {
+        "word": "10倍ぐらい",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "58万→85万は約1.5倍であり『10倍』は明らかに矛盾。誤変換または言い間違い",
+        "span_text": "…。いくら、27か。そうですね。27万。1.5倍ぐらいの金額、10倍ぐらいですね。\n\nパッとでかいですね。これ。\n\n本当相談させていた…",
+        "estimated_correction": "1.5倍ぐらい"
+      },
+      {
+        "word": "小さいAさん",
+        "confidence": "medium",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "『小さいA』→階層名の既知パターン。2クラスになる対象としてG3/A3研修を指すと推定",
+        "span_text": "…とで大丈夫ですかね？はいで、えっと2クラスになるのが3年目と小さいAさんのそうですね。\n\nはい、それ以外は。ですね。基本的には1クラ…",
+        "estimated_correction": "G3/A3"
+      }
+    ],
+    "tag_only": [
+      {
+        "word": "任せていこう",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "引き継ぎ文脈に整合。誤変換の可能性は低いが念のため確認",
+        "span_text": "…なるほど。どんどんはもう当初予定してた森川さんへの引き継ぎで任せていこうかなと思ってました。全部？あ、そっか。じゃあ両方見なきゃいけ…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "全部品",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "会社名・製品名の誤変換の疑い（既知パターン）。固有名詞のため確信不能",
+        "span_text": "…そういうことですか。なるほど、なるほど。ここはまた別のその、全部品っていうかな、ていうのをちょっとやって、そこが結構、あの人が…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "できないかな",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "出張帯同の文脈で指示語・文意がやや崩壊。要確認",
+        "span_text": "…る？森川さんと一緒に行ってもらわないといけなくなっちゃって。できないかな？はい。そういうことですね。まあ、ちょっともしかすると海老さ…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "吉田さん",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "後に『吉田さんのいいとこ』と再出。人名のため確信不能だが要確認",
+        "span_text": "…章が出てきて、まAさんのま後輩指導の悪いところ、ケース2では吉田さんのいいとこを上げてください、っていうので、別々であのケースの…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "9月のですか",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "前後の文脈と整合せず聞き取り誤りの可能性",
+        "span_text": "…かの方がシンプルでも、そっちの方が分かりづらいですかね？\n\n9月のですか？うんと、指導員の立場としてと、今の業務の2つを両方書くって…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "85万円",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "後の文脈と整合（定価75万＋指名料10万）。妥当だが金額の聞き取りは要確認",
+        "span_text": "…での形式でご実施させていただいた場合に、価格がですね、端的に85万円という価格で実施させていただくというのがまず今あるんですが、…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "58万円",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "現行価格として複数回出現。妥当だが金額確認推奨",
+        "span_text": "…定価の時代がありまして。で、概ね10%の割引価格を適用すると58万円という金額でちょっと実施させていただいてたんですけど、私もで…",
+        "estimated_correction": ""
+      },
+      {
+        "word": "値下げしないから",
+        "confidence": "low",
+        "materiality": "high",
+        "content_nature": "unknown",
+        "reason": "助詞・接続のやや崩れ。文意は通る",
+        "span_text": "…すよ。その講師を指名するっていうことをしてしまうと、もうその値下げしないから指名できるみたいな、そういうものに価格としてなってまして。\n…",
+        "estimated_correction": "値下げしないなら"
+      }
+    ],
+    "auto_fix": [
+      {
+        "word": "プレイマネジメント",
+        "confidence": "high",
+        "materiality": "high",
+        "content_nature": "substantive",
+        "reason": "直後に『プレマネジメント研修』と自己訂正されており誤変換が明白",
+        "span_text": "…、2年目のなったので3年目研修に、あとG3/A3研修。あと、プレイマネジメント、あ、プレマネジメント研修。合っています。ま指導員が、こうで…",
+        "estimated_correction": "プレマネジメント"
+      }
+    ]
+  },
+  "auto_delete_mode": "shadow"
+}
