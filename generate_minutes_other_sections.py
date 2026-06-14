@@ -31,7 +31,14 @@ def extract_title_and_transcript(minutes_draft_text: str) -> Tuple[str, str]:
     in_transcript = False
     for line in lines:
         if not in_transcript:
-            if line.strip() in {"## 発言録", "##発言録", "## 発言録（逐語）", "##発言録（逐語）"}:
+            if line.strip() in {
+                "## 発言録",
+                "##発言録",
+                "## 発言録（逐語）",
+                "##発言録（逐語）",
+                "## 発言録（整文）",
+                "##発言録（整文）",
+            }:
                 in_transcript = True
             continue
         transcript_lines.append(line)
@@ -40,6 +47,14 @@ def extract_title_and_transcript(minutes_draft_text: str) -> Tuple[str, str]:
     if not transcript:
         raise ValueError("minutes draft does not contain transcript section: `## 発言録`.")
     return title, transcript
+
+
+def _extract_transcript_section_label(draft_text: str) -> str:
+    for line in draft_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## 発言録"):
+            return stripped[3:].strip()
+    return "発言録（逐語）"
 
 
 def _build_minutes_system_prompt() -> str:
@@ -132,6 +147,8 @@ def _build_minutes_structured_md(
     sections: dict[str, Any],
     job_id: str,
     participants: list[str],
+    *,
+    transcript_section_label: str = "発言録（逐語）",
 ) -> str:
     agenda = _normalize_items(sections.get("agenda"))
     decisions = _normalize_items(sections.get("decisions"))
@@ -152,7 +169,7 @@ def _build_minutes_structured_md(
         f"{_format_bullets(open_issues)}\n\n"
         "## Next Action\n\n"
         f"{_format_bullets(next_actions)}\n\n"
-        "## 発言録（逐語）\n\n"
+        f"## {transcript_section_label}\n\n"
         f"{transcript}\n\n"
         "## 管理情報\n\n"
         f"job_id: {job_id}\n"
@@ -303,6 +320,7 @@ def main() -> None:
     participants = _participants_from_profile(meeting_profile)
 
     _draft_title, transcript_md = extract_title_and_transcript(draft_text)
+    section_label = _extract_transcript_section_label(draft_text)
     title = resolve_display_title(meeting_profile, job_id=args.job_id, fallback=_draft_title)
     sections = _generate_minutes_sections_with_claude(
         title=title,
@@ -323,6 +341,7 @@ def main() -> None:
         sections=sections,
         job_id=args.job_id,
         participants=participants,
+        transcript_section_label=section_label,
     )
 
     out_path = args.output or os.path.join(

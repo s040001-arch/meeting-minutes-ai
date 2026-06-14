@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from log_safety import describe_service_account_path, format_error_for_log
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -75,7 +76,9 @@ def world_store_enabled() -> bool:
 def _build_sheets_service():
     path = _service_account_json_path()
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"service account json not found: {path}")
+        raise FileNotFoundError(
+            f"service account json not found: {describe_service_account_path(path)}"
+        )
     creds = ServiceAccountCredentials.from_service_account_file(
         path,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
@@ -149,7 +152,7 @@ def load_tab(tab: str) -> list[dict[str, str]]:
             spreadsheetId=sheet_id, range=f"{tab}!A2:D"
         ).execute()
     except HttpError as e:
-        print(f"world_knowledge_load_tab_failed tab={tab} err={e!r}")
+        print(f"world_knowledge_load_tab_failed tab={tab} err={format_error_for_log(e)}")
         return []
     values = resp.get("values", [])
     out: list[dict[str, str]] = []
@@ -186,7 +189,7 @@ def load_all_world_tabs(use_cache: bool = True) -> dict[str, list[dict[str, str]
             spreadsheetId=sheet_id, ranges=ranges
         ).execute()
     except HttpError as e:
-        print(f"world_knowledge_batch_get_failed err={e!r}")
+        print(f"world_knowledge_batch_get_failed err={format_error_for_log(e)}")
         return {tab: [] for tab in WORLD_TABS}
     value_ranges = resp.get("valueRanges", [])
     out: dict[str, list[dict[str, str]]] = {tab: [] for tab in WORLD_TABS}
@@ -433,7 +436,7 @@ def get_combined_runtime_knowledge(
     try:
         all_tabs = load_all_world_tabs()
     except Exception as e:  # noqa: BLE001
-        print(f"world_knowledge_runtime_load_failed={e!r}")
+        print(f"world_knowledge_runtime_load_failed={format_error_for_log(e)}")
         return ""
     rel = fetch_relevant_world_sections(
         customer_name=customer_name,
@@ -464,7 +467,7 @@ def get_runtime_knowledge_block(
                 customer_name=customer, participants=parts, purpose=purpose,
             )
         except Exception as e:  # noqa: BLE001
-            print(f"world_knowledge_runtime_fetch_failed={e!r}")
+            print(f"world_knowledge_runtime_fetch_failed={format_error_for_log(e)}")
     if layer2_text.strip():
         return layer2_text
     # Fallback: 既存自由記述メモ(Phase 2 アーカイブ前 or Layer 2 が空)
@@ -474,7 +477,7 @@ def get_runtime_knowledge_block(
         if memos:
             return format_knowledge_for_prompt(memos)
     except Exception as e:  # noqa: BLE001
-        print(f"legacy_knowledge_fallback_failed={e!r}")
+        print(f"legacy_knowledge_fallback_failed={format_error_for_log(e)}")
     return ""
 
 

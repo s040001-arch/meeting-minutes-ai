@@ -192,6 +192,8 @@ def _validate_chunk_output(original: str, edited: str) -> bool:
         return False
     if edited.count("[要確認]") < original.count("[要確認]"):
         return False
+    if edited.count("[要確認]") > original.count("[要確認]"):
+        return False
     for token in _extract_flagged_tokens(original):
         if token in edited:
             continue

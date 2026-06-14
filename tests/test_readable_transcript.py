@@ -41,6 +41,11 @@ class SplitTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_rejects_extra_flagged_token(self) -> None:
+        original = "工場がもう桐生をかとか、あと八戸になるので。"
+        edited = "工場がもう[要確認]義理をかとか、あと八戸になるので。"
+        self.assertFalse(_validate_chunk_output(original, edited))
+
     def test_rejects_missing_flagged_token(self) -> None:
         original = "6.5万円[要確認] について話した。"
         edited = "6.5万について話した。"

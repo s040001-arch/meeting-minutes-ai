@@ -4,6 +4,7 @@ import os
 import anthropic
 
 from anthropic_prompt_cache import cached_system
+from log_safety import describe_service_account_path
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -180,7 +181,9 @@ def _normalize_knowledge_memos(items: object) -> list[str]:
 def _build_sheets_service():
     path = _service_account_json_path()
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"service account json not found: {path}")
+        raise FileNotFoundError(
+            f"service account json not found: {describe_service_account_path(path)}"
+        )
     creds = ServiceAccountCredentials.from_service_account_file(
         path,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],

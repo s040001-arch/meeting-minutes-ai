@@ -31,6 +31,8 @@ from googleapiclient.discovery import build
 from anthropic_prompt_cache import cached_system
 from repo_env import load_dotenv_local
 
+from log_safety import describe_service_account_path
+
 from knowledge_sheet_store import (
     load_knowledge_memos,
     save_knowledge_memos,
@@ -127,7 +129,9 @@ def _sa_json_path() -> str:
 def _build_credentials() -> service_account.Credentials:
     path = _sa_json_path()
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"service account json not found: {path}")
+        raise FileNotFoundError(
+            f"service account json not found: {describe_service_account_path(path)}"
+        )
     return service_account.Credentials.from_service_account_file(path, scopes=_DRIVE_SCOPES)
 
 
