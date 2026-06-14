@@ -2,14 +2,21 @@ import argparse
 import os
 
 from meeting_profile import load_meeting_profile, resolve_display_title
+from readable_transcript import resolve_minutes_transcript_text
 from transcript_paths import resolve_transcript_path_for_minutes
 from transcript_section_summarizer import add_section_headings
 
 
-def build_minutes_text(title: str, transcript_text: str) -> str:
+def build_minutes_text(
+    title: str,
+    transcript_text: str,
+    *,
+    readable: bool = False,
+) -> str:
+    section_label = "発言録（整文）" if readable else "発言録（逐語）"
     return (
         f"# {title}\n\n"
-        "## 発言録（逐語）\n\n"
+        f"## {section_label}\n\n"
         f"{transcript_text.strip()}\n"
     )
 
@@ -57,21 +64,31 @@ def main() -> None:
         raise FileNotFoundError(f"input file not found: {in_path}")
 
     with open(in_path, "r", encoding="utf-8") as f:
-        transcript_text = f.read()
-    if not transcript_text.strip():
+        source_text = f.read()
+    if not source_text.strip():
         raise ValueError("input transcript is empty.")
 
-    meeting_profile = load_meeting_profile(
-        os.path.join(args.input_root, args.job_id)
-    )
+    job_dir = os.path.join(args.input_root, args.job_id)
+    meeting_profile = load_meeting_profile(job_dir)
     title = args.title or resolve_display_title(
         meeting_profile,
         job_id=args.job_id,
     )
 
+    transcript_text, minutes_source_path, readable_used = resolve_minutes_transcript_text(
+        job_dir=job_dir,
+        source_text=source_text,
+        source_path=in_path,
+        meeting_profile=meeting_profile,
+    )
+
     # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。
     annotated = _add_section_headings_safe(transcript_text, meeting_profile)
-    output_text = build_minutes_text(title=title, transcript_text=annotated)
+    output_text = build_minutes_text(
+        title=title,
+        transcript_text=annotated,
+        readable=readable_used,
+    )
 
     out_path = args.output or os.path.join(
         args.input_root, args.job_id, "minutes_draft.md"
@@ -82,6 +99,8 @@ def main() -> None:
 
     print(f"job_id={args.job_id}")
     print(f"input={in_path}")
+    print(f"minutes_source={minutes_source_path}")
+    print(f"readable_transcript_enabled={readable_used}")
     print(f"output={out_path}")
     print("status=minutes_draft_generated")
 
