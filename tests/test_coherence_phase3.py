@@ -9,7 +9,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from coherence_review import _coherence_to_unknown_points, _enrich_anomaly
 from recognition_batch import parse_single_coherence_answer
-from run_question_cycle_once import _build_coherence_question_text
+from run_question_cycle_once import (
+    COHERENCE_SNIPPET_MAX,
+    COHERENCE_SNIPPET_RADIUS,
+    _build_coherence_question_text,
+    _extract_snippet_around_word,
+)
 
 
 def _sample_anomalies() -> list[dict]:
@@ -136,6 +141,36 @@ class CoherenceAnswerParseTests(unittest.TestCase):
         parsed = parse_single_coherence_answer("アサインされる", word="朝にされる")
         self.assertEqual(parsed["action"], "correct")
         self.assertEqual(parsed["correction"], "アサインされる")
+
+
+class CoherenceSnippetExpansionTests(unittest.TestCase):
+    def test_expanded_radius_and_sentence_context(self) -> None:
+        self.assertGreaterEqual(COHERENCE_SNIPPET_RADIUS, 150)
+        self.assertLessEqual(COHERENCE_SNIPPET_RADIUS, 200)
+        self.assertGreaterEqual(COHERENCE_SNIPPET_MAX, 350)
+        self.assertLessEqual(COHERENCE_SNIPPET_MAX, 400)
+
+        lead = "。".join([f"前置きセンテンス{n}です" for n in range(12)]) + "。"
+        full = (
+            lead
+            + "予算は85万円で合意しました。"
+            + "次に人員配置の話です。"
+            + "予定が空いてる人が朝にされるってことすか？"
+            + "その後は別論点に移ります。"
+            + lead
+        )
+        word = "朝にされる"
+        pos = full.find(word)
+        self.assertGreater(pos, 0)
+        old_start = max(0, pos - 25)
+        old_end = min(len(full), pos + len(word) + 25)
+        old = full[old_start:old_end]
+        new = _extract_snippet_around_word(full, word, pos)
+        self.assertIn("85万円", new)
+        self.assertNotIn("85万円", old)
+        self.assertGreater(len(new), len(old))
+        self.assertIn(word, new)
+        self.assertLessEqual(len(new), COHERENCE_SNIPPET_MAX + 2)
 
 
 if __name__ == "__main__":

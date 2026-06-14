@@ -281,6 +281,59 @@ def apply_dictionary_replacements(text: str, replacements: dict[str, str]) -> st
     return s
 
 
+def apply_dictionary_replacements_standalone(text: str, replacements: dict[str, str]) -> str:
+    """Apply replacements only at standalone word boundaries (Phase 1 gate)."""
+    from recognition_batch import find_standalone_word
+
+    s = text
+    for wrong in sorted(replacements, key=len, reverse=True):
+        correct = replacements[wrong]
+        pos = 0
+        while True:
+            idx = find_standalone_word(s, wrong, hint_pos=pos)
+            if idx < 0:
+                break
+            s = s[:idx] + correct + s[idx + len(wrong) :]
+            pos = idx + len(correct)
+    return s
+
+
+# Step 4.2 learned-dict safety gates:
+# 1) standalone_only — never replace partial substring matches (Phase 1 find_standalone_word).
+# 2) honorific whitelist — wrong ending 様/氏/殿 may only map to meeting_profile.participants.
+#    Colloquial さん nicknames (e.g. エビさん) are excluded: high false-positive risk.
+_FORMAL_HONORIFIC_SUFFIXES = ("様", "氏", "殿")
+
+
+def filter_learned_for_mechanical_apply(
+    learned: dict[str, str],
+    participants: list[str] | None,
+) -> dict[str, str]:
+    canon = {str(p).strip() for p in (participants or []) if str(p).strip()}
+    filtered: dict[str, str] = {}
+    for wrong, right in learned.items():
+        w = str(wrong).strip()
+        r = str(right).strip()
+        if not w or not r:
+            continue
+        if w.endswith("さん"):
+            continue
+        if any(w.endswith(sfx) for sfx in _FORMAL_HONORIFIC_SUFFIXES):
+            if r not in canon:
+                continue
+        filtered[w] = r
+    return filtered
+
+
+def _infer_job_dir_from_input_path(input_path: str) -> str | None:
+    norm = os.path.normpath(input_path)
+    parts = norm.split(os.sep)
+    for i, part in enumerate(parts):
+        if part == "transcriptions" and i + 1 < len(parts) and parts[i + 1].startswith("job_"):
+            return os.sep.join(parts[: i + 2])
+    return None
+
+
 def cleanup_common_noise(text: str) -> str:
     s = text
     for wrong, correct in COMMON_NOISE_REPLACEMENTS.items():
@@ -361,6 +414,8 @@ def trim_edge_noise(text: str) -> str:
 def apply_mechanical_corrections(
     text: str,
     correction_dict_path: str = DEFAULT_CORRECTION_DICT_PATH,
+    *,
+    job_dir: str | None = None,
 ) -> str:
     # 適用順: 手動辞書 → 自動学習辞書 → Pixel(コード組込) → 共通ノイズ
     # 手動辞書を先に適用するのは、人間が判断した置換を最優先するため。
@@ -369,13 +424,22 @@ def apply_mechanical_corrections(
     # Phase 1 学習辞書 (coherence_review / LINE Q&A 由来の自動蓄積)
     try:
         from learned_corrections_store import load_learned_dict
+        from meeting_profile import load_meeting_profile
 
         learned = load_learned_dict()
         if learned:
-            s = apply_dictionary_replacements(s, learned)
+            participants: list[str] = []
+            if job_dir:
+                profile = load_meeting_profile(job_dir)
+                participants = list(profile.get("participants") or [])
+            learned = filter_learned_for_mechanical_apply(learned, participants)
+            if learned:
+                s = apply_dictionary_replacements_standalone(s, learned)
     except Exception as e:  # noqa: BLE001
         # 学習辞書の読み込み失敗は補正全体を止めない(非致命)
-        print(f"learned_corrections_apply_failed={e!r}")
+        from log_safety import format_error_for_log
+
+        print(f"learned_corrections_apply_failed={format_error_for_log(e)}")
     s = apply_pixel_recognizer_fixes(s)
     s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)
@@ -420,7 +484,12 @@ def main() -> None:
         original = f.read()
 
     replacements = load_correction_dict(args.correction_dict)
-    corrected = apply_mechanical_corrections(original, correction_dict_path=args.correction_dict)
+    job_dir = _infer_job_dir_from_input_path(args.input)
+    corrected = apply_mechanical_corrections(
+        original,
+        correction_dict_path=args.correction_dict,
+        job_dir=job_dir,
+    )
 
     output_path = args.output
     if not output_path:

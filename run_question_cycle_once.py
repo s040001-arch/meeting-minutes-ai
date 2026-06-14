@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -334,8 +335,116 @@ def _split_pending_by_source(pending: list[dict]) -> tuple[list[dict], list[dict
     return regular, coherence
 
 
-COHERENCE_SNIPPET_RADIUS = 70
-COHERENCE_SNIPPET_MAX = 220
+def _coherence_phase_complete_marker_path(job_dir: str) -> str:
+    return os.path.join(job_dir, COHERENCE_PHASE_COMPLETE_MARKER)
+
+
+def _job_had_coherence_questions(job_dir: str) -> bool:
+    for entry in _load_asked_questions(job_dir):
+        if not isinstance(entry, dict):
+            continue
+        selected = entry.get("selected_unknown")
+        if isinstance(selected, dict) and _is_coherence_review_point(selected):
+            return True
+    return False
+
+
+def _maybe_build_coherence_done_payload(
+    *,
+    job_id: str,
+    job_dir: str,
+    regular_pending: list[dict],
+    doc_url: str,
+    pending_meta: dict,
+) -> dict | None:
+    """Emit once when coherence queue is empty but detect unknowns remain."""
+    if not regular_pending:
+        return None
+    marker = _coherence_phase_complete_marker_path(job_dir)
+    if os.path.isfile(marker):
+        return None
+    if not _job_had_coherence_questions(job_dir):
+        return None
+    os.makedirs(job_dir, exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+    return {
+        "job_id": job_id,
+        "question_status": "none",
+        "completion_kind": "coherence_done",
+        "message": "音声認識ゆれの確認は完了しました。",
+        "selected_unknown": None,
+        "doc_url": doc_url,
+        "selection_audit": {
+            "selection_mode": "coherence_phase_complete",
+            **pending_meta,
+        },
+        "question_text": "",
+    }
+
+
+COHERENCE_SNIPPET_RADIUS = 175
+COHERENCE_SNIPPET_MAX = 380
+COHERENCE_PHASE_COMPLETE_MARKER = "coherence_phase_complete_sent.marker"
+_SENTENCE_BOUNDARY_RE = re.compile(r"[。！？!?]")
+
+
+def _clip_snippet_to_max(out: str, word: str, max_total: int) -> str:
+    if len(out) <= max_total:
+        return out
+    word_in = out.find(word)
+    if word_in < 0:
+        return out[: max_total - 1].rstrip() + "…"
+    half = (max_total - len(word)) // 2
+    clip_start = max(0, word_in - half)
+    clip_end = min(len(out), clip_start + max_total)
+    if clip_end - clip_start < max_total:
+        clip_start = max(0, clip_end - max_total)
+    clipped = out[clip_start:clip_end]
+    if clip_start > 0 and not clipped.startswith("…"):
+        clipped = "…" + clipped.lstrip("…")
+    if clip_end < len(out) and not clipped.endswith("…"):
+        clipped = clipped.rstrip("…") + "…"
+    return clipped
+
+
+def _snippet_bounds_by_sentences(
+    text: str,
+    idx: int,
+    word_len: int,
+    *,
+    max_total: int,
+) -> tuple[int, int]:
+    """Expand around word to include ~2–3 sentences within max_total chars."""
+    left_limit = max(0, idx - COHERENCE_SNIPPET_RADIUS * 2)
+    right_limit = min(len(text), idx + word_len + COHERENCE_SNIPPET_RADIUS * 2)
+    left = idx
+    sentences_before = 0
+    while left > left_limit and sentences_before < 2:
+        prev = text.rfind("。", left_limit, left)
+        if prev < 0:
+            prev_match = _SENTENCE_BOUNDARY_RE.search(text[left_limit:left])
+            if not prev_match:
+                break
+            prev = left_limit + prev_match.start()
+        left = prev + 1
+        sentences_before += 1
+    right = idx + word_len
+    sentences_after = 0
+    while right < right_limit and sentences_after < 1:
+        nxt = _SENTENCE_BOUNDARY_RE.search(text, right)
+        if not nxt or nxt.end() > right_limit:
+            break
+        right = nxt.end()
+        sentences_after += 1
+    if right - left > max_total:
+        pad = max(COHERENCE_SNIPPET_RADIUS, (max_total - word_len) // 2)
+        left = max(0, idx - pad)
+        right = min(len(text), idx + word_len + pad)
+    else:
+        left = min(left, max(0, idx - COHERENCE_SNIPPET_RADIUS))
+        right = max(right, min(len(text), idx + word_len + COHERENCE_SNIPPET_RADIUS))
+    return left, right
 
 
 def _extract_snippet_around_word(
@@ -356,29 +465,14 @@ def _extract_snippet_around_word(
         idx = find_standalone_word(full_text, word, hint_pos=hint)
     if idx < 0:
         return ""
-    start = max(0, idx - radius)
-    end = min(len(full_text), idx + len(word) + radius)
+    start, end = _snippet_bounds_by_sentences(
+        full_text, idx, len(word), max_total=max_total
+    )
     snippet = " ".join(full_text[start:end].split())
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(full_text) else ""
     out = f"{prefix}{snippet}{suffix}"
-    if len(out) <= max_total:
-        return out
-    # 長すぎる場合は word 中心に切り詰める
-    word_in = out.find(word)
-    if word_in < 0:
-        return out[: max_total - 1].rstrip() + "…"
-    half = (max_total - len(word)) // 2
-    clip_start = max(0, word_in - half)
-    clip_end = min(len(out), clip_start + max_total)
-    if clip_end - clip_start < max_total:
-        clip_start = max(0, clip_end - max_total)
-    clipped = out[clip_start:clip_end]
-    if clip_start > 0 and not clipped.startswith("…"):
-        clipped = "…" + clipped.lstrip("…")
-    if clip_end < len(out) and not clipped.endswith("…"):
-        clipped = clipped.rstrip("…") + "…"
-    return clipped
+    return _clip_snippet_to_max(out, word, max_total)
 
 
 def _build_coherence_question_text(item: dict, *, full_text: str = "") -> str:
@@ -885,10 +979,22 @@ def main() -> None:
         if coherence_payload is not None:
             result_payload = coherence_payload
 
-    if result_payload is None and not unknown_points:
+    if result_payload is None and not coherence_pending and regular_pending:
+        coherence_done = _maybe_build_coherence_done_payload(
+            job_id=args.job_id,
+            job_dir=job_dir,
+            regular_pending=regular_pending,
+            doc_url=doc_url,
+            pending_meta=pending_meta,
+        )
+        if coherence_done is not None:
+            result_payload = coherence_done
+
+    if result_payload is None and not unknown_points and not regular_pending:
         result_payload = {
             "job_id": args.job_id,
             "question_status": "none",
+            "completion_kind": "full",
             "message": "未回答の不明箇所は0件のため、確認事項はありません。",
             "selected_unknown": None,
             "doc_url": doc_url,
@@ -989,6 +1095,7 @@ def main() -> None:
                     result_payload = {
                         "job_id": args.job_id,
                         "question_status": "none",
+                        "completion_kind": "full",
                         "message": message or (
                             "未決定・検討中の論点のため質問しません。"
                             if blocked_non_answerable

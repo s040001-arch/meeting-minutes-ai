@@ -103,6 +103,10 @@ def _persist_coherence_answer_to_learned_dict(
     wrong = str(su.get("anomaly_word") or "").strip()
     if not wrong:
         return {"action": "noop", "reason": "no_anomaly_word"}
+    parsed = parse_single_coherence_answer(answer_text, word=wrong)
+    action = str(parsed.get("action") or "").strip()
+    if action in ("delete", "keep"):
+        return {"action": "skipped", "reason": f"action_{action}", "wrong": wrong}
     right = _extract_correction_word_from_answer(answer_text)
     if not right:
         return {
