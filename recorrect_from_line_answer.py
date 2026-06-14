@@ -21,7 +21,7 @@ from line_answer_reflect import (
     log_reflect_entry,
     save_after_qa_text,
 )
-from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO, resolve_transcript_path
+from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO
 
 DEFAULT_ANSWERS_JSON = os.path.join("data", "line_answers.json")
 
@@ -431,6 +431,48 @@ def _persist_batch_corrections_to_learned_dict(
     return persisted
 
 
+def _resolve_question_result_for_answer(
+    record: dict,
+    question_result: dict | None,
+    *,
+    job_id: str,
+    input_root: str,
+) -> dict | None:
+    """Align question_result with the answer record (question_id may differ after cycle updates)."""
+    qid = str(record.get("question_id") or "").strip()
+    qr = question_result if isinstance(question_result, dict) else {}
+    if not qid or str(qr.get("question_id") or "").strip() == qid:
+        return qr or None
+    for item in _load_unknown_points(job_id, input_root):
+        if str(item.get("answered_by_question_id") or "").strip() == qid:
+            return {
+                **qr,
+                "job_id": job_id,
+                "question_id": qid,
+                "question_text": str(record.get("question_text") or qr.get("question_text") or ""),
+                "selected_unknown": item,
+            }
+    qt = str(record.get("question_text") or "").strip()
+    if qt and qt == str(qr.get("question_text") or "").strip():
+        return qr or None
+    return qr or None
+
+
+def _load_recorrect_base_text(job_dir: str, input_path: str | None) -> tuple[str, str]:
+    """Return (text, path_label). Prefer after_qa so prior incremental reflects are kept."""
+    if input_path:
+        with open(input_path, "r", encoding="utf-8") as f:
+            return f.read(), input_path
+    ensure_after_qa_initialized(job_dir)
+    path = after_qa_path(job_dir)
+    return load_after_qa_text(job_dir), path
+
+
+def _is_job_scoped_answers_path(answers_json_path: str, job_id: str, input_root: str) -> bool:
+    expected = os.path.normpath(os.path.join(input_root, job_id, "answers.json"))
+    return os.path.normpath(answers_json_path) == expected
+
+
 def _load_question_result_for_job(job_id: str, input_root: str) -> dict | None:
     path = os.path.join(input_root, job_id, "question_result.json")
     if not os.path.isfile(path):
@@ -573,6 +615,8 @@ def load_answer_record(
             for r in reversed(records):
                 if str(r.get("question_text") or "").strip() == expected_q:
                     return r, "question_text_match_fallback"
+        if _is_job_scoped_answers_path(answers_json_path, job_id, input_root):
+            return records[-1], "job_scoped_latest"
         any_job = any(str(r.get("job_id") or "").strip() for r in records)
         if not any_job:
             return records[-1], "legacy_global_latest_no_job_id_in_answers"
@@ -683,7 +727,12 @@ def main() -> None:
     if not answer_text:
         raise ValueError("selected answer record does not contain answer_text.")
 
-    question_result = _load_question_result_for_job(args.job_id, args.input_root)
+    question_result = _resolve_question_result_for_answer(
+        record,
+        _load_question_result_for_job(args.job_id, args.input_root),
+        job_id=args.job_id,
+        input_root=args.input_root,
+    )
     out_path = args.output or after_qa_path(job_dir)
 
     # 認識ゆれ(1 語 1 問): after_qa を都度更新（Phase 4 incremental）。
@@ -703,11 +752,9 @@ def main() -> None:
         print(f"answer_job_id={record.get('job_id')}")
         return
 
-    in_path = resolve_transcript_path(args.job_id, args.input, args.input_root)
-    if not os.path.isfile(in_path):
-        raise FileNotFoundError(f"input file not found: {in_path}")
-    with open(in_path, "r", encoding="utf-8") as f:
-        base_text = f.read()
+    base_text, in_path = _load_recorrect_base_text(job_dir, args.input)
+    if not base_text.strip():
+        raise ValueError("input transcript is empty.")
 
     api_key, key_source = resolve_openai_api_key()
     print(f"debug_openai_api_key_found={bool(api_key)}")
