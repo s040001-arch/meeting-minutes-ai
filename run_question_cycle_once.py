@@ -1110,28 +1110,34 @@ def main() -> None:
             raise RuntimeError("LINE_USER_ID is not set.")
         if not line_token:
             raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN is not set.")
-        push_line_message(
-            channel_access_token=line_token,
-            user_id=line_user_id,
-            text=message_text,
-        )
-        if result_payload.get("question_status") == "generated":
-            line_push = "sent_question"
-            _mark_unknown_point_asked(
-                unknowns_path=unknowns_path,
-                selected_unknown=result_payload.get("selected_unknown"),
-                question_id=str(result_payload.get("question_id") or ""),
+        try:
+            push_line_message(
+                channel_access_token=line_token,
+                user_id=line_user_id,
+                text=message_text,
             )
-            # 質問履歴に追記（次サイクルで AI へ既出として渡し、類似質問を抑制する）
-            _append_asked_question(
-                job_dir=job_dir,
-                question_id=str(result_payload.get("question_id") or ""),
-                question_text=str(result_payload.get("question_text") or ""),
-                question_format=str(result_payload.get("question_format") or ""),
-                selected_unknown=result_payload.get("selected_unknown"),
-            )
+        except Exception as e:
+            # after-answer サイクル全体を落とさない（Docs 反映・Hub 更新は続行）
+            print(f"line_push_failed={e!r}")
+            line_push = "failed"
         else:
-            line_push = "sent_completion"
+            if result_payload.get("question_status") == "generated":
+                line_push = "sent_question"
+                _mark_unknown_point_asked(
+                    unknowns_path=unknowns_path,
+                    selected_unknown=result_payload.get("selected_unknown"),
+                    question_id=str(result_payload.get("question_id") or ""),
+                )
+                # 質問履歴に追記（次サイクルで AI へ既出として渡し、類似質問を抑制する）
+                _append_asked_question(
+                    job_dir=job_dir,
+                    question_id=str(result_payload.get("question_id") or ""),
+                    question_text=str(result_payload.get("question_text") or ""),
+                    question_format=str(result_payload.get("question_format") or ""),
+                    selected_unknown=result_payload.get("selected_unknown"),
+                )
+            else:
+                line_push = "sent_completion"
 
     print(f"job_id={args.job_id}")
     print(f"unknowns={unknowns_path}")
