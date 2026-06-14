@@ -83,7 +83,12 @@ def build_line_message(result: dict) -> str:
             )
         return "\n".join(parts)
     message = str(result.get("message", "")).strip() or "未回答の不明箇所は0件のため確認事項はありません。"
-    parts = ["[完了]", message]
+    completion_kind = str(result.get("completion_kind") or "full").strip()
+    if completion_kind == "coherence_done":
+        header = "[認識ゆれの確認は完了]"
+    else:
+        header = "[完了]"
+    parts = [header, message]
     if doc_url:
         parts.append(f"議事録: {doc_url}")
     return "\n".join(parts)
