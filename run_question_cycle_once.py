@@ -463,7 +463,7 @@ def _build_coherence_single_question_payload(
 ) -> dict | None:
     """coherence 副キューから 1 件だけ選び、1 問 1 答の確認質問を作る。
 
-    回答は recorrect 側で記録のみ行い、全件回答後に一括補正する。
+    回答は recorrect / line_answer_reflect で after_qa に都度反映する。
     """
     selected = select_next_coherence_point(coherence_pending)
     if not selected:

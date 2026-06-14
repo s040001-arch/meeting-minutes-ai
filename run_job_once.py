@@ -1184,12 +1184,25 @@ def main() -> None:
             message="質問の選定が完了しました（LINEで送信済み or 質問なし）",
         )
 
+        job_answers = os.path.join(args.input_root, args.job_id, "answers.json")
         line_answers = os.path.join("data", "line_answers.json")
-        if os.path.isfile(line_answers):
+        answers_path = None
+        answers_data: list = []
+        for candidate in (job_answers, line_answers):
+            if not os.path.isfile(candidate):
+                continue
             try:
-                with open(line_answers, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list) and len(data) > 0:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, list) and any(isinstance(x, dict) for x in payload):
+                    answers_path = candidate
+                    answers_data = payload
+                    break
+            except (OSError, json.JSONDecodeError):
+                continue
+        if answers_path:
+            try:
+                if isinstance(answers_data, list) and len(answers_data) > 0:
                     current_phase = "step_5_4_recorrect_from_line_answer"
                     current_step_label = "Step 5.4: 回答反映"
                     record_visible_progress(
@@ -1200,7 +1213,16 @@ def main() -> None:
                     )
                     run_cmd_with_timeout_retry(
                         log_path,
-                        [py, os.path.join(repo, "recorrect_from_line_answer.py"), "--job-id", args.job_id],
+                        [
+                            py,
+                            os.path.join(repo, "recorrect_from_line_answer.py"),
+                            "--job-id",
+                            args.job_id,
+                            "--input-root",
+                            args.input_root,
+                            "--answers-json",
+                            answers_path,
+                        ],
                         "step_5_4_recorrect_from_line_answer",
                         timeout_sec=args.step_5_4_timeout_sec,
                         retry_count=args.step_5_4_retry_count,

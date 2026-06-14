@@ -373,11 +373,19 @@ def _apply_high_auto_fixes(
 
 
 def _apply_review_tags(text: str, anomalies: list[dict]) -> str:
-    """medium/low の anomaly_word 最初の出現に [要確認] タグを付与する。"""
+    """質問対象（medium + auto_fix 不可 high）の anomaly_word 初出に [要確認] を付与する。
+
+    low は内部記録のみとし、ユーザー向け逐語にはインラインタグを付けない（Phase 4）。
+    """
     out = text
     seen: set[str] = set()
     for an in anomalies:
-        if an.get("confidence") not in {"medium", "low"}:
+        conf = str(an.get("confidence") or "").lower()
+        if conf == "low":
+            continue
+        if conf == "high" and an.get("auto_fixable"):
+            continue
+        if conf not in {"medium", "high"}:
             continue
         word = (an.get("anomaly_word") or "").strip()
         if not word or word in seen:
@@ -403,7 +411,7 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
     """medium + high(non-auto_fix) を unknown_points 副キューへ変換。
 
     high+auto_fixable は既に置換済みなので含めない。
-    **low は質問キューに入れない**（[要確認] タグのみ。目視用）。
+    **low は質問キューに入れない**（インライン [要確認] も付けない。内部記録のみ）。
     除外条件:
       - anomaly_word が空
       - word が 3 字未満 / 30 字超

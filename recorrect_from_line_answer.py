@@ -13,7 +13,17 @@ from recognition_batch import (
     parse_batch_answer,
     parse_single_coherence_answer,
 )
+from line_answer_reflect import (
+    after_qa_path,
+    apply_incremental_coherence_answer,
+    ensure_after_qa_initialized,
+    load_after_qa_text,
+    log_reflect_entry,
+    save_after_qa_text,
+)
 from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO, resolve_transcript_path
+
+DEFAULT_ANSWERS_JSON = os.path.join("data", "line_answers.json")
 
 # 学習辞書追加で「無回答/わからない」と判断する文言
 _NEGATIVE_ANSWER_PATTERNS = (
@@ -264,7 +274,6 @@ def _handle_coherence_single_answer(
     question_result: dict,
     answer_text: str,
     question_id: str,
-    base_text: str,
     out_path: str,
 ) -> None:
     su = question_result.get("selected_unknown") or {}
@@ -280,49 +289,41 @@ def _handle_coherence_single_answer(
         answer_text=answer_text,
         question_id=question_id,
     )
+
+    job_dir = os.path.join(input_root, job_id)
+    ensure_after_qa_initialized(job_dir)
+    current_text = load_after_qa_text(job_dir)
+
     try:
         learn_result = _persist_coherence_answer_to_learned_dict(
             job_id=job_id,
             input_root=input_root,
             question_result=question_result,
             answer_text=answer_text,
-            base_text=base_text,
+            base_text=current_text,
         )
         print(f"learned_dict_from_qa={learn_result}")
     except Exception as e:  # noqa: BLE001
         print(f"learned_dict_from_qa_failed={e!r}")
 
-    remaining = _count_unanswered_coherence(job_id, input_root)
-    if remaining > 0:
-        updated = base_text
-        applied: list[dict] = []
-        if parsed_one.get("action") == "delete":
-            updated, deleted = _apply_delete_to_transcript(
-                base_text,
-                span_hint=str(parsed_one.get("correction") or ""),
-                word=word,
-            )
-            if deleted:
-                applied = [deleted]
-        print(
-            f"recorrect_incorporate_mode=coherence_deferred "
-            f"remaining={remaining} action={parsed_one.get('action')} "
-            f"deleted={len(applied)}"
-        )
-    else:
-        all_parsed = _build_parsed_from_answered_coherence(job_id, input_root)
-        updated, applied = apply_batch_corrections(base_text, all_parsed)
-        learned = _persist_batch_corrections_to_learned_dict(
-            job_id=job_id, applied=applied, base_text=base_text
-        )
-        print(
-            f"recorrect_incorporate_mode=coherence_batch_apply "
-            f"items={len(all_parsed)} applied={len(applied)} learned_added={learned}"
-        )
+    updated, reflect_meta = apply_incremental_coherence_answer(
+        current_text,
+        unknown_item=su if isinstance(su, dict) else {},
+        parsed=parsed_one,
+        question_id=question_id,
+    )
+    log_reflect_entry(reflect_meta)
+    print(
+        "recorrect_incorporate_mode=coherence_incremental "
+        f"action={reflect_meta.get('action')} applied={reflect_meta.get('applied')} "
+        f"tag_removed={reflect_meta.get('tag_removed')}"
+    )
 
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(updated)
+    save_after_qa_text(job_dir, updated)
+    if out_path != after_qa_path(job_dir):
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(updated)
 
 
 def _is_recognition_batch_question(question_result: dict | None) -> bool:
@@ -506,6 +507,30 @@ def _find_first_anchor_span(
     return None
 
 
+def _resolve_answers_json_path(
+    job_id: str,
+    input_root: str,
+    explicit: str | None,
+) -> str:
+    if explicit and explicit != DEFAULT_ANSWERS_JSON and os.path.isfile(explicit):
+        return explicit
+    job_answers = os.path.join(input_root, job_id, "answers.json")
+    if os.path.isfile(job_answers):
+        return job_answers
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    return DEFAULT_ANSWERS_JSON
+
+
+def _is_no_answers_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "non-empty json array" in msg
+        or "does not contain valid records" in msg
+        or "answers json not found" in msg
+    )
+
+
 def load_answer_record(
     answers_json_path: str,
     answer_index: int = -1,
@@ -625,14 +650,26 @@ def main() -> None:
         help="アンカー一致位置より後に含める最大文字数（抜粋API用、デフォルト: 400）",
     )
     args = parser.parse_args()
-
-    record, selection_note = load_answer_record(
-        answers_json_path=args.answers_json,
-        answer_index=args.answer_index,
-        question_id=args.question_id,
-        job_id=args.job_id,
-        input_root=args.input_root,
+    job_dir = os.path.join(args.input_root, args.job_id)
+    answers_json_path = _resolve_answers_json_path(
+        args.job_id, args.input_root, args.answers_json
     )
+
+    try:
+        record, selection_note = load_answer_record(
+            answers_json_path=answers_json_path,
+            answer_index=args.answer_index,
+            question_id=args.question_id,
+            job_id=args.job_id,
+            input_root=args.input_root,
+        )
+    except (FileNotFoundError, ValueError, IndexError) as e:
+        if _is_no_answers_error(e):
+            ensure_after_qa_initialized(job_dir)
+            print(f"recorrect_skip=no_answers reason={e!r}")
+            return
+        raise
+
     print(f"recorrect_answer_selection={selection_note}")
     if selection_note.startswith("legacy_"):
         print(
@@ -646,6 +683,26 @@ def main() -> None:
     if not answer_text:
         raise ValueError("selected answer record does not contain answer_text.")
 
+    question_result = _load_question_result_for_job(args.job_id, args.input_root)
+    out_path = args.output or after_qa_path(job_dir)
+
+    # 認識ゆれ(1 語 1 問): after_qa を都度更新（Phase 4 incremental）。
+    if _is_coherence_review_question(question_result):
+        _handle_coherence_single_answer(
+            job_id=args.job_id,
+            input_root=args.input_root,
+            question_result=question_result,
+            answer_text=answer_text,
+            question_id=str(record.get("question_id") or ""),
+            out_path=out_path,
+        )
+        print(f"job_id={args.job_id}")
+        print(f"answers_json={answers_json_path}")
+        print(f"output={out_path}")
+        print(f"question_id={record.get('question_id')}")
+        print(f"answer_job_id={record.get('job_id')}")
+        return
+
     in_path = resolve_transcript_path(args.job_id, args.input, args.input_root)
     if not os.path.isfile(in_path):
         raise FileNotFoundError(f"input file not found: {in_path}")
@@ -658,36 +715,10 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set.")
 
-    question_result = _load_question_result_for_job(args.job_id, args.input_root)
-
-    out_path = args.output or os.path.join(
-        args.input_root, args.job_id, "merged_transcript_after_qa.txt"
-    )
-
-    # 認識ゆれ(1 語 1 問): 回答を記録し、全件回答後に一括補正。
-    if _is_coherence_review_question(question_result):
-        _handle_coherence_single_answer(
-            job_id=args.job_id,
-            input_root=args.input_root,
-            question_result=question_result,
-            answer_text=answer_text,
-            question_id=str(record.get("question_id") or ""),
-            base_text=base_text,
-            out_path=out_path,
-        )
-        print(f"job_id={args.job_id}")
-        print(f"answers_json={args.answers_json}")
-        print(f"input={in_path}")
-        print(f"output={out_path}")
-        print(f"question_id={record.get('question_id')}")
-        print(f"answer_job_id={record.get('job_id')}")
-        return
-
     # レガシー: 認識ゆれの一括確認(バッチ)への回答。
     if _is_recognition_batch_question(question_result):
-        out_path = args.output or os.path.join(
-            args.input_root, args.job_id, "merged_transcript_after_qa.txt"
-        )
+        ensure_after_qa_initialized(job_dir)
+        base_text = load_after_qa_text(job_dir)
         batch_items = (question_result.get("selected_unknown") or {}).get("batch_items") or []
         parsed = parse_batch_answer(
             answer_text=answer_text,
@@ -697,9 +728,11 @@ def main() -> None:
             timeout_sec=args.openai_timeout_sec,
         )
         updated, applied = apply_batch_corrections(base_text, parsed)
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(updated)
+        save_after_qa_text(job_dir, updated)
+        if out_path != after_qa_path(job_dir):
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(updated)
         answered = _mark_batch_items_answered_in_unknowns(
             job_id=args.job_id,
             input_root=args.input_root,

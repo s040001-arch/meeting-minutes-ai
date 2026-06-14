@@ -1,11 +1,9 @@
-"""音声認識ゆれ([要確認] / coherence_review 由来)の回答解析・一括補正ユーティリティ。
+"""音声認識ゆれ([要確認] / coherence_review 由来)の回答解析・反映ユーティリティ。
 
-設計意図:
+設計意図 (Phase 4):
 - LINE は 1 質問 = 1 回答。認識ゆれも 1 語 1 問で確認する。
-- 各回答では本文を書き換えず、unknown_points に記録するだけ。
-- 未回答の認識ゆれが 0 件になった時点で、蓄積した回答を一括適用する。
-
-レガシー: recognition_batch 形式(番号付き一括)への回答解析も残す。
+- 各回答は merged_transcript_after_qa.txt に都度反映する（line_answer_reflect）。
+- レガシー: recognition_batch 形式(番号付き一括)への回答解析も残す。
 """
 from __future__ import annotations
 

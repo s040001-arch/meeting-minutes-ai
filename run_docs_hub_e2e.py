@@ -24,10 +24,30 @@ def _py() -> str:
     return sys.executable
 
 
-def _run(args: list[str], cwd: str | None = None) -> None:
+def _run(args: list[str], cwd: str | None = None, log_path: str | None = None) -> None:
     cmd_text = " ".join(args)
     print(f"[run_docs_hub_e2e] {cmd_text}", flush=True)
-    r = subprocess.run(args, cwd=cwd or REPO_ROOT)
+    r = subprocess.run(
+        args,
+        cwd=cwd or REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.stdout:
+        print(r.stdout, end="", flush=True)
+    if r.stderr:
+        print(r.stderr, end="", file=sys.stderr, flush=True)
+    if log_path:
+        from run_job_once import log_line
+
+        step = os.path.basename(args[1]) if len(args) > 1 else "cmd"
+        if r.stdout and r.stdout.strip():
+            log_line(log_path, f"{step}: stdout\n{r.stdout.rstrip()}")
+        if r.stderr and r.stderr.strip():
+            log_line(log_path, f"{step}: stderr\n{r.stderr.rstrip()}")
+        log_line(log_path, f"{step}: exit_code={r.returncode}")
     if r.returncode != 0:
         raise SystemExit(r.returncode)
 
@@ -196,7 +216,8 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.input_root,
             "--answers-json",
             answers_json,
-        ]
+        ],
+        log_path=log_path,
     )
     from run_job_once import ensure_after_qa_exists
 
@@ -214,7 +235,8 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.job_id,
             "--input-root",
             args.input_root,
-        ]
+        ],
+        log_path=log_path,
     )
     # 回答反映後の全文から unknown_points を再評価し、必要なら「次の1問」を生成する。
     unknowns_path = os.path.join(args.input_root, args.job_id, "unknown_points.json")
@@ -236,7 +258,8 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             answers_json,
             "--input",
             after_qa_path,
-        ]
+        ],
+        log_path=log_path,
     )
     qcycle_cmd = [
         _py(),
@@ -256,7 +279,7 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
     print(f"[run_docs_hub_e2e] send_line_enabled={send_line_enabled}", flush=True)
     if send_line_enabled:
         qcycle_cmd.append("--send-line")
-    _run(qcycle_cmd)
+    _run(qcycle_cmd, log_path=log_path)
     record_visible_progress(
         log_path=log_path,
         visible_log_path=visible_log_path,
@@ -271,7 +294,8 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             args.job_id,
             "--input-root",
             args.input_root,
-        ]
+        ],
+        log_path=log_path,
     )
     args.skip_compose = True
     cmd_sync_docs(args)
