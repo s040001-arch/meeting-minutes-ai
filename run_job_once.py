@@ -878,6 +878,69 @@ def main() -> None:
             ),
         )
 
+        # Step 4.25: Contextual editor (Phase 10 shadow) — optional, non-fatal
+        _editor_enabled = os.environ.get("CONTEXTUAL_EDITOR_ENABLED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if _editor_enabled:
+            current_phase = "step_4_25_contextual_editor"
+            current_step_label = "Step 4.25: 全文編集者（shadow）"
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message="全文編集者レビューを実行中...（shadow: 提案のみ・本文は変更しません）",
+            )
+            try:
+                editor_result = subprocess.run(
+                    [
+                        py,
+                        os.path.join(repo, "contextual_editor.py"),
+                        "--job-id",
+                        args.job_id,
+                        "--input-root",
+                        args.input_root,
+                        "--force",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=900,
+                )
+                if editor_result.stdout:
+                    log_line(
+                        log_path,
+                        f"step_4_25_contextual_editor: stdout\n{editor_result.stdout}",
+                    )
+                if editor_result.stderr:
+                    log_line(
+                        log_path,
+                        f"step_4_25_contextual_editor: stderr\n{editor_result.stderr}",
+                    )
+                if editor_result.returncode == 0:
+                    log_line(log_path, "step_4_25_contextual_editor: success")
+                    update_job_progress(
+                        input_root=args.input_root,
+                        job_id=args.job_id,
+                        phase="step_4_25_contextual_editor",
+                        status="success",
+                        detail={},
+                    )
+                else:
+                    log_line(
+                        log_path,
+                        f"step_4_25_contextual_editor: non-zero exit={editor_result.returncode} (non-fatal)",
+                    )
+            except Exception as e:  # noqa: BLE001
+                log_line(
+                    log_path,
+                    f"step_4_25_contextual_editor: exception={e!r} (non-fatal, pipeline continues)",
+                )
+
         # --- Step 4.3: AI correction (full-text, Claude) ---
         log_line(log_path, "step_4_3_ai_correct: starting full_text mode (Claude)")
         with open(mechanical_path, "r", encoding="utf-8") as f:
