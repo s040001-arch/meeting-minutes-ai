@@ -6,6 +6,7 @@ import unittest
 from edit_proposal_schema import (
     FACT_NUMERIC,
     FACT_PROPER_NOUN,
+    FACT_FILLER_GARBLE,
     VERDICT_ASK_WITH_CANDIDATE,
     VERDICT_ASK_WITHOUT_CANDIDATE,
     VERDICT_AUTO_CORRECT,
@@ -58,6 +59,23 @@ class FactClassifyTests(unittest.TestCase):
         fc, src = classify_fact_class(span_before="予算は85万円", llm_fact_class="lexical_fluency")
         self.assertEqual(fc, FACT_NUMERIC)
         self.assertEqual(src, "code_override")
+
+    def test_garble_digit_not_numeric(self) -> None:
+        fc, src = classify_fact_class(
+            span_before="ちょっと 16 時にちょっという",
+            llm_fact_class="filler_garble",
+            llm_verdict="auto_delete",
+        )
+        self.assertEqual(fc, FACT_FILLER_GARBLE)
+        self.assertNotEqual(fc, FACT_NUMERIC)
+
+    def test_garble_llm_numeric_overridden(self) -> None:
+        fc, _ = classify_fact_class(
+            span_before="16 時にちょっという",
+            llm_fact_class="numeric",
+            llm_verdict="ask_without_candidate",
+        )
+        self.assertEqual(fc, FACT_FILLER_GARBLE)
 
     def test_participant_is_proper_noun(self) -> None:
         fc, _ = classify_fact_class(

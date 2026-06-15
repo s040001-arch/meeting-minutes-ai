@@ -17,6 +17,7 @@ import anthropic
 from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 from edit_proposal_schema import (
     EDITOR_SOURCE,
+    FACT_FILLER_GARBLE,
     INPUT_MECHANICAL,
     VERDICT_AUTO_CORRECT,
     VERDICT_AUTO_DELETE,
@@ -36,7 +37,7 @@ from recognition_batch import find_standalone_word
 CONTEXTUAL_EDITOR_MODEL = OPUS_MODEL_ID
 CONTEXTUAL_EDITOR_MAX_TOKENS = 32000
 CONTEXTUAL_EDITOR_TIMEOUT_SEC = 900
-PIPELINE_EDITOR_VERSION = "20260610-phase10-shadow-v1"
+PIPELINE_EDITOR_VERSION = "20260615-phase10-shadow-tune-v2"
 
 EDIT_PROPOSALS_FILENAME = "edit_proposals.json"
 EDITOR_SHADOW_REPORT_FILENAME = "editor_shadow_report.json"
@@ -79,15 +80,33 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "Google Pixel 音声認識を機械補正した日本語議事録を**全文一読**し、"
         "各問題箇所を文脈から判断して JSON 配列で提案してください。"
         "\n\n【4帰結（verdict）— 固定閾値ではなく文脈で都度判断】"
-        "\n- auto_correct (①): 一般語・同音異義の誤りで文脈が明確。事実に触れない。"
-        "\n- ask_with_candidate (②): 固有名詞・数値・決定等、または候補を1つ示せる疑い。"
-        "\n- ask_without_candidate (③): 聞くべきだが候補を捏造できない（②と同様に重要）。"
-        "\n- auto_delete (④): フィラー・言い淀み・意味のない崩れ片のみ（filler_garble）。"
+        "\n- auto_correct (①): 一般語・同音異義の誤りで文脈が明確。**事実に触れない**。"
+        "フィラー・崩れ片には使わない（④へ）。"
+        "\n- ask_with_candidate (②): 固有名詞・数値・決定等で、**全文文脈から候補を1つ示せる**疑い。"
+        "hypothesis に候補語を必ず入れる。"
+        "\n- ask_without_candidate (③): 聞くべきだが**文脈からも候補を出せない**場合のみ。"
+        "\n- auto_delete (④): filler_garble のみ。"
+        "フィラー・言い淀み・意味のない崩れ片・言い直し残骸を丸ごと削除。"
+        "\n\n【②と③の線引き（最重要）】"
+        "\n- 全文を読んで正しい候補が推定できるなら **必ず② + hypothesis**。"
+        "  例: 前後に「八戸」という東北の地名が並ぶ文脈で「義理をか」→ hypothesis=「盛岡」、"
+        "verdict=ask_with_candidate。"
+        "\n- ②は**確認のための候補提示**であり、事実の自動修正ではない。"
+        "禁止しているのは「聞かずに候補で本文を書き換える①」だけ。"
+        "事実系でも候補を出して②で相原に確認するのは正しい動作（捏造ではなく確認）。"
+        "\n- 候補が本当に出せないときだけ③。"
+        "\n\n【④ auto_delete の例（filler_garble + auto_delete）】"
+        "\n- 「これ、こうかだからな」— 文として崩れた言い直し残骸"
+        "\n- 「16時にちょっという」「ちょっと 16 時にちょっという」— 途中切れ・言い淀みの崩れ片"
+        "（確定の開催時刻の事実ではない）"
+        "\n- 「あの、イメージングがちょっと動いてたりと」— 意味を持たないフィラー的断片"
+        "\n- 「えーと」「あのー」だけの繰り返し、言い直しの重複残骸"
+        "\nフィラー・崩れ片は① auto_correct にしない。④で削除する。"
         "\n\n【鉄の掟】"
         "\n- 固有名詞・数値・金額・日時・決定事項は確信が高くても auto_correct / auto_delete 禁止。"
-        "必ず ask_with_candidate または ask_without_candidate。"
-        "\n- 候補のない固有名詞は ask_without_candidate（候補を捏造しない）。"
-        "\n- 数値閾値やスコアで省略しない。聞くべき箇所は②③に載せる。"
+        "②または③へ（候補が出せれば②）。"
+        "\n- ④は filler_garble のみ。金額・固有名詞・決定が1つでも含まれるスパンは④禁止。"
+        "\n- 数値閾値で省略しない。聞くべき箇所は②③に載せる。"
         "\n\n【出力スキーマ】JSON 配列のみ。各要素:"
         '\n{"span_before":"本文中の原文スパン（20-120字）",'
         '"span_after":"①のみ修正後スパン。②③④は空文字",'
@@ -168,6 +187,19 @@ def _resolve_span_position(text: str, span_before: str, anomaly_word: str) -> in
     return -1
 
 
+def _normalize_filler_verdict(proposal: dict[str, Any]) -> dict[str, Any]:
+    """filler_garble mislabeled as auto_correct → auto_delete (safe nudge)."""
+    if (
+        proposal.get("fact_class") == FACT_FILLER_GARBLE
+        and normalize_verdict(proposal.get("verdict")) == VERDICT_AUTO_CORRECT
+    ):
+        proposal["original_verdict"] = VERDICT_AUTO_CORRECT
+        proposal["verdict"] = VERDICT_AUTO_DELETE
+        proposal["span_after"] = ""
+        proposal["routing_override"] = proposal.get("routing_override") or "filler_to_delete"
+    return proposal
+
+
 def _enrich_proposal(
     raw: dict,
     idx: int,
@@ -205,6 +237,7 @@ def _enrich_proposal(
     }
 
     reclassify_proposal(proposal, meeting_profile=meeting_profile)
+    _normalize_filler_verdict(proposal)
     enforce_fact_routing(proposal)
     return proposal
 

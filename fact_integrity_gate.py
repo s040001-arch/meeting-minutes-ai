@@ -10,8 +10,9 @@ from typing import Any
 
 _FLAGGED_TOKEN_RE = re.compile(r"[^\s\n。、]{1,40}\[要確認\]")
 _HEADING_RE = re.compile(r"^(?:###\s*)?▼")
+# Substantive amounts only — bare digits in garble (e.g. 「16時にちょっ」) are not protected.
 _NUMERIC_NORMALIZE_RE = re.compile(
-    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万円|円|%|倍)?"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万円|万|円|%|倍|人|名|件)"
 )
 
 

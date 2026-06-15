@@ -1,0 +1,164 @@
+{
+  "verdict_counts": {
+    "auto_delete": 6,
+    "ask_with_candidate": 18,
+    "auto_correct": 6,
+    "ask_without_candidate": 5
+  },
+  "before_tune": {
+    "ask_with_candidate": 27,
+    "ask_without_candidate": 24,
+    "auto_correct": 8,
+    "auto_delete": 0
+  },
+  "gate": {
+    "auto_proposal_count": 12,
+    "would_fail": false,
+    "would_fail_rate": 0.0,
+    "violations": [],
+    "warnings": []
+  },
+  "guard_downgrades": 2,
+  "A_giri": [
+    {
+      "proposal_id": "30703f96-31c7-4fdd-b5e1-8124c7d04ceb",
+      "verdict": "ask_with_candidate",
+      "span_before": "工場がもう義理をかとか。あと八戸かなふふふ",
+      "span_after": "",
+      "fact_class": "proper_noun",
+      "fact_class_source": "llm",
+      "hypothesis": "盛岡",
+      "evidence": "工場がもう義理をかとか。あと八戸かなふふふになるので、そこら辺の人たちの対応って",
+      "importance": "八戸など東北の地名と並ぶ工場所在地で固有名詞のため確認",
+      "reason": "東北地名の文脈で候補推定可",
+      "anomaly_word": "義理をか",
+      "span_start": -1,
+      "span_end": -1,
+      "context_position_in_transcript": -1,
+      "applied": false,
+      "question_kind": "with_candidate"
+    }
+  ],
+  "B_16cho": [
+    {
+      "proposal_id": "f03dd311-56ae-4858-ac96-4fa2318e3883",
+      "verdict": "auto_delete",
+      "span_before": "ちょっと 16 時にちょっという。また、あまり誘いは難しい感じ",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "llm",
+      "hypothesis": "",
+      "evidence": "ご飯に一緒に行きましょう。みたいのってできたりするものなんでしょうか?ちょっと 16 時にちょっという。また、あまり誘いは難しい",
+      "importance": "言い淀みの崩れ片で確定情報ではない",
+      "reason": "崩れ片",
+      "anomaly_word": "16 時にちょっという",
+      "span_start": 14932,
+      "span_end": 14963,
+      "context_position_in_transcript": 14932,
+      "applied": false,
+      "question_kind": ""
+    }
+  ],
+  "auto_delete_samples": [
+    {
+      "proposal_id": "a0bd4458-0898-41a3-8768-d4144ca760e1",
+      "verdict": "auto_delete",
+      "span_before": "森川さんへの引き継ぎで泳いか多くしていこうかなとあ回ってました",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "llm",
+      "hypothesis": "",
+      "evidence": "当初予定してた森川さんへの引き継ぎで泳いか多くしていこうかなとあ回ってました。全部ああ、そっか",
+      "importance": "音声崩れの断片で意味を成さない",
+      "reason": "崩れ片",
+      "anomaly_word": "泳いか多く",
+      "span_start": 21,
+      "span_end": 52,
+      "context_position_in_transcript": 21,
+      "applied": false,
+      "question_kind": ""
+    },
+    {
+      "proposal_id": "dab97f28-2e3d-4698-8b34-56025568b26b",
+      "verdict": "auto_delete",
+      "span_before": "あの、イランニングがちょっと入ってくるってところもあるので",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "code_override",
+      "hypothesis": "",
+      "evidence": "運用の仕方ですね。あの、イランニングがちょっと入ってくるってところもあるので",
+      "importance": "eラーニングの誤認識で一般語の誤り",
+      "reason": "音声誤認識",
+      "anomaly_word": "イランニング",
+      "span_start": 1775,
+      "span_end": 1804,
+      "context_position_in_transcript": 1775,
+      "applied": false,
+      "original_verdict": "auto_correct",
+      "routing_override": "filler_to_delete",
+      "question_kind": ""
+    },
+    {
+      "proposal_id": "5c9429f7-1d6e-4d3b-b54b-6bd506a135f3",
+      "verdict": "auto_delete",
+      "span_before": "あのロジシンの業務と、合っていますロジシンの業務の中の課題",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "llm",
+      "hypothesis": "",
+      "evidence": "まず、あのロジシンの業務と、合っていますロジシンの業務の中の課題とか悩みみたいなもの",
+      "importance": "「合っています」は言い直し残骸の崩れ片",
+      "reason": "崩れ片",
+      "anomaly_word": "合っています",
+      "span_start": 2851,
+      "span_end": 2880,
+      "context_position_in_transcript": 2851,
+      "applied": false,
+      "question_kind": ""
+    },
+    {
+      "proposal_id": "8e74fa60-5b76-4a75-a28b-3d56ce0867bc",
+      "verdict": "auto_delete",
+      "span_before": "そもそも結構工程が多いんですよね。あの名簿読み込ませて終わりというよりはそこからさらに外いくつ",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "llm",
+      "hypothesis": "",
+      "evidence": "あの名簿読み込ませて終わりというよりはそこからさらに外いくつ。はい、というところもありまして",
+      "importance": "言い淀みの崩れ片で意味を成さない",
+      "reason": "崩れ片",
+      "anomaly_word": "外いくつ",
+      "span_start": 4639,
+      "span_end": 4686,
+      "context_position_in_transcript": 4639,
+      "applied": false,
+      "question_kind": ""
+    },
+    {
+      "proposal_id": "57c47e21-ad23-4f4f-913f-4095ff1b76ba",
+      "verdict": "auto_delete",
+      "span_before": "これこれなですか?こう力だからな",
+      "span_after": "",
+      "fact_class": "filler_garble",
+      "fact_class_source": "llm",
+      "hypothesis": "",
+      "evidence": "よろしくお願いしました。え、これこれなですか?こう力だからな。ちょっと頑張ってもらってたところが",
+      "importance": "崩れた言い直し残骸で意味を成さない",
+      "reason": "崩れ片",
+      "anomaly_word": "こう力だからな",
+      "span_start": 11330,
+      "span_end": 11346,
+      "context_position_in_transcript": 11330,
+      "applied": false,
+      "question_kind": ""
+    }
+  ],
+  "fact_tokens_in_auto": [
+    {
+      "proposal_id": "bbd65265-2a96-4158-9a88-5c1aa8e43665",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "あそこ横浜のやっぱあの多分使うかなとうん処置しました"
+    }
+  ]
+}
