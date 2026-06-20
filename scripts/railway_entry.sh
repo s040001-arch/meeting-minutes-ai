@@ -21,8 +21,6 @@ if [[ -n "${DRIVE_FOLDER_ID:-}" ]]; then
   echo "[railway_entry] starting drive_auto_run_forever folder_id=${DRIVE_FOLDER_ID} interval_sec=${INTERVAL}"
   python drive_auto_run_forever.py \
     --folder-id "${DRIVE_FOLDER_ID}" \
-    --credentials "${GOOGLE_DRIVE_CREDENTIALS_PATH:-credentials.json}" \
-    --token "${GOOGLE_DRIVE_TOKEN_PATH:-token_drive.json}" \
     --state "${DRIVE_STATE_PATH:-data/last_seen_file_ids.json}" \
     --download-dir "${DRIVE_DOWNLOAD_DIR:-data/incoming_audio}" \
     --update-state \
