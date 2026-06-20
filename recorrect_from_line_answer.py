@@ -3,8 +3,15 @@ import json
 import os
 import re
 
-from ai_correct_text import call_openai_incorporate_answer, resolve_openai_api_key
-from job_context import load_job_context
+from ai_correct_text import resolve_openai_api_key
+from edit_proposal_schema import (
+    EDITOR_SOURCE,
+    EDITOR_TYPE,
+    VERDICT_ASK_WITH_CANDIDATE,
+    VERDICT_ASK_WITHOUT_CANDIDATE,
+    normalize_verdict,
+)
+from pinpoint_answer_apply import apply_answers
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
     _apply_delete_to_transcript,
@@ -21,7 +28,6 @@ from line_answer_reflect import (
     log_reflect_entry,
     save_after_qa_text,
 )
-from transcript_paths import MIN_TRANSCRIPT_LENGTH_RATIO
 
 DEFAULT_ANSWERS_JSON = os.path.join("data", "line_answers.json")
 
@@ -577,6 +583,138 @@ def _is_no_answers_error(exc: BaseException) -> bool:
     )
 
 
+def _is_contextual_editor_question(question_result: dict | None) -> bool:
+    if not isinstance(question_result, dict):
+        return False
+    if _is_coherence_review_question(question_result):
+        return False
+    if _is_recognition_batch_question(question_result):
+        return False
+    if isinstance(question_result.get("targets"), list) and question_result["targets"]:
+        return True
+    su = question_result.get("selected_unknown")
+    if isinstance(su, dict):
+        if str(su.get("source") or "") == EDITOR_SOURCE or str(su.get("type") or "") == EDITOR_TYPE:
+            return True
+        verdict = normalize_verdict(su.get("verdict"))
+        if verdict in (VERDICT_ASK_WITH_CANDIDATE, VERDICT_ASK_WITHOUT_CANDIDATE):
+            return True
+    for key in ("span_before", "anomaly_word", "hypothesis"):
+        if str(question_result.get(key) or "").strip():
+            return True
+    return False
+
+
+def _build_editor_apply_record(question_result: dict, record: dict) -> dict:
+    """Build one apply payload (may include targets[] for safe bundles)."""
+    answer_text = str(record.get("answer_text") or "").strip()
+    qid = str(record.get("question_id") or question_result.get("question_id") or "")
+    base: dict = {
+        "answer_text": answer_text,
+        "question_id": qid,
+    }
+    targets = question_result.get("targets")
+    if isinstance(targets, list) and targets:
+        for key in ("hypothesis", "bundle_kind", "fact_class", "review_index"):
+            if question_result.get(key) is not None:
+                base[key] = question_result[key]
+        base["targets"] = targets
+        return base
+
+    field_names = (
+        "proposal_id",
+        "anomaly_word",
+        "span_before",
+        "hypothesis",
+        "span_start",
+        "fact_class",
+        "context",
+        "reason",
+        "importance",
+        "review_index",
+        "selected_unknown",
+        "bundle_kind",
+    )
+    if any(str(question_result.get(k) or "").strip() for k in field_names[:4]):
+        for key in field_names:
+            if question_result.get(key) is not None:
+                base[key] = question_result[key]
+        return base
+
+    su = question_result.get("selected_unknown") or {}
+    if not isinstance(su, dict):
+        su = {}
+    span_before = str(
+        su.get("span_text") or su.get("context") or question_result.get("span_before") or ""
+    ).strip()
+    base.update(
+        {
+            "anomaly_word": str(su.get("anomaly_word") or "").strip(),
+            "span_before": span_before,
+            "span_start": int(
+                su.get("span_start") or su.get("context_position_in_transcript") or -1
+            ),
+            "hypothesis": str(su.get("hypothesis") or "").strip(),
+            "fact_class": su.get("fact_class"),
+            "selected_unknown": su,
+            "proposal_id": su.get("anomaly_id"),
+        }
+    )
+    return base
+
+
+def _editor_apply_has_payload(apply_record: dict) -> bool:
+    if isinstance(apply_record.get("targets"), list) and apply_record["targets"]:
+        return True
+    return bool(str(apply_record.get("span_before") or "").strip())
+
+
+def _handle_editor_pinpoint_answer(
+    *,
+    job_id: str,
+    input_root: str,
+    question_result: dict,
+    record: dict,
+    out_path: str,
+) -> None:
+    job_dir = os.path.join(input_root, job_id)
+    ensure_after_qa_initialized(job_dir)
+    base_text = load_after_qa_text(job_dir)
+    apply_record = _build_editor_apply_record(question_result, record)
+    if not _editor_apply_has_payload(apply_record):
+        raise ValueError("editor pinpoint apply missing span_before/targets payload")
+
+    updated, applied = apply_answers(base_text, [apply_record])
+    ok = [a for a in applied if not a.get("error") and not a.get("skipped")]
+    err = [a for a in applied if a.get("error")]
+
+    reflect_meta: dict = {
+        "question_id": str(record.get("question_id") or ""),
+        "mode": "editor_pinpoint",
+        "applied": bool(ok),
+        "applied_count": len(ok),
+        "error_count": len(err),
+        "rows": applied,
+    }
+    log_reflect_entry(reflect_meta)
+    print(
+        "recorrect_incorporate_mode=editor_pinpoint "
+        f"applied={len(ok)} errors={len(err)} "
+        f"targets={len(apply_record.get('targets') or []) or 1}"
+    )
+    for row in err:
+        print(
+            "recorrect_pinpoint_error="
+            f"{row.get('error')} anomaly={row.get('anomaly_word')!r}"
+        )
+
+    save_after_qa_text(job_dir, updated)
+    if out_path != after_qa_path(job_dir):
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+
 def load_answer_record(
     answers_json_path: str,
     answer_index: int = -1,
@@ -760,14 +898,13 @@ def main() -> None:
     if not base_text.strip():
         raise ValueError("input transcript is empty.")
 
-    api_key, key_source = resolve_openai_api_key()
-    print(f"debug_openai_api_key_found={bool(api_key)}")
-    print(f"debug_openai_api_key_source={key_source}")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
-
     # レガシー: 認識ゆれの一括確認(バッチ)への回答。
     if _is_recognition_batch_question(question_result):
+        api_key, key_source = resolve_openai_api_key()
+        print(f"debug_openai_api_key_found={bool(api_key)}")
+        print(f"debug_openai_api_key_source={key_source}")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set.")
         ensure_after_qa_initialized(job_dir)
         base_text = load_after_qa_text(job_dir)
         batch_items = (question_result.get("selected_unknown") or {}).get("batch_items") or []
@@ -802,92 +939,45 @@ def main() -> None:
         print(f"question_id={record.get('question_id')}")
         return
 
-    anchors = _anchor_strings_for_span(question_result, question_text)
-    scope_quotes = _quoted_snippets_from_question(question_text)
-    if not scope_quotes and question_result:
-        su = question_result.get("selected_unknown")
-        if isinstance(su, dict):
-            t = str(su.get("text") or "").strip()
-            if t:
-                scope_quotes = [t]
-    job_context = load_job_context(os.path.join(args.input_root, args.job_id))
-    anchor_match = _find_first_anchor_span(base_text, anchors)
-
-    if anchor_match is not None:
-        m0, m1 = anchor_match
-        span_start = max(0, m0 - max(0, args.span_before))
-        span_end = min(len(base_text), m1 + max(0, args.span_after))
-        span_text = base_text[span_start:span_end]
-        print(
-            "recorrect_incorporate_mode=span "
-            f"excerpt_chars={len(span_text)} "
-            f"anchor_range=[{m0},{m1}) "
-            f"span_range=[{span_start},{span_end})"
-        )
-        updated_span = call_openai_incorporate_answer(
-            text=span_text,
-            question_text=question_text,
-            answer_text=answer_text,
-            model=args.model,
-            api_key=api_key,
-            timeout_sec=args.openai_timeout_sec,
-            excerpt_mode=True,
-            scope_quotes=scope_quotes,
-            job_context=job_context,
-        )
-        updated = base_text[:span_start] + updated_span + base_text[span_end:]
-    else:
-        print("recorrect_incorporate_mode=full anchor_not_found_in_transcript=1")
-        updated = call_openai_incorporate_answer(
-            text=base_text,
-            question_text=question_text,
-            answer_text=answer_text,
-            model=args.model,
-            api_key=api_key,
-            timeout_sec=args.openai_timeout_sec,
-            scope_quotes=scope_quotes,
-            job_context=job_context,
-        )
-        base_len = len(base_text.strip())
-        updated_len = len(updated.strip())
-        ratio = updated_len / max(base_len, 1)
-        if base_len >= 500 and ratio < MIN_TRANSCRIPT_LENGTH_RATIO:
-            print(
-                "[WARNING] recorrect_from_line_answer: incorporate output too short "
-                f"(ratio={ratio:.3f} < {MIN_TRANSCRIPT_LENGTH_RATIO}); "
-                "keeping original transcript unchanged"
-            )
-            updated = base_text
-
-    out_path = args.output or os.path.join(
-        args.input_root, args.job_id, "merged_transcript_after_qa.txt"
-    )
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(updated)
-
-    # Phase 1 学習: coherence 由来の質問だったら、回答から正しい単語を抽出して
-    # 学習辞書に追加(次ジョブから機械補正で自動置換される)。非致命。
-    try:
-        learn_result = _persist_coherence_answer_to_learned_dict(
+    # contextual_editor ②③: pinpoint only (LLM incorporate disabled).
+    if _is_contextual_editor_question(question_result):
+        _handle_editor_pinpoint_answer(
             job_id=args.job_id,
             input_root=args.input_root,
-            question_result=question_result,
-            answer_text=answer_text,
-            base_text=base_text,
+            question_result=question_result if isinstance(question_result, dict) else {},
+            record=record,
+            out_path=out_path,
         )
-        print(f"learned_dict_from_qa={learn_result}")
-    except Exception as e:  # noqa: BLE001
-        print(f"learned_dict_from_qa_failed={e!r}")
+        try:
+            learn_result = _persist_coherence_answer_to_learned_dict(
+                job_id=args.job_id,
+                input_root=args.input_root,
+                question_result=question_result,
+                answer_text=answer_text,
+                base_text=base_text,
+            )
+            print(f"learned_dict_from_qa={learn_result}")
+        except Exception as e:  # noqa: BLE001
+            print(f"learned_dict_from_qa_failed={e!r}")
+        print(f"job_id={args.job_id}")
+        print(f"answers_json={answers_json_path}")
+        print(f"input={in_path}")
+        print(f"output={out_path}")
+        print(f"question_id={record.get('question_id')}")
+        print(f"answer_job_id={record.get('job_id')}")
+        return
 
+    ensure_after_qa_initialized(job_dir)
+    print(
+        "recorrect_skip=no_pinpoint_payload "
+        "incorporate_disabled=1 "
+        f"question_result_keys={list((question_result or {}).keys())}"
+    )
     print(f"job_id={args.job_id}")
-    print(f"answers_json={args.answers_json}")
+    print(f"answers_json={answers_json_path}")
     print(f"input={in_path}")
     print(f"output={out_path}")
     print(f"question_id={record.get('question_id')}")
-    print(f"answer_job_id={record.get('job_id')}")
-    print(f"model={args.model}")
-    print(f"openai_timeout_sec={args.openai_timeout_sec}")
 
 
 if __name__ == "__main__":
