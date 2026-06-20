@@ -1,0 +1,280 @@
+{
+  "input_path": "merged_transcript_mechanical.txt",
+  "output_path": "merged_transcript_ai.txt",
+  "input_chars": 15132,
+  "output_chars": 15060,
+  "applied_count": 31,
+  "reverted_count": 0,
+  "fact_reverted_count": 0,
+  "semantic_reverted_count": 0,
+  "skipped_count": 2,
+  "applied": [
+    {
+      "proposal_id": "0e885ce7-eff8-40c1-9254-97724ac54920",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "敵聞いてください",
+      "span_after": "適宜聞いてください",
+      "anomaly_word": "敵聞いて"
+    },
+    {
+      "proposal_id": "fd4f78bd-44f7-471b-9379-726b113efa83",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "あの",
+      "span_after": "",
+      "anomaly_word": "あの"
+    },
+    {
+      "proposal_id": "ade734da-5b49-4a6e-a344-8cab895e7137",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "もちろん",
+      "span_after": "",
+      "anomaly_word": "もちろん"
+    },
+    {
+      "proposal_id": "87f7c24c-414b-41d6-90b2-428906f61363",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "グループ会社の人的ションレポート",
+      "span_after": "グループ会社の人的資本レポート",
+      "anomaly_word": "人的ションレポート"
+    },
+    {
+      "proposal_id": "be53ec34-4f38-423e-aff5-62816a0d476b",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "だからそれは大原あ。",
+      "span_after": "",
+      "anomaly_word": "大原あ"
+    },
+    {
+      "proposal_id": "25137317-7b2b-4663-bdf5-08208b817dec",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "あの",
+      "span_after": "",
+      "anomaly_word": "あの"
+    },
+    {
+      "proposal_id": "adccd020-dde8-4aa7-8c1d-24fcb2686a0a",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "車内企画かしてもいい",
+      "span_after": "社内企画化してもいい",
+      "anomaly_word": "車内企画"
+    },
+    {
+      "proposal_id": "a5a5c787-6ad9-4554-924b-efea433c4ebd",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "このこの先の研修がいっぱい紐づいてます",
+      "span_after": "この先の研修がいっぱい紐づいてます",
+      "anomaly_word": "このこの先"
+    },
+    {
+      "proposal_id": "dab1fbac-5920-4866-8f4e-12fb9d31657e",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "まあ",
+      "span_after": "",
+      "anomaly_word": "まあ"
+    },
+    {
+      "proposal_id": "461f1d65-56d6-42b6-bf12-bdae65e652f2",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "合っています",
+      "span_after": "",
+      "anomaly_word": "合っています"
+    },
+    {
+      "proposal_id": "c87a8da0-c76f-4690-8d4d-e2a989f93691",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "でうん泡",
+      "span_after": "",
+      "anomaly_word": "でうん泡"
+    },
+    {
+      "proposal_id": "e141d7cc-8ae6-41e9-b6a9-e437e63925ba",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "まあ",
+      "span_after": "",
+      "anomaly_word": "まあ"
+    },
+    {
+      "proposal_id": "d5b29eb4-b938-46cb-9bd9-12a27f21996b",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "43eb3af8-17cd-49e5-b518-ba644a4faa7c",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "まあ",
+      "span_after": "",
+      "anomaly_word": "まあ"
+    },
+    {
+      "proposal_id": "00072826-9e69-41d8-9073-5227d39eb9c5",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "よしかな",
+      "span_after": "",
+      "anomaly_word": "よしかな"
+    },
+    {
+      "proposal_id": "814a7599-0f04-4c05-8632-9ad19972531a",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "d385acb4-004d-480d-b941-cc982587d135",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "だけど全く制約してないうんだ",
+      "span_after": "だけど全く成約してないんだ",
+      "anomaly_word": "制約してない"
+    },
+    {
+      "proposal_id": "b156c06b-c7a4-4488-b7fe-5280a8af1130",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "ま経営人レイヤー",
+      "span_after": "ま経営陣レイヤー",
+      "anomaly_word": "経営人レイヤー"
+    },
+    {
+      "proposal_id": "9c2da5a1-ba64-4739-ad1e-b354703b10c2",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "まあ",
+      "span_after": "",
+      "anomaly_word": "まあ"
+    },
+    {
+      "proposal_id": "13d0866d-40d7-4c08-a876-d6406d3efc0d",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "勝手に貼ろう。落ちしてくれる",
+      "span_after": "勝手に腹落ちしてくれる",
+      "anomaly_word": "貼ろう。落ち"
+    },
+    {
+      "proposal_id": "0f2bff90-0b80-4d84-a050-43e03f7c888f",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "なんか",
+      "span_after": "",
+      "anomaly_word": "なんか"
+    },
+    {
+      "proposal_id": "55b1fdef-c404-44a6-92d1-cf9b171b4ba7",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "人的資本系力の向上",
+      "span_after": "人的資本の向上",
+      "anomaly_word": "人的資本系力"
+    },
+    {
+      "proposal_id": "2bf901b8-f284-4b79-8ba4-1cc45141ea64",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "製造系もやっているはずだ。しま",
+      "span_after": "製造系もやっているはずだし、ま",
+      "anomaly_word": "はずだ。しま"
+    },
+    {
+      "proposal_id": "dc2f81ca-e97d-464f-a8fe-006d7182f224",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "f6b56967-02ec-4a28-86e0-3f5988cdcf67",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "全員構造勤務みたいな",
+      "span_after": "全員工場勤務みたいな",
+      "anomaly_word": "構造勤務"
+    },
+    {
+      "proposal_id": "5c6d66aa-c524-4582-a4cc-4a79364569cf",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "393cff5b-8fcd-4b04-88bc-76362fbd32ef",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "69846566-8906-466d-90ab-0aa116ec3be8",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "ま要は現状は何も分からんだことですね",
+      "span_after": "ま要は現状は何も分からんってことですね",
+      "anomaly_word": "分からんだこと"
+    },
+    {
+      "proposal_id": "6239757d-7195-4495-a2a0-9ceac13da857",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "えっと",
+      "span_after": "",
+      "anomaly_word": "えっと"
+    },
+    {
+      "proposal_id": "0dd8cd7b-7af6-4003-a454-e887d3a71e6c",
+      "verdict": "auto_delete",
+      "fact_class": "filler_garble",
+      "span_before": "いきなり",
+      "span_after": "",
+      "anomaly_word": "いきなり"
+    },
+    {
+      "proposal_id": "5a8cfcbd-55c4-4661-a0e9-13a24619d89a",
+      "verdict": "auto_correct",
+      "fact_class": "lexical_fluency",
+      "span_before": "仕事力サービスチーム",
+      "span_after": "仕事力サーベイチーム",
+      "anomaly_word": "仕事力サービス"
+    }
+  ],
+  "reverted": [],
+  "skipped": [
+    {
+      "proposal_id": "49bfcc28-e8d6-4739-8478-b45bb716c59b",
+      "verdict": "auto_delete",
+      "apply_error": "span_mismatch"
+    },
+    {
+      "proposal_id": "10e8d3b7-de64-4745-b7be-721310f18c9b",
+      "verdict": "auto_delete",
+      "apply_error": "span_mismatch"
+    }
+  ],
+  "gate_final": {
+    "ok": true,
+    "violations": []
+  },
+  "questions_merged_to_unknown_points": 117,
+  "remaining_questions": 117
+}

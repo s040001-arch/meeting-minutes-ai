@@ -1,0 +1,550 @@
+{
+  "job_id": "job_20260330_164142_2026_0325_�v���Z�i��_THR�����d���̓T�[�x�C_���c_�H�{_�G��_�H��",
+  "mode": "apply",
+  "apply_only": true,
+  "proposal_total": 150,
+  "verdict_counts": {
+    "ask_with_candidate": 47,
+    "auto_correct": 12,
+    "ask_without_candidate": 70,
+    "auto_delete": 21
+  },
+  "fact_class_guard_downgrade_count": 5,
+  "gate_would_fail": false,
+  "body_changed": true,
+  "edit_proposals_path": "data/transcriptions\\job_20260330_164142_2026_0325_�v���Z�i��_THR�����d���̓T�[�x�C_���c_�H�{_�G��_�H��\\edit_proposals.json",
+  "editor_shadow_report_path": "data/transcriptions\\job_20260330_164142_2026_0325_�v���Z�i��_THR�����d���̓T�[�x�C_���c_�H�{_�G��_�H��\\editor_shadow_report.json",
+  "spot_checks": {
+    "girigirioka": [],
+    "garble_phrases": [],
+    "garble_minimal_span": [
+      {
+        "needle": "�����Ă��܂�",
+        "proposal_id": "49bfcc28-e8d6-4739-8478-b45bb716c59b",
+        "span_before": "�A�����Ă��܂�",
+        "garble_fragment": "�A�����Ă��܂�",
+        "preserve_rationale": "�O��́u��ɒ�Ă̘g������ăf�[�^�����v�Ƃ����Ɩ������͘_�_�Ƃ��Ďc��",
+        "garble_fragment_match": true,
+        "span_overflow_flags": [
+          "span_extends_before_anomaly_beyond_evidence"
+        ]
+      }
+    ],
+    "fact_tokens_in_auto_verdict": []
+  },
+  "garble_span_audit": {
+    "auto_delete_count": 21,
+    "garble_fragment_match_count": 21,
+    "garble_fragment_match_rate": 1.0,
+    "span_overflow_flag_count": 1,
+    "flagged_proposals": [
+      {
+        "proposal_id": "49bfcc28-e8d6-4739-8478-b45bb716c59b",
+        "anomaly_word": "�����Ă��܂�",
+        "span_before": "�A�����Ă��܂�",
+        "garble_fragment": "�A�����Ă��܂�",
+        "preserve_rationale": "�O��́u��ɒ�Ă̘g������ăf�[�^�����v�Ƃ����Ɩ������͘_�_�Ƃ��Ďc��",
+        "garble_fragment_match": true,
+        "span_overflow_flags": [
+          "span_extends_before_anomaly_beyond_evidence"
+        ],
+        "span_overflow_details": {
+          "prefix_before_anomaly": "�A"
+        }
+      }
+    ]
+  },
+  "semantic_gate_simulation": {
+    "fact_gate": {
+      "ok": true,
+      "violations": []
+    },
+    "semantic_gate": {
+      "enabled": true,
+      "model": "claude-sonnet-4-6",
+      "retry_missing_enabled": false,
+      "ok": true,
+      "would_revert_count": 0,
+      "would_revert_ids": [],
+      "missing_from_llm_count": 0,
+      "no_llm_response_count": 0,
+      "checks": [
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�d���̓T�[�r�X�`�[���v���u�d���̓T�[�x�C�`�[���v�͓������Łu�d���̓T�[�x�C�v�ƈ�т���ŗL�����̌�ϊ��C���ň�ӂɊm��ł���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u������񂾂��Ɓv���u���������Ă��Ɓv�͖��炩�Ȍ�ϊ��C���Ř_�|�͕ۂ����",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�\���Ζ��v���u�H��Ζ��v�͕����i���[�J�[�����n�q��Ђ̘b�j�����ӂɊm��ł��閾�炩�Ȍ�ϊ��C���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�͂����B���܁v���u�͂������A�܁v�͕����Ɛڑ������̌�F���C���ŁA�Ӗ��E�_�|�ɕω��Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�l�I���{�n�́v�͌�ϊ��Łu�l�I���{�v���������A���������ӂɊm��ł���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�\�낤�B�����v���u�������v�͓�����ϊ��̏C���ŁA���������ӂɊm��ł���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�o�c�l���C���[�v���u�o�c�w���C���[�v�͓�����ϊ��̏C���ŁA�������ӂɊm��ł���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u���񂵂ĂȂ��v���u���񂵂ĂȂ��v�͕����i�������������Ă��邪�_��Ɏ���Ȃ��j�����ӂɊm��ł����ϊ��C���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�悵���ȁv�͌������݂̎c�[�݂̂ŁA�����E�_�_�Ƃ��ĉ��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώہu�ł���A�v��garble�i�������݁E��F���j�݂̂ŁA�������l�̂��锭�b�͊܂܂�Ȃ�",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�����Ă��܂��v�݂̂ŁA���O���̒��ߊ��葊�Ƃɂ������A�����E�_�_�̉��l�Ȃ�",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u���̂��̐�v�̖`���̏d���u���́v���������閾�炩�Ȍ������ݏC���ŁA�Ӗ����e�ɕω��Ȃ�",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�ԓ���悩���Ă������v���u�Г���扻���Ă������v�͕������ӂɊm��ł����ϊ��C���B�_�|�ω��Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώۂ́u�匴���B�v�݂̂ŁAgarble�E�������݂����B�㑱�̏d�v���b�͎c�����Ă���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�l�I�V�������|�[�g�v�́u�l�I���{���|�[�g�v�̉�����F�ŁA�������琳�����ꂪ��ӂɊm��ł��閾�炩�Ȍ�ϊ��C���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�G�����āv�́u�K�X�����āv�̌�ϊ��ŁA���������ӂɊm��ł��閾�炩�ȏC���B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�����Ȃ肢���Ȃ�v�̏d���̂���1���폜���錾�����ݏ����̂݁B���e�I�����Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώۂ͌������݁u�����Ɓv�݂̂ŁA�����E�_�_�E�Ɩ����e�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώۂ́u�����Ɓv�݂̂ŁA���l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώۂ́u�����Ɓv�݂̂ŁA���e�I���l�̂��锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂͌������݁u�����Ɓv�݂̂ŁA�����E�_�_�Ȃǉ��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂͌���I�t�B���[�u�Ȃ񂩁v�݂̂ŁA�����E�_�_���̉��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�܂��v�݂̂ŁA�������݂̊ԓ����B�Ɩ����e�E�_�_�ւ̉e���Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�Ώۂ́u�����Ɓv�݂̂ŁA�����E�_�_���̉��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�܂��v�݂̂ŁA�t�B���[�����ɂƂǂ܂�Ӗ����e�̑����Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�����Ɓv�݂̂ŁA���b���l�̂�����e�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�܂��v�݂̂ŁA�����E�_�_���̉��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂́u�܂��v�݂̂ŁAgarble�E�t�B���[�ɑ������A�������l�̂��锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂͌������݁u���́v�݂̂ŁA�����E�_�_���̉��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�u�������������v�̏d���������Ƃ̈�����폜����݂̂ŁA�Ӗ��E���e�̑����Ȃ��B",
+          "source": "llm"
+        },
+        {
+          "ok": true,
+          "issue": "none",
+          "reason": "�폜�����̂͒k�b�W���u���́v�݂̂ŁA�����E�_�_���̉��l���锭�b�͊܂܂�Ȃ��B",
+          "source": "llm"
+        }
+      ],
+      "sync_garble_span": true,
+      "skip_structural": false
+    },
+    "applied_count": 31,
+    "fact_reverted_count": 0,
+    "semantic_reverted_count": 0,
+    "skipped_count": 2,
+    "enabled": true
+  },
+  "apply_report": {
+    "input_path": "merged_transcript_mechanical.txt",
+    "output_path": "merged_transcript_ai.txt",
+    "input_chars": 15132,
+    "output_chars": 15059,
+    "applied_count": 31,
+    "reverted_count": 0,
+    "fact_reverted_count": 0,
+    "semantic_reverted_count": 0,
+    "skipped_count": 2,
+    "applied": [
+      {
+        "proposal_id": "0e885ce7-eff8-40c1-9254-97724ac54920",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�G�����Ă�������",
+        "span_after": "�K�X�����Ă�������",
+        "anomaly_word": "�G������"
+      },
+      {
+        "proposal_id": "fd4f78bd-44f7-471b-9379-726b113efa83",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "����",
+        "span_after": "",
+        "anomaly_word": "����"
+      },
+      {
+        "proposal_id": "ade734da-5b49-4a6e-a344-8cab895e7137",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�������",
+        "span_after": "",
+        "anomaly_word": "�������"
+      },
+      {
+        "proposal_id": "87f7c24c-414b-41d6-90b2-428906f61363",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�O���[�v��Ђ̐l�I�V�������|�[�g",
+        "span_after": "�O���[�v��Ђ̐l�I���{���|�[�g",
+        "anomaly_word": "�l�I�V�������|�[�g"
+      },
+      {
+        "proposal_id": "be53ec34-4f38-423e-aff5-62816a0d476b",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�匴���B",
+        "span_after": "",
+        "anomaly_word": "�匴��"
+      },
+      {
+        "proposal_id": "25137317-7b2b-4663-bdf5-08208b817dec",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "����",
+        "span_after": "",
+        "anomaly_word": "����"
+      },
+      {
+        "proposal_id": "adccd020-dde8-4aa7-8c1d-24fcb2686a0a",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�ԓ���悩���Ă�����",
+        "span_after": "�Г���扻���Ă�����",
+        "anomaly_word": "�ԓ����"
+      },
+      {
+        "proposal_id": "a5a5c787-6ad9-4554-924b-efea433c4ebd",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "���̂��̐�̌��C�������ς��R�Â��Ă܂�",
+        "span_after": "���̐�̌��C�������ς��R�Â��Ă܂�",
+        "anomaly_word": "���̂��̐�"
+      },
+      {
+        "proposal_id": "dab1fbac-5920-4866-8f4e-12fb9d31657e",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�܂�",
+        "span_after": "",
+        "anomaly_word": "�܂�"
+      },
+      {
+        "proposal_id": "461f1d65-56d6-42b6-bf12-bdae65e652f2",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�����Ă��܂�",
+        "span_after": "",
+        "anomaly_word": "�����Ă��܂�"
+      },
+      {
+        "proposal_id": "c87a8da0-c76f-4690-8d4d-e2a989f93691",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�ł���A",
+        "span_after": "",
+        "anomaly_word": "�ł���A"
+      },
+      {
+        "proposal_id": "e141d7cc-8ae6-41e9-b6a9-e437e63925ba",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�܂�",
+        "span_after": "",
+        "anomaly_word": "�܂�"
+      },
+      {
+        "proposal_id": "d5b29eb4-b938-46cb-9bd9-12a27f21996b",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "43eb3af8-17cd-49e5-b518-ba644a4faa7c",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�܂�",
+        "span_after": "",
+        "anomaly_word": "�܂�"
+      },
+      {
+        "proposal_id": "00072826-9e69-41d8-9073-5227d39eb9c5",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�悵����",
+        "span_after": "",
+        "anomaly_word": "�悵����"
+      },
+      {
+        "proposal_id": "814a7599-0f04-4c05-8632-9ad19972531a",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "d385acb4-004d-480d-b941-cc982587d135",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�����ǑS�����񂵂ĂȂ�����",
+        "span_after": "�����ǑS�����񂵂ĂȂ���",
+        "anomaly_word": "���񂵂ĂȂ�"
+      },
+      {
+        "proposal_id": "b156c06b-c7a4-4488-b7fe-5280a8af1130",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�܌o�c�l���C���[",
+        "span_after": "�܌o�c�w���C���[",
+        "anomaly_word": "�o�c�l���C���["
+      },
+      {
+        "proposal_id": "9c2da5a1-ba64-4739-ad1e-b354703b10c2",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�܂�",
+        "span_after": "",
+        "anomaly_word": "�܂�"
+      },
+      {
+        "proposal_id": "13d0866d-40d7-4c08-a876-d6406d3efc0d",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "����ɓ\�낤�B�������Ă����",
+        "span_after": "����ɕ��������Ă����",
+        "anomaly_word": "�\�낤�B����"
+      },
+      {
+        "proposal_id": "0f2bff90-0b80-4d84-a050-43e03f7c888f",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�Ȃ�",
+        "span_after": "",
+        "anomaly_word": "�Ȃ�"
+      },
+      {
+        "proposal_id": "55b1fdef-c404-44a6-92d1-cf9b171b4ba7",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�l�I���{�n�͂̌���",
+        "span_after": "�l�I���{�̌���",
+        "anomaly_word": "�l�I���{�n��"
+      },
+      {
+        "proposal_id": "2bf901b8-f284-4b79-8ba4-1cc45141ea64",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�����n������Ă���͂����B����",
+        "span_after": "�����n������Ă���͂������A��",
+        "anomaly_word": "�͂����B����"
+      },
+      {
+        "proposal_id": "dc2f81ca-e97d-464f-a8fe-006d7182f224",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "f6b56967-02ec-4a28-86e0-3f5988cdcf67",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�S���\���Ζ��݂�����",
+        "span_after": "�S���H��Ζ��݂�����",
+        "anomaly_word": "�\���Ζ�"
+      },
+      {
+        "proposal_id": "5c6d66aa-c524-4582-a4cc-4a79364569cf",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "393cff5b-8fcd-4b04-88bc-76362fbd32ef",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "69846566-8906-466d-90ab-0aa116ec3be8",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�ܗv�͌���͉���������񂾂��Ƃł���",
+        "span_after": "�ܗv�͌���͉������������Ă��Ƃł���",
+        "anomaly_word": "������񂾂���"
+      },
+      {
+        "proposal_id": "6239757d-7195-4495-a2a0-9ceac13da857",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "������",
+        "span_after": "",
+        "anomaly_word": "������"
+      },
+      {
+        "proposal_id": "0dd8cd7b-7af6-4003-a454-e887d3a71e6c",
+        "verdict": "auto_delete",
+        "fact_class": "filler_garble",
+        "span_before": "�����Ȃ�",
+        "span_after": "",
+        "anomaly_word": "�����Ȃ�"
+      },
+      {
+        "proposal_id": "5a8cfcbd-55c4-4661-a0e9-13a24619d89a",
+        "verdict": "auto_correct",
+        "fact_class": "lexical_fluency",
+        "span_before": "�d���̓T�[�r�X�`�[��",
+        "span_after": "�d���̓T�[�x�C�`�[��",
+        "anomaly_word": "�d���̓T�[�r�X"
+      }
+    ],
+    "reverted": [],
+    "skipped": [
+      {
+        "proposal_id": "49bfcc28-e8d6-4739-8478-b45bb716c59b",
+        "verdict": "auto_delete",
+        "apply_error": "span_mismatch"
+      },
+      {
+        "proposal_id": "10e8d3b7-de64-4745-b7be-721310f18c9b",
+        "verdict": "auto_delete",
+        "apply_error": "span_mismatch"
+      }
+    ],
+    "gate_final": {
+      "ok": true,
+      "violations": []
+    },
+    "questions_merged_to_unknown_points": 0,
+    "remaining_questions": 117
+  },
+  "editor_apply_report_path": "data/transcriptions\\job_20260330_164142_2026_0325_�v���Z�i��_THR�����d���̓T�[�x�C_���c_�H�{_�G��_�H��\\editor_apply_report.json",
+  "output_ai_path": "data/transcriptions\\job_20260330_164142_2026_0325_�v���Z�i��_THR�����d���̓T�[�x�C_���c_�H�{_�G��_�H��\\merged_transcript_ai.txt"
+}

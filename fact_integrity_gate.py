@@ -10,17 +10,21 @@ from typing import Any
 
 _FLAGGED_TOKEN_RE = re.compile(r"[^\s\n。、]{1,40}\[要確認\]")
 _HEADING_RE = re.compile(r"^(?:###\s*)?▼")
-# Substantive amounts only — bare digits in garble (e.g. 「16時にちょっ」) are not protected.
-_NUMERIC_NORMALIZE_RE = re.compile(
-    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万円|万|円|%|倍|人|名|件)"
+# Substantive amounts — bare digits in garble (e.g. 「16時にちょっ」) are not protected.
+_AMOUNT_PROTECT_RE = re.compile(
+    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万円|万|円|%|倍)"
 )
+# Schedule / headcount facts (substantive; not garble-internal lone digits).
+_SCHEDULE_PROTECT_RE = re.compile(r"\d+\s*(?:年目|クラス|月|人)")
 
 
 @dataclass
 class FactSnapshot:
-    numbers: set[str] = field(default_factory=set)
+    amounts: set[str] = field(default_factory=set)
+    schedule_tokens: set[str] = field(default_factory=set)
     flagged_tokens: list[str] = field(default_factory=list)
     participant_mentions: set[str] = field(default_factory=set)
+    place_mentions: set[str] = field(default_factory=set)
     heading_count: int = 0
 
 
@@ -31,9 +35,18 @@ class GateResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _extract_numbers(text: str) -> set[str]:
+def _extract_amounts(text: str) -> set[str]:
     found: set[str] = set()
-    for m in _NUMERIC_NORMALIZE_RE.finditer(text or ""):
+    for m in _AMOUNT_PROTECT_RE.finditer(text or ""):
+        token = m.group(0).strip()
+        if token:
+            found.add(token)
+    return found
+
+
+def _extract_schedule_tokens(text: str) -> set[str]:
+    found: set[str] = set()
+    for m in _SCHEDULE_PROTECT_RE.finditer(text or ""):
         token = m.group(0).strip()
         if token:
             found.add(token)
@@ -58,23 +71,57 @@ def _participant_mentions(text: str, participants: list[str]) -> set[str]:
     return mentioned
 
 
+def _place_mentions(text: str, places: list[str]) -> set[str]:
+    mentioned: set[str] = set()
+    for name in places:
+        n = str(name).strip()
+        if n and len(n) >= 2 and n in text:
+            mentioned.add(n)
+    return mentioned
+
+
 def extract_fact_snapshot(
     text: str,
     *,
     meeting_profile: dict[str, Any] | None = None,
+    extra_place_names: list[str] | None = None,
 ) -> FactSnapshot:
     profile = meeting_profile or {}
     participants = []
     for key in ("participants", "attendees", "customer_names"):
         participants.extend(str(x).strip() for x in (profile.get(key) or []) if str(x).strip())
 
+    places = list(extra_place_names or [])
+    for memo in profile.get("relevant_knowledge") or []:
+        for token in str(memo).replace("、", " ").split():
+            t = token.strip()
+            if len(t) >= 2:
+                places.append(t)
+
     heading_count = sum(1 for line in (text or "").splitlines() if _HEADING_RE.match(line.strip()))
     return FactSnapshot(
-        numbers=_extract_numbers(text),
+        amounts=_extract_amounts(text),
+        schedule_tokens=_extract_schedule_tokens(text),
         flagged_tokens=_extract_flagged_tokens(text),
         participant_mentions=_participant_mentions(text, participants),
+        place_mentions=_place_mentions(text, places),
         heading_count=heading_count,
     )
+
+
+def _compare_token_sets(
+    violations: list[str],
+    *,
+    label: str,
+    before: set[str],
+    after: set[str],
+) -> None:
+    missing = before - after
+    if missing:
+        violations.append(f"{label}_missing:{sorted(missing)}")
+    added = after - before
+    if added:
+        violations.append(f"{label}_added:{sorted(added)}")
 
 
 def verify_fact_integrity(
@@ -82,19 +129,26 @@ def verify_fact_integrity(
     after: str,
     *,
     meeting_profile: dict[str, Any] | None = None,
+    extra_place_names: list[str] | None = None,
 ) -> GateResult:
-    snap_before = extract_fact_snapshot(before, meeting_profile=meeting_profile)
-    snap_after = extract_fact_snapshot(after, meeting_profile=meeting_profile)
+    snap_before = extract_fact_snapshot(
+        before, meeting_profile=meeting_profile, extra_place_names=extra_place_names
+    )
+    snap_after = extract_fact_snapshot(
+        after, meeting_profile=meeting_profile, extra_place_names=extra_place_names
+    )
     violations: list[str] = []
     warnings: list[str] = []
 
-    missing_numbers = snap_before.numbers - snap_after.numbers
-    if missing_numbers:
-        violations.append(f"numbers_missing:{sorted(missing_numbers)}")
-
-    new_numbers = snap_after.numbers - snap_before.numbers
-    if new_numbers:
-        violations.append(f"numbers_added:{sorted(new_numbers)}")
+    _compare_token_sets(
+        violations, label="amounts", before=snap_before.amounts, after=snap_after.amounts
+    )
+    _compare_token_sets(
+        violations,
+        label="schedule",
+        before=snap_before.schedule_tokens,
+        after=snap_after.schedule_tokens,
+    )
 
     if len(snap_after.flagged_tokens) < len(snap_before.flagged_tokens):
         violations.append(
@@ -110,9 +164,18 @@ def verify_fact_integrity(
             if core not in after:
                 violations.append(f"flagged_token_missing:{token[:40]}")
 
-    missing_participants = snap_before.participant_mentions - snap_after.participant_mentions
-    if missing_participants:
-        violations.append(f"participant_missing:{sorted(missing_participants)}")
+    _compare_token_sets(
+        violations,
+        label="participant",
+        before=snap_before.participant_mentions,
+        after=snap_after.participant_mentions,
+    )
+    _compare_token_sets(
+        violations,
+        label="place",
+        before=snap_before.place_mentions,
+        after=snap_after.place_mentions,
+    )
 
     if snap_before.heading_count > 0 and snap_after.heading_count < snap_before.heading_count:
         violations.append(

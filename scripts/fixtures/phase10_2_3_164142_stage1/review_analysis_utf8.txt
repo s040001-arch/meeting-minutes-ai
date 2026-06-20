@@ -1,0 +1,46 @@
+﻿python : C:\Users\AiharaRyutaro\AppData\Local\Programs\Python\Python314\Lib\site-packages\requests\__init__.py:113: Req
+uestsDependencyWarning: urllib3 (2.5.0) or chardet (7.0.1)/charset_normalizer (3.4.4) doesn't match a supported version
+!
+発生場所 C:\Users\AiharaRyutaro\AppData\Local\Temp\ps-script-0611e37c-94dc-45c4-8726-39d42d224cbc.ps1:83 文字:40
++ ... inutes-ai"; python scripts/_stage1_review_analysis.py > scripts/fixtu ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\Aihara...ported version!:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  warnings.warn(
+=== 、。 locations ===
+pos=665: ...ちょっとまず全体に関わる人としてえ。まずよろしくお願いします。というところからなんですけど、。まずですね。TOKIO さんとショート力サービスというものを考えて作ったのはもうはるか 2...
+pos=3545: ...ら分かんないんですけど、まあ時さんの話聞いてるとまでっかいとどこでも話してうんはい。
+
+で、。このチームでやりたいのはなんか?その。こうやればビジネスになるよね。っていうプロトタイプを...
+
+=== Other punct noise ===
+。、: 2
+
+=== WIDE ④ (span_before != anomaly_word) ===
+anomaly='大原あ'
+  span='だからそれは大原あ。'
+  garble_fragment='だからそれは大原あ。'
+  reason=「大原あ」は大川社長の言い直し残骸
+
+=== 合っています mechanical ===
+1. ...ま、営業のネタになるようなものが作れるといいな。というま元はそんな話と合っていますですね。
+
+その元々は北國銀行 C、シノベーションっていう地銀コンサルさんとお話をしていた時に。そのま地方の中...
+2. ...のところはなさそうなんですかね?もう先に提案の枠だけ作っておいて。
+
+合っていますそこにデータ入れるだけじゃないですけど、あの?先に動かせるものがあれば、なんかやっておくのもちょっとよしかなっ...
+3. ...結果と本当の結果とま結果から言えることぐらいまでをピックアップしてて、合っていますまこの中からどこ喋るか?はまその時のワークショップ、さばきで盛り上がったところを喋ろうみたいな。そういう感じあ...
+
+=== 合っています after ===
+1. ...ま、営業のネタになるようなものが作れるといいな。というま元はそんな話と合っていますですね。
+
+その元々は北國銀行 C、シノベーションっていう地銀コンサルさんとお話をしていた時に。そのま地方の中...
+2. ...のところはなさそうなんですかね?もう先に提案の枠だけ作っておいて。
+
+合っていますそこにデータ入れるだけじゃないですけど、あの?先に動かせるものがあれば、なんかやっておくのもちょっとっていう風...
+
+proposal 49bfcc28 verdict=auto_delete span='、合っています' anomaly='合っています' garble='、合っています'
+
+proposal 461f1d65 verdict=auto_delete span='合っています' anomaly='合っています' garble='合っています'
+

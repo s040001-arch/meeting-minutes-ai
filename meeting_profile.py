@@ -9,6 +9,10 @@ from typing import Any
 
 MEETING_PROFILE_FILENAME = "meeting_profile.json"
 
+_TRANSCRIPT_SPEAKER_NAME_RE = re.compile(
+    r"[\u3040-\u9fff\u30a0-\u30ffA-Za-z]{1,16}(?:さん|様|氏)"
+)
+
 
 def strip_status_prefix(title: str) -> str:
     """Drive Doc 名の【処理中】等の接頭辞を除去する。"""
@@ -99,6 +103,44 @@ def build_meeting_profile(
         "job_context": dict(job_context or {}),
         "display_title": str(display_title or "").strip() or None,
     }
+
+
+def infer_participants_from_transcript(
+    text: str,
+    *,
+    min_mentions: int = 3,
+    max_names: int = 15,
+) -> list[str]:
+    """Extract frequent 〇〇さん/様/氏 from transcript (job-specific, not a fixed list)."""
+    if not str(text or "").strip():
+        return []
+    from collections import Counter
+
+    counts = Counter(_TRANSCRIPT_SPEAKER_NAME_RE.findall(text))
+    out: list[str] = []
+    for spoken, cnt in counts.most_common(max_names):
+        if cnt < min_mentions:
+            break
+        base = re.sub(r"(?:さん|様|氏)$", "", str(spoken).strip())
+        if base and base not in out:
+            out.append(base)
+    return out
+
+
+def augment_profile_with_transcript_participants(
+    profile: dict[str, Any] | None,
+    text: str,
+) -> dict[str, Any]:
+    """When profile has no participants, infer from transcript for editor prompts."""
+    merged = dict(profile or {})
+    if merged.get("participants"):
+        return merged
+    inferred = infer_participants_from_transcript(text)
+    if not inferred:
+        return merged
+    merged["participants"] = inferred
+    merged["participants_source"] = "transcript_inferred"
+    return merged
 
 
 def format_meeting_profile_for_prompt(profile: dict | None) -> str:

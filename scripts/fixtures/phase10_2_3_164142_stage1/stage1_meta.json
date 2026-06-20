@@ -1,0 +1,14 @@
+{
+  "job_id": "job_20260330_164142_2026_0325_プレセナ社_THR向け仕事力サーベイ_高田_秋本_季央_工藤",
+  "applied_count": 31,
+  "semantic_reverted_count": 0,
+  "fact_reverted_count": 0,
+  "skipped_count": 2,
+  "gate_final_ok": true,
+  "before_chars": 15132,
+  "after_chars": 15059,
+  "diff_lines": 89,
+  "diff_path": "C:\\Automation\\meeting-minutes-ai\\scripts\\fixtures\\phase10_2_3_164142_stage1\\phase10_2_3_164142_editor_apply_full.diff",
+  "summary_path": "C:\\Automation\\meeting-minutes-ai\\scripts\\fixtures\\phase10_2_3_164142_stage1\\phase10_2_3_164142_stage1_apply_report.md",
+  "job_files_restored": true
+}
