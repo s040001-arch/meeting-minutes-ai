@@ -51,7 +51,7 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _RUN_DOCS_HUB_E2E = os.path.join(_REPO_ROOT, "run_docs_hub_e2e.py")
 _RUN_RESUME_FROM_STEP7 = os.path.join(_REPO_ROOT, "run_resume_from_step7.py")
 CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
-LINE_EXTRACTOR_MODEL = "claude-sonnet-4-20250514"
+LINE_EXTRACTOR_MODEL = "claude-sonnet-4-6"
 
 state = {
     # 質問送信は行わず、回答受付だけ行う前提のため

@@ -45,8 +45,8 @@ _DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
 ]
-_EXTRACT_MODEL = "claude-sonnet-4-20250514"
-_MERGE_MODEL = "claude-sonnet-4-20250514"
+_EXTRACT_MODEL = "claude-sonnet-4-6"
+_MERGE_MODEL = "claude-sonnet-4-6"
 _DOCS_MIME = "application/vnd.google-apps.document"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 

@@ -13,7 +13,7 @@ from meeting_profile import load_meeting_profile, resolve_display_title
 from repo_env import load_dotenv_local
 
 
-_MINUTES_MODEL = "claude-sonnet-4-20250514"
+_MINUTES_MODEL = "claude-sonnet-4-6"
 _MINUTES_TIMEOUT_SEC = 900
 _MINUTES_RETRY_BACKOFF_SEC = (5.0, 10.0)
 MINUTES_SECTIONS_RAW_FILENAME = "minutes_sections_raw.json"

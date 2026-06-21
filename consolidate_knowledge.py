@@ -11,7 +11,7 @@ from anthropic_prompt_cache import cached_system
 from repo_env import load_dotenv_local
 from knowledge_sheet_store import load_knowledge_memos, save_knowledge_memos
 
-_MODEL = "claude-sonnet-4-20250514"
+_MODEL = "claude-sonnet-4-6"
 _BATCH_SIZE = 250
 
 _SYSTEM_PROMPT = """\

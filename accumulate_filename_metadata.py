@@ -140,7 +140,7 @@ def _merge_filename_metadata_with_claude(
         "source": "filename_metadata_auto_extracted",
     }
     resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         # 既存 knowledge memos 全体を返させるため、累積数が増えると出力も大きくなる。
         # 4000 では本番(memos 155件)で truncation 観測のため引き上げ。
         max_tokens=16000,

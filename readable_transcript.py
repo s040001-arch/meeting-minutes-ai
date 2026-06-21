@@ -16,7 +16,7 @@ from anthropic_prompt_cache import cached_system
 from meeting_profile import format_meeting_profile_for_prompt
 
 READABLE_TRANSCRIPT_FILENAME = "merged_transcript_readable.txt"
-READABLE_MODEL = "claude-sonnet-4-20250514"
+READABLE_MODEL = "claude-sonnet-4-6"
 READABLE_MAX_TOKENS = 8192
 READABLE_TIMEOUT_SEC = 180
 READABLE_CHUNK_TARGET_CHARS = 3500
