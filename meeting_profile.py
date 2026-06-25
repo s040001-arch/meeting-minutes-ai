@@ -9,6 +9,12 @@ from typing import Any
 
 MEETING_PROFILE_FILENAME = "meeting_profile.json"
 
+# The pipeline's sole operator. He attends nearly every job (internal and
+# external) but, since he is the one naming the source file, rarely appears
+# in the filename-derived attendee list -- so participants built purely from
+# the filename systematically omit him.
+SYSTEM_OWNER_NAME = "相原"
+
 _TRANSCRIPT_SPEAKER_NAME_RE = re.compile(
     r"[\u3040-\u9fff\u30a0-\u30ffA-Za-z]{1,16}(?:さん|様|氏)"
 )
@@ -131,15 +137,22 @@ def augment_profile_with_transcript_participants(
     profile: dict[str, Any] | None,
     text: str,
 ) -> dict[str, Any]:
-    """When profile has no participants, infer from transcript for editor prompts."""
+    """When profile has no participants, infer from transcript for editor prompts.
+
+    Always folds in SYSTEM_OWNER_NAME regardless: a filename-derived participant
+    list reflects who the *filer* named, not who actually spoke, and the filer
+    routinely omits himself.
+    """
     merged = dict(profile or {})
-    if merged.get("participants"):
-        return merged
-    inferred = infer_participants_from_transcript(text)
-    if not inferred:
-        return merged
-    merged["participants"] = inferred
-    merged["participants_source"] = "transcript_inferred"
+    participants = list(merged.get("participants") or [])
+    if not participants:
+        inferred = infer_participants_from_transcript(text)
+        if inferred:
+            participants = inferred
+            merged["participants_source"] = "transcript_inferred"
+    if SYSTEM_OWNER_NAME not in participants:
+        participants.append(SYSTEM_OWNER_NAME)
+    merged["participants"] = participants
     return merged
 
 

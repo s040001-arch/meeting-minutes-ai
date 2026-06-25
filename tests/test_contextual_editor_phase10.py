@@ -97,6 +97,32 @@ class FactClassifyTests(unittest.TestCase):
         )
         self.assertEqual(fc, FACT_PROPER_NOUN)
 
+    def test_unlisted_unit_still_detected_as_numeric(self) -> None:
+        """A garbled counter (車 standing in for 社) isn't in any fixed unit
+        list, but the digit-adjacent-kanji structure still flags it as
+        numeric instead of letting it slip through as lexical_fluency."""
+        fc, src = classify_fact_class(
+            span_before="イオンでも1000車ぐらい",
+            span_after="イオンでも1000社ぐらい",
+            llm_fact_class="lexical_fluency",
+        )
+        self.assertEqual(fc, FACT_NUMERIC)
+        self.assertEqual(src, "code_override")
+
+    def test_numeric_misclassified_as_lexical_fluency_blocks_auto_correct(self) -> None:
+        """End-to-end: reclassify then route — must not stay auto_correct."""
+        proposal = {
+            "verdict": VERDICT_AUTO_CORRECT,
+            "fact_class": "lexical_fluency",
+            "span_before": "イオンでも1000車ぐらい",
+            "span_after": "イオンでも1000社ぐらい",
+            "hypothesis": "",
+        }
+        reclassify_proposal(proposal)
+        enforce_fact_routing(proposal)
+        self.assertEqual(proposal["fact_class"], FACT_NUMERIC)
+        self.assertNotEqual(proposal["verdict"], VERDICT_AUTO_CORRECT)
+
 
 class FactIntegrityGateTests(unittest.TestCase):
     def test_amounts_must_persist(self) -> None:

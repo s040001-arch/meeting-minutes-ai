@@ -17,9 +17,13 @@ from edit_proposal_schema import (
     normalize_verdict,
 )
 
-# Substantive business numbers (amounts, headcount with units) — not garble-internal digits.
+# Substantive business numbers — a digit run directly adjacent to a kanji counter
+# suffix (structural Japanese counter-word pattern), not an enumerated unit list.
+# A fixed whitelist (万円/人/件/...) misses garbled units entirely, e.g. STT
+# rendering "1000社" as "1000車" — the wrong unit just isn't in the list, so the
+# anomaly silently classifies as lexical_fluency and slips past the fact guard.
 _SUBSTANTIVE_NUMERIC_RE = re.compile(
-    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万円|万|円|%|倍|人|名|件)"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:%|[一-龥]{1,2})"
 )
 # Clear schedule/commitment: 「16時開催」「6月1日まで」— not 「16時にちょっという」崩れ片。
 _SUBSTANTIVE_DATETIME_RE = re.compile(
