@@ -1,0 +1,137 @@
+{
+  "applied_at": "2026-06-20T05:53:30Z",
+  "fact_gate_ok": true,
+  "fact_gate_violations": [],
+  "applied": [
+    {
+      "question_id": "e5c54bb0-a8b3-4c67-a4e0-5004481a82fe",
+      "review_index": 5,
+      "anomaly_word": "23 科目",
+      "answer_text": "2〜3科目",
+      "verdict_applied": "auto_correct",
+      "apply_mode": "anomaly_pinpoint",
+      "apply_meta": {
+        "apply_mode": "anomaly_pinpoint",
+        "anomaly_range": [
+          0,
+          5
+        ],
+        "matched_anomaly": "23 科目",
+        "replacement_word": "2〜3科目",
+        "over_replaced": false
+      },
+      "span_before": "23 科目ぐらい増えるへえ",
+      "span_after": "2〜3科目ぐらい増えるへえ",
+      "before_excerpt": "23 科目ぐらい増えるへえ"
+    },
+    {
+      "question_id": "64b1b14f-6d46-4099-9851-08d5b567458b",
+      "review_index": 6,
+      "anomaly_word": "MC",
+      "answer_text": "現状維持",
+      "verdict_applied": "keep",
+      "apply_mode": "anomaly_keep_unchanged",
+      "apply_meta": {
+        "apply_mode": "anomaly_keep_unchanged"
+      },
+      "span_before": "はい、MC も乗ってくる",
+      "span_after": "はい、MC も乗ってくる",
+      "skipped": true
+    },
+    {
+      "question_id": "256ad422-9b24-4d31-97c4-e04758a10328",
+      "review_index": null,
+      "anomaly_word": "試合",
+      "answer_text": "社",
+      "verdict_applied": "auto_correct",
+      "apply_mode": "anomaly_pinpoint",
+      "apply_meta": {
+        "apply_mode": "anomaly_pinpoint",
+        "anomaly_range": [
+          4,
+          6
+        ],
+        "matched_anomaly": "試合",
+        "replacement_word": "社",
+        "over_replaced": false
+      },
+      "span_before": "200 試合やり 200 人分データ",
+      "span_after": "200 社やり 200 人分データ",
+      "before_excerpt": "200 試合やり 200 人分データ"
+    },
+    {
+      "question_id": "f515afe4-48a2-418c-9a0d-5899fdb324d2",
+      "review_index": 8,
+      "anomaly_word": "サンタさん",
+      "answer_text": "猿田さん",
+      "verdict_applied": "auto_correct",
+      "apply_mode": "anomaly_pinpoint",
+      "apply_meta": {
+        "apply_mode": "anomaly_pinpoint",
+        "anomaly_range": [
+          0,
+          5
+        ],
+        "matched_anomaly": "サンタさん",
+        "replacement_word": "猿田さん",
+        "over_replaced": false
+      },
+      "span_before": "サンタさんもうまく入って",
+      "span_after": "猿田さんもうまく入って",
+      "before_excerpt": "サンタさんもうまく入って"
+    },
+    {
+      "question_id": "256ad422-9b24-4d31-97c4-e04758a10328",
+      "review_index": null,
+      "anomaly_word": "試合",
+      "answer_text": "社",
+      "verdict_applied": "auto_correct",
+      "apply_mode": "anomaly_pinpoint",
+      "apply_meta": {
+        "apply_mode": "anomaly_pinpoint",
+        "anomaly_range": [
+          8,
+          10
+        ],
+        "matched_anomaly": "試合",
+        "replacement_word": "社",
+        "over_replaced": false
+      },
+      "span_before": "CCI が 2 試合やったあと小松放棄もやりましたね",
+      "span_after": "CCI が 2 社やったあと小松放棄もやりましたね",
+      "before_excerpt": "CCI が 2 試合やったあと小松放棄もやりましたね"
+    },
+    {
+      "question_id": "229f1720-6a03-4ae7-8a66-7c1b498bdbb8",
+      "review_index": 7,
+      "anomaly_word": "小松放棄",
+      "error": "span mismatch at 3376: 'CCI が 2 試合やったあと小松放棄もやりましたね'"
+    },
+    {
+      "question_id": "0b211185-893c-4da2-ab97-ca966a704ead",
+      "review_index": 4,
+      "anomaly_word": "4 問 5 択",
+      "answer_text": "正しい",
+      "verdict_applied": "keep",
+      "apply_mode": "anomaly_keep_unchanged",
+      "apply_meta": {
+        "apply_mode": "anomaly_keep_unchanged"
+      },
+      "span_before": "4 問ですよ。だけど 5 問です。4 問かお 4 です。4 か 4 問 5 択か",
+      "span_after": "4 問ですよ。だけど 5 問です。4 問かお 4 です。4 か 4 問 5 択か",
+      "skipped": true
+    },
+    {
+      "question_id": "c2d86339-478d-4a31-9d73-c9a128ff20d9",
+      "review_index": 1,
+      "anomaly_word": "8 数字",
+      "error": "span_not_found"
+    },
+    {
+      "question_id": "af308e77-f70c-4fbd-b68a-8a7ba7c34232",
+      "review_index": 2,
+      "anomaly_word": "1000 車",
+      "error": "span_not_found"
+    }
+  ]
+}
