@@ -7,7 +7,9 @@
 
 ## 現在地（2026-06 時点）
 
-- **Phase 10 編集者パス**。apply 本番 **10.2.3 の段1まで完了**、**段2デプロイ手前**。
+- **Phase 10 編集者パス**。**段3まで完了・本番 apply モード稼働中**（2026-06-22 相原GOで通常運転開始）。
+  Railway production: `CONTEXTUAL_EDITOR_ENABLED=on` / `CONTEXTUAL_EDITOR_MODE=apply` / `SEMANTIC_INTEGRITY_GATE_ENABLED=on`。
+  最新デプロイは Part C コミット（旧Sonnet 4 ID 9モジュール掃除済み）、ログ正常（`no_new_files` ポーリング継続、エラーなし）。
 - **本文を触る全経路を pinpoint 統一済み**（①④ `editor_apply` / ②③ `recorrect_from_line_answer`、LLM incorporate 撤去）。共通モジュール: `pinpoint_answer_apply.py`。
 - **安全網**
   - Layer 1: `fact_class` routing（`edit_proposal_schema.refresh_proposal_routing`）
@@ -59,8 +61,9 @@ amounts/schedule/place 拡張も、どのコミットにも入っていない未
 
 ## 進行中
 
-- **段2前修正（大原あ ④ span 是正・apply 後句読点 normalize）・コミット再構成・③件数調査は完了**
-  （ディレクターレビュー round1 + round2）。次は **ディレクター再レビュー → 相原 GO** 待ち。
+- **段2・段3完了**。job_142841 実データでの apply 実走・各種検証スクリプト（span alignment / garble fragment /
+  semantic revert 挙動）で fact gate PASS・過削除0を確認済み。2026-06-22 相原GOで `CONTEXTUAL_EDITOR_MODE=apply`
+  を本番で通常運転として継続稼働。
 - **Cursor は当面触らない**: `editor_apply.py` / 句読点 normalize モジュール / ④ routing — 重複実装・コンフリト回避。
 
 ---
@@ -69,12 +72,12 @@ amounts/schedule/place 拡張も、どのコミットにも入っていない未
 
 ### 10.2.3 デプロイ（直近）
 
-| 段 | 内容 |
-|----|------|
-| **段2** | 本番デプロイ（コミット (a) のみ）+ Railway `SEMANTIC_INTEGRITY_GATE_ENABLED=on`（2-d 方針）。**相原 GO まで実行しない** |
-| **段3** | デプロイ直後に本番ジョブ 1 本。`editor_apply_report.json` の `semantic_reverted_count`・fact gate・missing_from_llm 件数を確認 |
+| 段 | 内容 | 状態 |
+|----|------|------|
+| **段2** | 本番デプロイ（コミット (a) のみ）+ Railway `SEMANTIC_INTEGRITY_GATE_ENABLED=on`（2-d 方針） | 完了 |
+| **段3** | `CONTEXTUAL_EDITOR_MODE=apply` 切替・実データ apply 実走確認 | 完了（2026-06-22 相原GOで通常運転開始） |
 
-コミット再構成・テスト緑化済み（round2）→ ディレクター再レビュー → GO なら段2へ。
+次の優先タスクは下記「164142 回答・品質」「インフラ・横展開」。
 
 ### 164142 回答・品質
 
@@ -86,8 +89,20 @@ amounts/schedule/place 拡張も、どのコミットにも入っていない未
   既存 A8 の `answer_text` を再マージしてから着手すること（fixture 自体は今回未更新）。
 - **③ B48 件・C14 件**（再export後の値。旧 fixture の C10 は古い）— 相原作業
   （`scripts/fixtures/phase10_step3_164142_answers_template.json` / `answers_step3.json`、再export要）。
-- **優先2**: profile 非依存の人名誤認識検出（iPhone→相原 が漏れた根）。
-- **優先3**: 数値+単位整合・hypothesis 生成漏れ・anomaly 取り違え。
+  **2026-06-23 追記**: 優先2/3検証で 164142 の `edit_proposals.json` を再生成済み（旧版は
+  `edit_proposals.json.bak_pre_priority23` に退避）。proposal 件数が変わっているため、
+  B48/C14 着手前の再export はこの新 `edit_proposals.json` を基準にすること。
+- **優先2・優先3: 完了（2026-06-23）**。`meeting_profile.py`（`SYSTEM_OWNER_NAME` を
+  filename由来participantsへ常時マージ）/ `fact_classify.py`（数値+単位ガードを固定単位リストから
+  「数字に直結する漢字カウンタ」構造判定へ一般化）/ `contextual_editor.py`（プロンプトに
+  「参加者リストは不完全前提」「単位不整合は文脈の対象で判断」のガイダンス追加）。
+  164142 で再shadow検証: 修正前は提案ゼロだった `iPhone さん` を `proper_noun`/`ask_without_candidate`
+  で新規検出、`1000車` は `uncertain` から `numeric`/`ask_with_candidate`（hypothesis=`1000社`）に改善。
+  本文不変・fact gate PASS・テスト138件green（`tests/test_meeting_profile.py` 新規、
+  `tests/test_contextual_editor_phase10.py` に2件追加）。検証スクリプト:
+  `scripts/verify_priority2_3_164142_shadow.py` / 結果: `scripts/fixtures/priority2_3_164142_shadow_verify.json`。
+  ローカル実行時は `.env` の `GOOGLE_OAUTH_TOKEN_JSON` が失効しており world_knowledge 注入なしで検証
+  （Railway本番は Drive ポーリングが正常稼働中のため別トークンで問題なし）。ディレクターレビュー待ち。
 
 ### インフラ・横展開
 
@@ -126,3 +141,5 @@ amounts/schedule/place 拡張も、どのコミットにも入っていない未
 |------|------|
 | 2026-06 | 初版。段1完了・Claude Code 段2前修正進行中を記録 |
 | 2026-06-20 | ディレクター round2: 3b (`semantic_integrity_gate`) が段2デプロイ対象から漏れる欠陥を検出・修正。3コミットを (a) ①④apply自己完結 / (b) ②③pinpoint / (c) ③fixtures に再構成（git push 前のローカル6コミットを安全に reset --soft して再分割）。段2デプロイ範囲を (a) のみに確定。③ raw 件数を 71（bundled 69）に確定、旧 fixture の 67 は stale と記録。 |
+| 2026-06-22 | 段3完了。相原GOで Railway `CONTEXTUAL_EDITOR_MODE=apply` に切替・通常運転開始。最新デプロイ（Part C: 旧Sonnet 4 ID 9モジュール掃除）健全稼働を確認。 |
+| 2026-06-23 | 優先2（profile非依存の人名誤認識検出）・優先3（数値+単位の文脈ベース不整合検出）を修正。164142再shadowで`iPhoneさん`新規検出・`1000車`のhypothesis改善を確認。本文不変・テスト138件green。ディレクターレビュー待ち。 |
