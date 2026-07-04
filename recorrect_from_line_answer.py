@@ -511,6 +511,16 @@ def _quoted_snippets_from_question(question_text: str) -> list[str]:
     return out
 
 
+def _extract_anomaly_words_from_question(question_text: str) -> list[str]:
+    """『word』 patterns in free_text typo-confirmation questions."""
+    out: list[str] = []
+    for m in re.finditer(r"『([^』]{1,40})』", question_text):
+        w = m.group(1).strip()
+        if w and w not in out:
+            out.append(w)
+    return out
+
+
 def _anchor_strings_for_span(
     question_result: dict | None, question_text: str
 ) -> list[str]:
@@ -596,9 +606,11 @@ def _is_contextual_editor_question(question_result: dict | None) -> bool:
     if isinstance(su, dict):
         if str(su.get("source") or "") == EDITOR_SOURCE or str(su.get("type") or "") == EDITOR_TYPE:
             return True
-        verdict = normalize_verdict(su.get("verdict"))
-        if verdict in (VERDICT_ASK_WITH_CANDIDATE, VERDICT_ASK_WITHOUT_CANDIDATE):
-            return True
+        verdict_raw = su.get("verdict")
+        if verdict_raw is not None and str(verdict_raw).strip():
+            verdict = normalize_verdict(verdict_raw)
+            if verdict in (VERDICT_ASK_WITH_CANDIDATE, VERDICT_ASK_WITHOUT_CANDIDATE):
+                return True
     for key in ("span_before", "anomaly_word", "hypothesis"):
         if str(question_result.get(key) or "").strip():
             return True
@@ -645,11 +657,21 @@ def _build_editor_apply_record(question_result: dict, record: dict) -> dict:
     if not isinstance(su, dict):
         su = {}
     span_before = str(
-        su.get("span_text") or su.get("context") or question_result.get("span_before") or ""
+        su.get("span_text")
+        or su.get("text")
+        or su.get("context")
+        or question_result.get("span_before")
+        or ""
     ).strip()
+    anomaly_word = str(su.get("anomaly_word") or "").strip()
+    if not anomaly_word:
+        qt = str(record.get("question_text") or question_result.get("question_text") or "")
+        words = _extract_anomaly_words_from_question(qt)
+        if words:
+            anomaly_word = words[0]
     base.update(
         {
-            "anomaly_word": str(su.get("anomaly_word") or "").strip(),
+            "anomaly_word": anomaly_word,
             "span_before": span_before,
             "span_start": int(
                 su.get("span_start") or su.get("context_position_in_transcript") or -1
@@ -669,6 +691,149 @@ def _editor_apply_has_payload(apply_record: dict) -> bool:
     return bool(str(apply_record.get("span_before") or "").strip())
 
 
+def _enrich_editor_apply_record(
+    apply_record: dict,
+    *,
+    question_result: dict,
+    question_text: str,
+    base_text: str,
+) -> dict:
+    """Fill span_before / anomaly_word from anchors when editor metadata is partial."""
+    sb = str(apply_record.get("span_before") or "").strip()
+    if sb and sb not in base_text:
+        apply_record["span_before"] = ""
+        apply_record["span_start"] = -1
+
+    if not _editor_apply_has_payload(apply_record):
+        anchors = _anchor_strings_for_span(question_result, question_text)
+        loc = _find_first_anchor_span(base_text, anchors)
+        if loc:
+            start, end = loc
+            apply_record["span_before"] = base_text[start:end]
+            if int(apply_record.get("span_start") or -1) < 0:
+                apply_record["span_start"] = start
+
+    aw = str(apply_record.get("anomaly_word") or "").strip()
+    if not aw:
+        for w in _extract_anomaly_words_from_question(question_text):
+            apply_record["anomaly_word"] = w
+            break
+
+    ans = str(apply_record.get("answer_text") or "").strip()
+    if ans and "（" in ans:
+        core = ans.split("（", 1)[0].strip()
+        if core:
+            apply_record["answer_text"] = core
+    elif ans:
+        extracted = _extract_correction_word_from_answer(ans)
+        if extracted and extracted != ans:
+            apply_record["answer_text"] = extracted
+
+    return apply_record
+
+
+def _can_anchor_pinpoint_answer(question_result: dict | None, question_text: str) -> bool:
+    if not question_text.strip():
+        return False
+    if _extract_anomaly_words_from_question(question_text):
+        return True
+    su = (question_result or {}).get("selected_unknown")
+    return isinstance(su, dict) and bool(str(su.get("text") or "").strip())
+
+
+def _correction_already_in_text(
+    base_text: str, anomaly_word: str, answer_text: str
+) -> bool:
+    """True when anomaly is gone and the answered word is already in the transcript."""
+    aw = str(anomaly_word or "").strip()
+    ans = str(answer_text or "").strip()
+    if not ans:
+        return False
+    core = ans.split("（", 1)[0].strip() if "（" in ans else ans
+    if aw and aw in base_text:
+        return False
+    return bool(core and core in base_text)
+
+
+def _handle_anchor_pinpoint_answer(
+    *,
+    job_id: str,
+    input_root: str,
+    question_result: dict,
+    record: dict,
+    base_text: str,
+    out_path: str,
+) -> bool:
+    """Apply free_text LINE answers using transcript anchors (legacy unknown_points)."""
+    question_text = str(record.get("question_text") or "").strip()
+    apply_record = _build_editor_apply_record(question_result, record)
+    apply_record = _enrich_editor_apply_record(
+        apply_record,
+        question_result=question_result,
+        question_text=question_text,
+        base_text=base_text,
+    )
+    if not _editor_apply_has_payload(apply_record):
+        aw = str(apply_record.get("anomaly_word") or "").strip()
+        ans = str(record.get("answer_text") or "").strip()
+        if _correction_already_in_text(base_text, aw, ans):
+            job_dir = os.path.join(input_root, job_id)
+            if out_path:
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(base_text)
+            try:
+                ensure_after_qa_initialized(job_dir)
+                save_after_qa_text(job_dir, base_text)
+            except FileNotFoundError:
+                pass
+            log_reflect_entry(
+                {
+                    "question_id": str(record.get("question_id") or ""),
+                    "mode": "anchor_pinpoint",
+                    "applied": False,
+                    "already_corrected": True,
+                }
+            )
+            print("recorrect_incorporate_mode=anchor_pinpoint already_corrected no_op=1")
+            return True
+        return False
+    if not str(apply_record.get("anomaly_word") or "").strip():
+        return False
+
+    job_dir = os.path.join(input_root, job_id)
+    ensure_after_qa_initialized(job_dir)
+    updated, applied = apply_answers(base_text, [apply_record])
+    ok = [a for a in applied if not a.get("error") and not a.get("skipped")]
+    err = [a for a in applied if a.get("error")]
+
+    reflect_meta: dict = {
+        "question_id": str(record.get("question_id") or ""),
+        "mode": "anchor_pinpoint",
+        "applied": bool(ok),
+        "applied_count": len(ok),
+        "error_count": len(err),
+        "rows": applied,
+    }
+    log_reflect_entry(reflect_meta)
+    print(
+        "recorrect_incorporate_mode=anchor_pinpoint "
+        f"applied={len(ok)} errors={len(err)}"
+    )
+    for row in err:
+        print(
+            "recorrect_pinpoint_error="
+            f"{row.get('error')} anomaly={row.get('anomaly_word')!r}"
+        )
+
+    save_after_qa_text(job_dir, updated)
+    if out_path != after_qa_path(job_dir):
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+    return True
+
+
 def _handle_editor_pinpoint_answer(
     *,
     job_id: str,
@@ -676,11 +841,20 @@ def _handle_editor_pinpoint_answer(
     question_result: dict,
     record: dict,
     out_path: str,
+    base_text: str | None = None,
 ) -> None:
     job_dir = os.path.join(input_root, job_id)
     ensure_after_qa_initialized(job_dir)
-    base_text = load_after_qa_text(job_dir)
+    if base_text is None:
+        base_text = load_after_qa_text(job_dir)
+    question_text = str(record.get("question_text") or "").strip()
     apply_record = _build_editor_apply_record(question_result, record)
+    apply_record = _enrich_editor_apply_record(
+        apply_record,
+        question_result=question_result,
+        question_text=question_text,
+        base_text=base_text,
+    )
     if not _editor_apply_has_payload(apply_record):
         raise ValueError("editor pinpoint apply missing span_before/targets payload")
 
@@ -947,6 +1121,7 @@ def main() -> None:
             question_result=question_result if isinstance(question_result, dict) else {},
             record=record,
             out_path=out_path,
+            base_text=base_text,
         )
         try:
             learn_result = _persist_coherence_answer_to_learned_dict(
@@ -966,6 +1141,23 @@ def main() -> None:
         print(f"question_id={record.get('question_id')}")
         print(f"answer_job_id={record.get('job_id')}")
         return
+
+    if _can_anchor_pinpoint_answer(question_result, question_text):
+        if _handle_anchor_pinpoint_answer(
+            job_id=args.job_id,
+            input_root=args.input_root,
+            question_result=question_result if isinstance(question_result, dict) else {},
+            record=record,
+            base_text=base_text,
+            out_path=out_path,
+        ):
+            print(f"job_id={args.job_id}")
+            print(f"answers_json={answers_json_path}")
+            print(f"input={in_path}")
+            print(f"output={out_path}")
+            print(f"question_id={record.get('question_id')}")
+            print(f"answer_job_id={record.get('job_id')}")
+            return
 
     ensure_after_qa_initialized(job_dir)
     print(

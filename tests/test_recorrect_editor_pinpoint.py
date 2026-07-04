@@ -17,6 +17,9 @@ from pinpoint_answer_apply import apply_answers
 from question_bundle import bundle_safe_answer_items, expand_answer_items_for_apply
 from recorrect_from_line_answer import (
     _build_editor_apply_record,
+    _can_anchor_pinpoint_answer,
+    _enrich_editor_apply_record,
+    _handle_anchor_pinpoint_answer,
     _handle_editor_pinpoint_answer,
     _is_contextual_editor_question,
 )
@@ -47,6 +50,19 @@ class EditorDetectTests(unittest.TestCase):
                 "anomaly_word": "7.5万円",
             }
         }
+        self.assertFalse(_is_contextual_editor_question(qr))
+
+    def test_legacy_subject_unknown_not_editor(self) -> None:
+        qr = {
+            "selected_unknown": {
+                "type": "主語",
+                "text": "じゃあ引き続きじゃちょっとサーベルは企画して",
+            }
+        }
+        self.assertFalse(_is_contextual_editor_question(qr))
+
+    def test_missing_verdict_not_editor(self) -> None:
+        qr = {"selected_unknown": {"type": "garble", "text": "foo"}}
         self.assertFalse(_is_contextual_editor_question(qr))
 
 
@@ -108,6 +124,97 @@ class PinpointSingleAnswerTests(unittest.TestCase):
                 after = f.read()
             self.assertIn("季央", after)
             self.assertNotIn("TOKIO", after)
+
+
+class FreeTextAnchorPinpointTests(unittest.TestCase):
+    def test_enrich_builds_span_from_selected_text(self) -> None:
+        base = (
+            "じゃあ引き続きじゃちょっとサーベルは企画して、"
+            "あの結果とか出てきたらまた共有するようにしようか?"
+        )
+        qr = {
+            "question_text": (
+                "「サーベルは企画して…」の『サーベル』は『サーベイ（調査）』の誤変換でしょうか？"
+            ),
+            "selected_unknown": {
+                "type": "主語",
+                "text": "じゃあ引き続きじゃちょっとサーベルは企画して、あの結果とか",
+            },
+        }
+        rec = {"question_id": "q-sv", "answer_text": "サーベイ（調査）"}
+        ar = _build_editor_apply_record(qr, rec)
+        ar = _enrich_editor_apply_record(
+            ar, question_result=qr, question_text=qr["question_text"], base_text=base
+        )
+        self.assertIn("サーベル", ar["span_before"])
+        self.assertEqual(ar["anomaly_word"], "サーベル")
+        self.assertEqual(ar["answer_text"], "サーベイ")
+
+    def test_anchor_pinpoint_replaces_anomaly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_id = "job_free_text"
+            job_dir = os.path.join(tmp, job_id)
+            os.makedirs(job_dir)
+            base = (
+                "じゃあ引き続きじゃちょっとサーベルは企画して、"
+                "あの結果とか出てきたらまた共有するようにしようか?"
+            )
+            with open(os.path.join(job_dir, "merged_transcript_ai.txt"), "w", encoding="utf-8") as f:
+                f.write(base)
+            qr = {
+                "question_text": (
+                    "「サーベルは企画して…」の『サーベル』は『サーベイ（調査）』の誤変換でしょうか？"
+                ),
+                "selected_unknown": {
+                    "type": "主語",
+                    "text": "じゃあ引き続きじゃちょっとサーベルは企画して、あの結果とか",
+                },
+            }
+            rec = {"question_id": "q-sv", "answer_text": "サーベイ（調査）"}
+            out_path = os.path.join(job_dir, "merged_transcript_after_qa.txt")
+            self.assertTrue(_can_anchor_pinpoint_answer(qr, qr["question_text"]))
+            ok = _handle_anchor_pinpoint_answer(
+                job_id=job_id,
+                input_root=tmp,
+                question_result=qr,
+                record=rec,
+                base_text=base,
+                out_path=out_path,
+            )
+            self.assertTrue(ok)
+            with open(out_path, encoding="utf-8") as f:
+                after = f.read()
+            self.assertIn("サーベイ", after)
+            self.assertNotIn("サーベル", after)
+
+    def test_anchor_pinpoint_noop_when_already_corrected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_id = "job_already_ok"
+            job_dir = os.path.join(tmp, job_id)
+            os.makedirs(job_dir)
+            base = "じゃあ引き続きじゃちょっとサーベイは企画して、あの結果とか"
+            qr = {
+                "question_text": (
+                    "「サーベルは企画して…」の『サーベル』は『サーベイ（調査）』の誤変換でしょうか？"
+                ),
+                "selected_unknown": {
+                    "type": "主語",
+                    "text": "じゃあ引き続きじゃちょっとサーベルは企画して、あの結果とか",
+                },
+            }
+            rec = {"question_id": "q-sv", "answer_text": "サーベイ（調査）"}
+            out_path = os.path.join(job_dir, "merged_transcript_after_qa.txt")
+            ok = _handle_anchor_pinpoint_answer(
+                job_id=job_id,
+                input_root=tmp,
+                question_result=qr,
+                record=rec,
+                base_text=base,
+                out_path=out_path,
+            )
+            self.assertTrue(ok)
+            with open(out_path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), base)
 
 
 class BundleTargetsTests(unittest.TestCase):
