@@ -144,3 +144,4 @@ amounts/schedule/place 拡張も、どのコミットにも入っていない未
 | 2026-06-22 | 段3完了。相原GOで Railway `CONTEXTUAL_EDITOR_MODE=apply` に切替・通常運転開始。最新デプロイ（Part C: 旧Sonnet 4 ID 9モジュール掃除）健全稼働を確認。 |
 | 2026-06-23 | 優先2（profile非依存の人名誤認識検出）・優先3（数値+単位の文脈ベース不整合検出）を修正。164142再shadowで`iPhoneさん`新規検出・`1000車`のhypothesis改善を確認。本文不変・テスト138件green。ディレクターレビュー待ち。 |
 | 2026-07-03 | MD自動パース→apply→verifyパイプライン追加（`bbdf623`、2026-06-26コミット）。手動転記ミス再発防止: `parse_md_answers.py` / `interpret_md_answer.py` / `scripts/verify_md_apply.py`。MD回答を自動パース→apply→検証まで一気通貫。検証: 自動16件apply・after_qa 14986字・手動版とEXACT MATCH、fact gate PASS確認済み。 |
+| 2026-07-04 | Reader pass を Step 4.3r としてパイプラインに正式組み込み（`9ac6e85`）。`reader_pass.py`: Opus 4.8 で逐語録の論旨不明箇所を上位5件抽出・除外リスト（未回答②③）渡し・JSON出力。出力: `reader_pass_result.json` + `reader_pass_questions.md`（相原向け質問テンプレ）。`READER_PASS_ENABLED=on` で稼働（既定 off、Railway本番: on）。失敗時非致命的。テスト168件green。 |
