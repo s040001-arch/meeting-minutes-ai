@@ -31,6 +31,13 @@ from progress_tracker import (
     init_job_progress,
     update_job_progress,
 )
+from question_mode import (
+    resolve_question_mode,
+    should_pause_for_answers,
+    should_send_line as question_mode_should_send_line,
+    write_pause_marker,
+    write_questions_review_md,
+)
 from reader_pass import is_enabled as reader_pass_is_enabled, run_reader_pass
 from repo_env import load_dotenv_local
 
@@ -1227,6 +1234,10 @@ def main() -> None:
                 message=f"整合性レビューで例外発生（議事録生成は続行）: {type(e).__name__}",
             )
 
+        q_mode = resolve_question_mode()
+        pause_for_answers = should_pause_for_answers(q_mode)
+        log_line(log_path, f"question_mode={q_mode} pause_for_answers={pause_for_answers}")
+
         qcycle_cmd = [
             py,
             os.path.join(repo, "run_question_cycle_once.py"),
@@ -1235,26 +1246,41 @@ def main() -> None:
             "--input-root",
             args.input_root,
         ]
-        if not args.no_send_line and line_push_env_ready():
+        # QUESTION_MODE=cursor/on: never auto-push LINE (Cursor 疑似運用).
+        # QUESTION_MODE=line: push when credentials ready (quota recovery path).
+        # QUESTION_MODE=off: legacy — push when credentials ready unless --no-send-line.
+        want_line = (
+            question_mode_should_send_line(q_mode)
+            if pause_for_answers
+            else (not args.no_send_line)
+        )
+        if want_line and line_push_env_ready():
             qcycle_cmd.append("--send-line")
             log_line(
                 log_path,
-                "step_5_question_cycle_prepare: line_push will attempt (LINE_USER_ID + LINE_CHANNEL_ACCESS_TOKEN set)",
+                "step_5_question_cycle_prepare: line_push will attempt "
+                f"(mode={q_mode}, LINE_USER_ID + LINE_CHANNEL_ACCESS_TOKEN set)",
             )
         else:
-            if args.no_send_line:
+            if pause_for_answers and not question_mode_should_send_line(q_mode):
+                log_line(
+                    log_path,
+                    f"step_5_question_cycle_prepare: line_push disabled (QUESTION_MODE={q_mode})",
+                )
+            elif args.no_send_line:
                 log_line(log_path, "step_5_question_cycle_prepare: line_push disabled (--no-send-line)")
             else:
                 log_line(
                     log_path,
-                    "step_5_question_cycle_prepare: line_push skipped (set LINE_USER_ID and LINE_CHANNEL_ACCESS_TOKEN to enable)",
+                    "step_5_question_cycle_prepare: line_push skipped "
+                    "(set LINE_USER_ID and LINE_CHANNEL_ACCESS_TOKEN to enable)",
                 )
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
             phase="step_5_question_cycle_prepare",
             status="running",
-            detail={"send_line": ("--send-line" in qcycle_cmd)},
+            detail={"send_line": ("--send-line" in qcycle_cmd), "question_mode": q_mode},
         )
         current_phase = "step_5_question_cycle_prepare"
         current_step_label = "Step 5: 質問選定"
@@ -1262,7 +1288,11 @@ def main() -> None:
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="不明点からLINE質問を選定しています...",
+            message=(
+                "不明点から質問を選定しています..."
+                if pause_for_answers
+                else "不明点からLINE質問を選定しています..."
+            ),
         )
         run_cmd(log_path, qcycle_cmd, "step_5_question_cycle_prepare")
         update_job_progress(
@@ -1270,14 +1300,112 @@ def main() -> None:
             job_id=args.job_id,
             phase="step_5_question_cycle_prepare",
             status="success",
-            detail={"question_sent": bool(qcycle_cmd and "--send-line" in qcycle_cmd)},
+            detail={
+                "question_sent": bool(qcycle_cmd and "--send-line" in qcycle_cmd),
+                "question_mode": q_mode,
+            },
         )
         record_visible_progress(
             log_path=log_path,
             visible_log_path=visible_log_path,
             job_id=args.job_id,
-            message="質問の選定が完了しました（LINEで送信済み or 質問なし）",
+            message=(
+                "質問の選定が完了しました（回答待ちで一時停止します）"
+                if pause_for_answers
+                else "質問の選定が完了しました（LINEで送信済み or 質問なし）"
+            ),
         )
+
+        # QUESTION_MODE=on|cursor|line: 質問生成後に一時停止（exit 0）。
+        # 相原が回答→本文確定後、reprocess_job.py --from-step resume で Step 6.x 再開。
+        if pause_for_answers:
+            current_phase = "question_pause"
+            current_step_label = "質問回答待ち"
+            review_path = write_questions_review_md(job_dir, job_id=args.job_id)
+            line_bundle_meta: dict = {}
+            # QUESTION_MODE=line: 波及グループを1通にまとめて LINE 送信（既存1問サイクルに加え上書き）
+            if question_mode_should_send_line(q_mode):
+                try:
+                    from integrated_questions import write_and_maybe_push_line_bundle
+
+                    line_bundle_meta = write_and_maybe_push_line_bundle(
+                        job_dir,
+                        send_line=(not args.no_send_line and line_push_env_ready()),
+                    )
+                    log_line(
+                        log_path,
+                        "step_5_line_bundle: "
+                        f"sent={line_bundle_meta.get('sent')} "
+                        f"reason={line_bundle_meta.get('reason')} "
+                        f"targets={line_bundle_meta.get('target_count')}",
+                    )
+                except Exception as _lb_exc:  # noqa: BLE001
+                    log_line(log_path, f"step_5_line_bundle: error (non-fatal) {_lb_exc!r}")
+                    line_bundle_meta = {"sent": False, "reason": f"error:{_lb_exc!r}"}
+            artifacts = [
+                name
+                for name in (
+                    "questions_review.md",
+                    "integrated_questions.json",
+                    "reader_pass_questions.md",
+                    "question_message.txt",
+                    "question_result.json",
+                    "unknown_points.json",
+                    "edit_proposals.json",
+                )
+                if os.path.isfile(os.path.join(job_dir, name))
+            ]
+            pause_path = write_pause_marker(
+                job_dir,
+                mode=q_mode,
+                question_artifacts=artifacts,
+                resume_hint=(
+                    "回答を本文に反映したあと "
+                    f"python reprocess_job.py --job-dir {job_dir} --from-step resume"
+                ),
+            )
+            ensure_after_qa_exists(job_dir, log_path)
+            update_doc_title_from_hub(hub_meta_path, f"【回答待ち】{display_title}", log_path)
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="question_pause",
+                status="success",
+                detail={
+                    "question_mode": q_mode,
+                    "review_md": str(review_path),
+                    "pause_marker": str(pause_path),
+                    "artifacts": artifacts,
+                    "line_bundle": line_bundle_meta,
+                },
+                overall_status="paused",
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=(
+                    f"===== 回答待ちで一時停止（QUESTION_MODE={q_mode}）=====\n"
+                    f"  質問MD: {review_path.name}\n"
+                    f"  再開: python reprocess_job.py --job-dir {job_dir} --from-step resume"
+                ),
+            )
+            log_line(log_path, f"pipeline_status=paused question_mode={q_mode}")
+            print(f"job_id={args.job_id}")
+            print(f"log={log_path}")
+            print(f"visible_log={visible_log_path}")
+            print(f"questions_review={review_path}")
+            print(f"question_mode={q_mode}")
+            if line_bundle_meta:
+                print(f"line_bundle_sent={line_bundle_meta.get('sent')}")
+                print(f"line_bundle_reason={line_bundle_meta.get('reason')}")
+            print("status=paused")
+            finalize_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                overall_status="paused",
+            )
+            return
 
         job_answers = os.path.join(args.input_root, args.job_id, "answers.json")
         line_answers = os.path.join("data", "line_answers.json")

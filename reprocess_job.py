@@ -9,11 +9,12 @@
   python reprocess_job.py --job-dir /path/to/job --from-step 6.1 \\
       --input-override /path/to/annotated_ai.txt
   python reprocess_job.py --job-dir /path/to/job --from-step 6.3  # Docs のみ再出力
+  python reprocess_job.py --job-dir /path/to/job --from-step resume  # QUESTION_MODE 再開
 
 引数:
   --job-dir         : ジョブディレクトリの絶対パス
   --input-root      : data/transcriptions ルート（省略時: job-dir の親）
-  --from-step       : 再実行開始ステップ: 6.1 / 6.2 / 6.3
+  --from-step       : 再実行開始ステップ: 6.1 / 6.2 / 6.3 / resume
   --input-override  : 入力ファイル差し替えパス
                         6.1 始まり → generate_minutes_transcript の --input に渡す
                         6.2 始まり → generate_minutes_other_sections の --input に渡す
@@ -39,6 +40,8 @@ from pathlib import Path
 from typing import Any
 
 _STEPS = ("6.1", "6.2", "6.3")
+# resume: QUESTION_MODE pause 後の再開（本文確定済み前提で 6.1 から）
+_FROM_STEP_CHOICES = ("6.1", "6.2", "6.3", "resume")
 _STEP_ORDER = {s: i for i, s in enumerate(_STEPS)}
 
 _BACKUP_FILES = [
@@ -152,6 +155,13 @@ def reprocess(
     repo = str(Path(__file__).parent)
     job_id = job_dir.name
 
+    # resume = QUESTION_MODE pause 後: 本文確定済み前提で Step 6.1 から再開
+    resume_from_pause = from_step == "resume"
+    if resume_from_pause:
+        from_step = "6.1"
+        if not reason:
+            reason = "resume_after_question_pause"
+
     doc_id = load_doc_id(job_dir)
 
     _log(f"job_id={job_id}")
@@ -159,8 +169,28 @@ def reprocess(
     _log(f"input_override={input_override}")
     _log(f"doc_id={doc_id}")
     _log(f"dry_run={dry_run}")
+    if resume_from_pause:
+        _log("resume: clearing question_pause marker and running 6.1–6.3")
 
     backup_dir = backup_job_dir(job_dir, dry_run=dry_run)
+
+    if resume_from_pause and not dry_run:
+        try:
+            from question_mode import clear_pause_marker
+            from progress_tracker import update_job_progress
+
+            cleared = clear_pause_marker(job_dir)
+            _log(f"resume: pause_marker_cleared={cleared}")
+            update_job_progress(
+                input_root=input_root,
+                job_id=job_id,
+                phase="resume_after_question_pause",
+                status="running",
+                detail={"from_step": "6.1"},
+                overall_status="running",
+            )
+        except Exception as e:  # noqa: BLE001
+            _log(f"resume: pause clear warning {e!r}")
 
     steps_run: list[str] = []
     step_outputs: dict[str, Any] = {}
@@ -239,13 +269,14 @@ def reprocess(
     log_entry: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "reason": reason or "",
-        "from_step": from_step,
+        "from_step": "resume" if resume_from_pause else from_step,
         "input_override": str(input_override) if input_override else None,
         "backup_dir": str(backup_dir),
         "steps_run": steps_run,
         "step_outputs": step_outputs,
         "verify": verify_result,
         "dry_run": dry_run,
+        "resume_from_pause": resume_from_pause,
     }
 
     if not dry_run:
@@ -253,6 +284,18 @@ def reprocess(
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
         _log(f"log → {log_path.name}")
+        if resume_from_pause:
+            try:
+                from progress_tracker import finalize_job_progress
+
+                finalize_job_progress(
+                    input_root=input_root,
+                    job_id=job_id,
+                    overall_status="success",
+                )
+                _log("resume: overall_status=success")
+            except Exception as e:  # noqa: BLE001
+                _log(f"resume: finalize warning {e!r}")
 
     return log_entry
 
@@ -273,8 +316,8 @@ def main() -> int:
     parser.add_argument(
         "--from-step",
         required=True,
-        choices=list(_STEPS),
-        help="再実行開始ステップ: 6.1 / 6.2 / 6.3",
+        choices=list(_FROM_STEP_CHOICES),
+        help="再実行開始ステップ: 6.1 / 6.2 / 6.3 / resume（QUESTION_MODE 一時停止後）",
     )
     parser.add_argument(
         "--input-override",

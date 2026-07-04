@@ -35,12 +35,25 @@ def build_line_message(result: dict) -> str:
         if not isinstance(selected, dict):
             selected = {}
 
-        # 認識ゆれの一括確認(バッチ)は、本文に番号付きリストを含むため、
+        # 認識ゆれの一括確認(バッチ) / 波及バンドルは、本文に番号付きリストを含むため、
         # 該当箇所・背景は付けずにそのまま送る。
-        if question_format == "recognition_batch":
-            parts = ["[確認したいこと（番号ごとに回答可・OK/不明でも可）]"]
+        if question_format in {"recognition_batch", "bundle"}:
+            header = (
+                "[確認したいこと（番号ごとに回答可・OK/不明でも可）]"
+                if question_format == "recognition_batch"
+                else "[確認したいこと（同じ着地の複数箇所・1通で回答）]"
+            )
+            parts = [header]
             if question_text:
                 parts.append(question_text)
+            cascade = ""
+            selected = result.get("selected_unknown")
+            if isinstance(selected, dict):
+                cascade = str(selected.get("cascade_note") or "").strip()
+            if not cascade:
+                cascade = str(result.get("cascade_note") or "").strip()
+            if cascade:
+                parts.append(f"（{cascade}）")
             if doc_url:
                 parts.append(f"議事録: {doc_url}")
             return "\n".join(parts)

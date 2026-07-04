@@ -172,7 +172,8 @@ def wait_for_job_pipeline_idle(
     after-answer が Step 6.3 Docs 更新と同時に走ると本文が空読み・上書きされるため。
     """
     deadline = time.monotonic() + max(0.0, timeout_sec)
-    terminal_overall = frozenset({"success", "failed", "error", "done"})
+    # paused: QUESTION_MODE で回答待ち一時停止（idle 扱い、after-answer と競合しない）
+    terminal_overall = frozenset({"success", "failed", "error", "done", "paused"})
     while time.monotonic() < deadline:
         payload = read_job_progress(input_root, job_id)
         if not payload:
