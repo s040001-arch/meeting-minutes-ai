@@ -31,6 +31,7 @@ from progress_tracker import (
     init_job_progress,
     update_job_progress,
 )
+from reader_pass import is_enabled as reader_pass_is_enabled, run_reader_pass
 from repo_env import load_dotenv_local
 
 _APPEND_LOG_INPUT_ROOT = "data/transcriptions"
@@ -1057,6 +1058,37 @@ def main() -> None:
         )
 
         update_doc_title_from_hub(hub_meta_path, f"【AI補正完了】{display_title}", log_path)
+
+        # Step 4.3r: Reader pass (READER_PASS_ENABLED=on のときのみ・補助機能)
+        try:
+            if reader_pass_is_enabled():
+                _rp_proposals = Path(os.path.join(job_dir, "edit_proposals.json"))
+                _rp_result = run_reader_pass(
+                    Path(job_dir),
+                    ai_txt_path=Path(ai_path),
+                    proposals_path=_rp_proposals if _rp_proposals.exists() else None,
+                )
+                _rp_count = len(_rp_result.get("findings") or [])
+                log_line(
+                    log_path,
+                    f"step_reader_pass: done findings={_rp_count} excluded={_rp_result.get('excluded_count', 0)}",
+                )
+                record_visible_progress(
+                    log_path=log_path,
+                    visible_log_path=visible_log_path,
+                    job_id=args.job_id,
+                    message=f"Reader pass 完了（{_rp_count}件抽出 / 除外{_rp_result.get('excluded_count', 0)}件）",
+                )
+            else:
+                log_line(log_path, "step_reader_pass: skip (READER_PASS_ENABLED!=on)")
+        except Exception as _rp_exc:
+            log_line(log_path, f"step_reader_pass: error (non-fatal) {_rp_exc!r}")
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=f"Reader pass エラー（続行）: {type(_rp_exc).__name__}",
+            )
 
         # Step 4.35: AI不明点検出（Claude Opus）
         # 既存の回答済み不明点を読み込んで重複質問防止に利用する
