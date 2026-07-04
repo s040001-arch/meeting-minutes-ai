@@ -273,7 +273,7 @@ def _merge_knowledge_memos_with_claude(
         "会議固有の一時的な yes/no 回答や、その場限りの数字確認のように再利用価値が低いものは追加しないでください。"
         "一方で、用語説明、役割定義、社内固有の呼称、サービス説明、関係性の説明などは蓄積対象にしてください。"
         "既存メモの意味が変わらない範囲で、より自然で再利用しやすい表現に統合して構いません。"
-        "出力は JSON オブジェクトのみ。"
+        "出力は必ず { で始まる JSON オブジェクトのみ。説明文やコードフェンスは付けない。"
         '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
     )
     system_prompt = cached_system(static_prompt)
@@ -291,7 +291,6 @@ def _merge_knowledge_memos_with_claude(
         system=system_prompt,
         messages=[
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            {"role": "assistant", "content": "{"},
         ],
     )
     parsed = _extract_json_object(_extract_text_from_anthropic(resp))
@@ -332,7 +331,7 @@ def _merge_knowledge_memos_with_all_answers(
         "会議固有の一時的な yes/no 回答や、その場限りの数字確認のように再利用価値が低いものは追加しないでください。"
         "一方で、用語説明、役割定義、社内固有の呼称、サービス説明、関係性の説明などは蓄積対象にしてください。"
         "既存メモの意味が変わらない範囲で、より自然で再利用しやすい表現に統合して構いません。"
-        "\n出力は JSON オブジェクトのみ。"
+        "\n出力は必ず { で始まる JSON オブジェクトのみ。説明文やコードフェンスは付けない。"
         '形式は {"updated_knowledge":["..."],"action":"unchanged|updated","reason":"string"} としてください。'
     )
     system_prompt = cached_system(static_prompt, profile_hint)
@@ -362,7 +361,6 @@ def _merge_knowledge_memos_with_all_answers(
         system=system_prompt,
         messages=[
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            {"role": "assistant", "content": "{"},
         ],
     )
     parsed = _extract_json_object(_extract_text_from_anthropic(resp))

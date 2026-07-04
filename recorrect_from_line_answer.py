@@ -352,10 +352,11 @@ def _mark_batch_items_answered_in_unknowns(
     parsed: list[dict],
     answer_text: str,
     question_id: str,
+    batch_items: list[dict] | None = None,
 ) -> int:
     """バッチで確認した coherence 項目に status を反映する。
 
-    action が correct/keep の項目は answered とし、unknown はそのまま open に残す
+    action が correct/keep の項目は answered とし、未解決は open に戻す
     (後続サイクルで再度バッチに載せて聞き直せるようにする)。
     """
     path = os.path.join(input_root, job_id, "unknown_points.json")
@@ -379,8 +380,18 @@ def _mark_batch_items_answered_in_unknowns(
         if str(p.get("action") or "") in {"correct", "keep"}
     }
     resolved_words.discard("")
-    if not resolved_ids and not resolved_words:
-        return 0
+    batch_ids = {
+        str(b.get("anomaly_id") or "").strip()
+        for b in (batch_items or [])
+        if isinstance(b, dict)
+    }
+    batch_ids.discard("")
+    batch_words = {
+        str(b.get("word") or b.get("anomaly_word") or "").strip()
+        for b in (batch_items or [])
+        if isinstance(b, dict)
+    }
+    batch_words.discard("")
     updated = 0
     from datetime import datetime, timezone
 
@@ -390,11 +401,21 @@ def _mark_batch_items_answered_in_unknowns(
             continue
         item_id = str(item.get("anomaly_id") or "").strip()
         item_word = str(item.get("anomaly_word") or "").strip()
+        in_batch = (
+            (item_id and item_id in batch_ids)
+            or (item_word and item_word in batch_words)
+            or str(item.get("asked_by_question_id") or "") == question_id
+        )
         if (item_id and item_id in resolved_ids) or (item_word and item_word in resolved_words):
             item["status"] = "answered"
             item["answer"] = answer_text
             item["answered_by_question_id"] = question_id
             item["answered_at"] = now_iso
+            updated += 1
+        elif in_batch and str(item.get("status", "")).strip().lower() == "asked":
+            # 未解決は open に戻し、次サイクルで再質問できるようにする
+            item["status"] = "open"
+            item.pop("asked_by_question_id", None)
             updated += 1
     if updated > 0:
         try:
@@ -1101,6 +1122,7 @@ def main() -> None:
             parsed=parsed,
             answer_text=answer_text,
             question_id=str(record.get("question_id") or ""),
+            batch_items=batch_items if isinstance(batch_items, list) else [],
         )
         learned = _persist_batch_corrections_to_learned_dict(
             job_id=args.job_id, applied=applied, base_text=base_text

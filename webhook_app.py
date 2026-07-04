@@ -50,6 +50,7 @@ _AUTO_AFTER_ANSWER_STARTING_STALE_SEC = 120.0
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _RUN_DOCS_HUB_E2E = os.path.join(_REPO_ROOT, "run_docs_hub_e2e.py")
 _RUN_RESUME_FROM_STEP7 = os.path.join(_REPO_ROOT, "run_resume_from_step7.py")
+_RUN_ANSWER_LIGHT = os.path.join(_REPO_ROOT, "run_answer_light.py")
 CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
 LINE_EXTRACTOR_MODEL = "claude-sonnet-4-6"
 
@@ -558,8 +559,36 @@ def _should_use_light_after_answer_resume(selected_unknown: dict | None) -> bool
     return is_coherence_unknown_item(selected_unknown)
 
 
+def _question_mode_uses_light_resume() -> bool:
+    """QUESTION_MODE=cursor/line: 回答ごとにフル再補正せず light apply → resume 一本化。"""
+    try:
+        from question_mode import should_pause_for_answers
+
+        return should_pause_for_answers()
+    except Exception:
+        return False
+
+
 def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
     jid = str(job_id).strip() if job_id else ""
+    line_user_id = os.getenv("LINE_USER_ID", "").strip()
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if _question_mode_uses_light_resume():
+        cmd = [
+            sys.executable,
+            _RUN_ANSWER_LIGHT,
+            "--job-id",
+            jid,
+        ]
+        if line_user_id and line_token:
+            cmd.append("--send-line")
+        _launch_resume_subprocess(
+            job_id=jid,
+            save_ok=save_ok,
+            cmd=cmd,
+            launch_label="auto_after_answer_light",
+        )
+        return
     cmd = [
         sys.executable,
         _RUN_DOCS_HUB_E2E,
@@ -568,8 +597,6 @@ def maybe_launch_auto_after_answer(job_id: str | None, save_ok: bool) -> None:
         "--after-answer",
         "--push",
     ]
-    line_user_id = os.getenv("LINE_USER_ID", "").strip()
-    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if line_user_id and line_token:
         cmd.append("--send-line")
     _launch_resume_subprocess(
@@ -587,6 +614,25 @@ def maybe_launch_auto_after_correction(
     incorporate_latest_answer: bool = False,
 ) -> None:
     jid = str(job_id).strip() if job_id else ""
+    line_user_id = os.getenv("LINE_USER_ID", "").strip()
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    # QUESTION_MODE pause 中は辞書更新も light 経路へ寄せる（フル Step⑦ 再実行しない）
+    if _question_mode_uses_light_resume() and incorporate_latest_answer:
+        cmd = [
+            sys.executable,
+            _RUN_ANSWER_LIGHT,
+            "--job-id",
+            jid,
+        ]
+        if line_user_id and line_token:
+            cmd.append("--send-line")
+        _launch_resume_subprocess(
+            job_id=jid,
+            save_ok=save_ok,
+            cmd=cmd,
+            launch_label="auto_after_correction_light",
+        )
+        return
     cmd = [
         sys.executable,
         _RUN_RESUME_FROM_STEP7,
@@ -596,8 +642,6 @@ def maybe_launch_auto_after_correction(
     ]
     if incorporate_latest_answer:
         cmd.append("--incorporate-latest-answer")
-    line_user_id = os.getenv("LINE_USER_ID", "").strip()
-    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if line_user_id and line_token:
         cmd.append("--send-line")
     _launch_resume_subprocess(
@@ -819,6 +863,11 @@ def _mark_unknown_points_answered(
     question_id: str,
 ) -> int:
     if not job_id or not isinstance(selected_unknown, dict):
+        return 0
+    # recognition_batch は recorrect 側で番号ごとに answered/open を確定する
+    if selected_unknown.get("batch_items") or str(
+        selected_unknown.get("type") or ""
+    ).strip() == "recognition_batch":
         return 0
     target_text = str(selected_unknown.get("text") or "").strip()
     target_type = str(selected_unknown.get("type") or "").strip()

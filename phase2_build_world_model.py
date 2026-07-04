@@ -131,7 +131,6 @@ def _call_sonnet_summarize(text: str, doc_meta: dict) -> dict[str, Any]:
         system=cached_system(_build_summarize_system_prompt()),
         messages=[
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            {"role": "assistant", "content": "{"},
         ],
     )
     parts = []
@@ -139,7 +138,7 @@ def _call_sonnet_summarize(text: str, doc_meta: dict) -> dict[str, Any]:
         if getattr(block, "type", "") == "text":
             parts.append(str(getattr(block, "text", "") or ""))
     raw = "\n".join(parts).strip()
-    # assistant プレフィル "{" の補完
+    # 先頭 { 欠落時の補完（モデルが説明文を付けた場合の救済）
     if not raw.startswith("{"):
         raw = "{" + raw
     # コードフェンス除去

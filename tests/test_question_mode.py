@@ -11,6 +11,9 @@ from unittest.mock import patch
 from question_mode import (
     build_questions_review_md,
     clear_pause_marker,
+    clear_pause_on_terminal,
+    count_pending_unknowns,
+    has_pending_unknowns,
     is_paused,
     resolve_question_mode,
     should_pause_for_answers,
@@ -65,6 +68,43 @@ class PauseMarkerTests(unittest.TestCase):
             self.assertTrue(clear_pause_marker(tmp))
             self.assertFalse(is_paused(tmp))
             self.assertFalse(clear_pause_marker(tmp))
+
+    def test_terminal_status_clears_stale_pause_and_is_paused_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            write_pause_marker(
+                job,
+                mode="line",
+                question_artifacts=[],
+                resume_hint="x",
+            )
+            self.assertTrue(is_paused(job))
+            (job / "progress.json").write_text(
+                json.dumps({"overall_status": "success", "phase": "done"}),
+                encoding="utf-8",
+            )
+            # success wins over stale marker
+            self.assertFalse(is_paused(job))
+            self.assertTrue(clear_pause_on_terminal(job, "success"))
+            self.assertFalse((job / "question_pause.json").is_file())
+            self.assertFalse(clear_pause_on_terminal(job, "paused"))
+
+    def test_count_pending_unknowns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            (job / "unknown_points.json").write_text(
+                json.dumps(
+                    [
+                        {"type": "coherence_review", "anomaly_word": "a", "status": "open"},
+                        {"type": "coherence_review", "anomaly_word": "b", "status": "asked"},
+                        {"type": "coherence_review", "anomaly_word": "c", "status": "answered"},
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(count_pending_unknowns(job), 2)
+            self.assertTrue(has_pending_unknowns(job))
 
 
 class QuestionsReviewMdTests(unittest.TestCase):

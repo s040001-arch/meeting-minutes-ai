@@ -19,6 +19,10 @@ from question_value_selection import (
     select_one_unknown_value_based,
 )
 from recognition_batch import (
+    RECOGNITION_BATCH_FORMAT,
+    RECOGNITION_BATCH_TYPE,
+    build_batch_items,
+    build_batch_question_text,
     find_standalone_word,
     select_next_coherence_point,
 )
@@ -547,6 +551,54 @@ def _make_coherence_question_payload(
     return result_payload, question_id
 
 
+def _build_coherence_batch_question_payload(
+    *,
+    job_id: str,
+    coherence_pending: list[dict],
+    pending_meta: dict,
+    doc_url: str,
+) -> dict | None:
+    """QUESTION_MODE pause 時: 未回答 coherence を番号付き1通に束ねる。"""
+    items = build_batch_items(coherence_pending)
+    if not items:
+        return None
+    question_id = str(uuid.uuid4())
+    question_text = build_batch_question_text(items)
+    selected = {
+        "type": RECOGNITION_BATCH_TYPE,
+        "source": "coherence_review",
+        "batch_items": items,
+        "text": items[0].get("word") or "",
+        "anomaly_word": items[0].get("word") or "",
+        "anomaly_id": items[0].get("anomaly_id") or "",
+    }
+    selection_audit = {
+        "selection_mode": "coherence_recognition_batch",
+        "question_format": RECOGNITION_BATCH_FORMAT,
+        "batch_item_count": len(items),
+        "proposal_impact": 0,
+    }
+    result_payload = {
+        "job_id": job_id,
+        "question_id": question_id,
+        "question_status": "generated",
+        "question_format": RECOGNITION_BATCH_FORMAT,
+        "message": "",
+        "selected_unknown": selected,
+        "doc_url": doc_url,
+        "selection_audit": {**pending_meta, **selection_audit},
+        "question_text": question_text,
+    }
+    write_line_pending_context(
+        job_id=job_id,
+        question_id=question_id,
+        question_text=question_text,
+        selected_unknown=selected,
+        selection_audit=result_payload.get("selection_audit") or {},
+    )
+    return result_payload
+
+
 def _build_coherence_single_question_payload(
     *,
     job_id: str,
@@ -555,10 +607,27 @@ def _build_coherence_single_question_payload(
     doc_url: str,
     full_text: str = "",
 ) -> dict | None:
-    """coherence 副キューから 1 件だけ選び、1 問 1 答の確認質問を作る。
+    """coherence 副キューから確認質問を作る。
 
-    回答は recorrect / line_answer_reflect で after_qa に都度反映する。
+    QUESTION_MODE=cursor/line では未回答を番号付き1通に束ねる。
+    QUESTION_MODE=off（従来）は 1 件ずつ FIFO。
     """
+    try:
+        from question_mode import should_pause_for_answers
+
+        use_batch = should_pause_for_answers()
+    except Exception:
+        use_batch = False
+    if use_batch and len(coherence_pending) >= 1:
+        batch_payload = _build_coherence_batch_question_payload(
+            job_id=job_id,
+            coherence_pending=coherence_pending,
+            pending_meta=pending_meta,
+            doc_url=doc_url,
+        )
+        if batch_payload is not None:
+            return batch_payload
+
     selected = select_next_coherence_point(coherence_pending)
     if not selected:
         return None
@@ -816,14 +885,34 @@ def _mark_unknown_point_asked(
 
     text 完全一致だけでなく、正規化後の類似一致と hypothesis 一致も判定材料にする。
     AI が同じ論点を別表現で選び直したケースでも asked マークが当たるようにする。
+    recognition_batch の場合は batch_items 全件を asked にする。
     """
     if not selected_unknown or not os.path.isfile(unknowns_path):
         return 0
+    batch_items = selected_unknown.get("batch_items")
+    batch_ids: set[str] = set()
+    batch_words: set[str] = set()
+    if isinstance(batch_items, list):
+        for bi in batch_items:
+            if not isinstance(bi, dict):
+                continue
+            aid = str(bi.get("anomaly_id") or "").strip()
+            word = str(bi.get("word") or bi.get("anomaly_word") or "").strip()
+            if aid:
+                batch_ids.add(aid)
+            if word:
+                batch_words.add(word)
     target_text = str(selected_unknown.get("text") or "").strip()
     target_type = str(selected_unknown.get("type") or "").strip()
     target_hypo = str(selected_unknown.get("hypothesis") or "").strip()
     target_anomaly_id = str(selected_unknown.get("anomaly_id") or "").strip()
-    if not target_text and not target_hypo and not target_anomaly_id:
+    if (
+        not target_text
+        and not target_hypo
+        and not target_anomaly_id
+        and not batch_ids
+        and not batch_words
+    ):
         return 0
 
     try:
@@ -842,22 +931,34 @@ def _mark_unknown_point_asked(
         item_type = str(item.get("type") or "").strip()
         item_hypo = str(item.get("hypothesis") or "").strip()
         item_anomaly_id = str(item.get("anomaly_id") or "").strip()
-        # 型が違う候補は対象外（人名 vs 数値などを誤マークしない）
-        if target_type and item_type and item_type != target_type:
-            continue
-        # マッチ条件: ⓪anomaly_id一致(整合性レビュー用)、①text完全一致、②text類似、③hypothesis一致
+        item_word = str(item.get("anomaly_word") or "").strip()
+        # マッチ条件: ⓪batch_items、①anomaly_id、②text完全一致、③text類似、④hypothesis一致
         match = False
-        if target_anomaly_id and item_anomaly_id and item_anomaly_id == target_anomaly_id:
+        if batch_ids and item_anomaly_id and item_anomaly_id in batch_ids:
             match = True
-        elif target_text and item_text and item_text == target_text:
+        elif batch_words and (item_word in batch_words or item_text in batch_words):
             match = True
-        elif target_text and item_text and _is_similar_text(item_text, target_text):
-            match = True
-        elif target_hypo and item_hypo and (
-            item_hypo == target_hypo
-            or _is_similar_text(item_hypo, target_hypo, min_overlap=0.7)
-        ):
-            match = True
+        else:
+            # 型が違う候補は対象外（人名 vs 数値などを誤マークしない）
+            # recognition_batch の type は unknown 側の coherence_review と異なるため除外判定をスキップ
+            if (
+                target_type
+                and item_type
+                and item_type != target_type
+                and target_type != RECOGNITION_BATCH_TYPE
+            ):
+                continue
+            if target_anomaly_id and item_anomaly_id and item_anomaly_id == target_anomaly_id:
+                match = True
+            elif target_text and item_text and item_text == target_text:
+                match = True
+            elif target_text and item_text and _is_similar_text(item_text, target_text):
+                match = True
+            elif target_hypo and item_hypo and (
+                item_hypo == target_hypo
+                or _is_similar_text(item_hypo, target_hypo, min_overlap=0.7)
+            ):
+                match = True
         if not match:
             continue
         item["status"] = "asked"

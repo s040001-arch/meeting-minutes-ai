@@ -123,6 +123,15 @@ def update_job_progress(
 
     _atomic_write_json(job_p, payload)
 
+    # Terminal status must not leave a stale question_pause.json behind.
+    try:
+        from question_mode import clear_pause_on_terminal
+
+        job_dir = os.path.join(input_root, job_id)
+        clear_pause_on_terminal(job_dir, payload.get("overall_status"))
+    except Exception:
+        pass
+
     # Also update last job snapshot (for quick reads)
     last_payload = {
         "job_id": job_id,

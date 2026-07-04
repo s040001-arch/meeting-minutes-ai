@@ -83,7 +83,22 @@ def clear_pause_marker(job_dir: str | Path) -> bool:
 
 
 def is_paused(job_dir: str | Path) -> bool:
-    path = pause_path(job_dir)
+    """True only while waiting for answers.
+
+    Terminal overall_status (success/failed/…) wins over a stale pause marker so
+    monitors never treat a finished job as still awaiting answers.
+    """
+    job = Path(job_dir)
+    progress = job / "progress.json"
+    if progress.is_file():
+        try:
+            payload = json.loads(progress.read_text(encoding="utf-8"))
+            overall = str(payload.get("overall_status") or "").strip().lower()
+            if overall in {"success", "failed", "error", "done"}:
+                return False
+        except (OSError, json.JSONDecodeError):
+            pass
+    path = pause_path(job)
     if not path.is_file():
         return False
     try:
@@ -91,6 +106,52 @@ def is_paused(job_dir: str | Path) -> bool:
     except (OSError, json.JSONDecodeError):
         return True
     return str(data.get("status") or "") == "paused_waiting_answers"
+
+
+_TERMINAL_OVERALL = frozenset({"success", "failed", "error", "done"})
+
+
+def clear_pause_on_terminal(job_dir: str | Path, overall_status: str | None) -> bool:
+    """Drop pause marker when the job reaches a terminal overall_status."""
+    status = str(overall_status or "").strip().lower()
+    if status not in _TERMINAL_OVERALL:
+        return False
+    return clear_pause_marker(job_dir)
+
+
+def _is_answered_unknown(item: dict) -> bool:
+    status = str(item.get("status", "")).strip().lower()
+    if status in {"answered", "done", "closed", "resolved"}:
+        return True
+    answer = item.get("answer")
+    return isinstance(answer, str) and bool(answer.strip())
+
+
+def load_unknown_points(job_dir: str | Path) -> list[dict[str, Any]]:
+    path = Path(job_dir) / "unknown_points.json"
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [x for x in data if isinstance(x, dict)]
+
+
+def count_pending_unknowns(job_dir: str | Path) -> int:
+    """Count unknowns that still need a human answer (open / asked)."""
+    pending = 0
+    for item in load_unknown_points(job_dir):
+        if _is_answered_unknown(item):
+            continue
+        pending += 1
+    return pending
+
+
+def has_pending_unknowns(job_dir: str | Path) -> bool:
+    return count_pending_unknowns(job_dir) > 0
 
 
 def build_questions_review_md(job_dir: str | Path, *, job_id: str = "") -> str:

@@ -148,7 +148,6 @@ def _merge_filename_metadata_with_claude(
         system=system_prompt,
         messages=[
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            {"role": "assistant", "content": "{"},
         ],
     )
     texts = []
