@@ -39,7 +39,7 @@ def build_line_message(result: dict) -> str:
         # 該当箇所・背景は付けずにそのまま送る。
         if question_format in {"recognition_batch", "bundle"}:
             header = (
-                "[確認したいこと（番号ごとに回答可・OK/不明でも可）]"
+                "[文字起こし原文の表記確認（番号ごとに回答）]"
                 if question_format == "recognition_batch"
                 else "[確認したいこと（同じ着地の複数箇所・1通で回答）]"
             )
@@ -55,7 +55,13 @@ def build_line_message(result: dict) -> str:
             if cascade:
                 parts.append(f"（{cascade}）")
             if doc_url:
-                parts.append(f"議事録: {doc_url}")
+                # バッチは逐語録上の誤変換確認。要約Docには該当語が載らない。
+                label = (
+                    "参考（要約Doc・該当語は載っていません）"
+                    if question_format == "recognition_batch"
+                    else "議事録"
+                )
+                parts.append(f"{label}: {doc_url}")
             return "\n".join(parts)
 
         selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=180)

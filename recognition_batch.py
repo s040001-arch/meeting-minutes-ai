@@ -167,35 +167,167 @@ def _highlight_word(display: str, word: str) -> str:
     return d
 
 
-def _display_snippet_for_point(point: dict, *, full_text: str = "") -> str:
-    """span_text → 逐語録抜粋 → text/context の順で、読める長さの文脈を返す。"""
+def _location_label(pos: int, total: int) -> str:
+    if total <= 0 or pos < 0:
+        return ""
+    ratio = pos / total
+    if ratio < 0.33:
+        return "前半"
+    if ratio < 0.66:
+        return "中盤"
+    return "後半"
+
+
+def _char_overlap(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    # 同一長の並びで一致率（リング不足 vs リンク不足 を拾う）
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    same = sum(1 for i in range(n) if a[i] == b[i])
+    return same / max(len(a), len(b))
+
+
+def _best_fuzzy_in_window(window: str, word: str) -> tuple[str, int] | None:
+    """window 内で word に最も近い同長〜近い長さの部分文字列を返す。"""
+    w = str(word or "").strip()
+    if not w or not window:
+        return None
+    best: tuple[float, str, int] | None = None
+    for length in range(max(2, len(w) - 1), len(w) + 2):
+        if length > len(window):
+            continue
+        for i in range(0, len(window) - length + 1):
+            cand = window[i : i + length]
+            if " " in cand or "\n" in cand:
+                continue
+            score = _char_overlap(cand, w)
+            if score < 0.6:
+                continue
+            if best is None or score > best[0]:
+                best = (score, cand, i)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def locate_surface_in_transcript(
+    full_text: str,
+    word: str,
+    *,
+    pos_hint: int = -1,
+) -> tuple[str, int]:
+    """現在の逐語録上の表記と位置を返す。
+
+    検出時の anomaly_word が既に別表記へ変わっている場合（リング不足→リンク不足）でも、
+    位置ヒント周辺の近似一致で「今ある文字列」を拾う。
+    """
+    w = str(word or "").strip()
+    if not full_text or not w:
+        return w, -1
+    if pos_hint >= 0 and full_text[pos_hint : pos_hint + len(w)] == w:
+        return w, pos_hint
+    idx = find_standalone_word(full_text, w, hint_pos=pos_hint)
+    if idx >= 0:
+        return w, idx
+    idx = full_text.find(w)
+    if idx >= 0:
+        return w, idx
+    if pos_hint >= 0:
+        win_start = max(0, pos_hint - 50)
+        win_end = min(len(full_text), pos_hint + len(w) + 50)
+        window = full_text[win_start:win_end]
+        fuzzy = _best_fuzzy_in_window(window, w)
+        if fuzzy:
+            surface, local = fuzzy
+            return surface, win_start + local
+    # 全文から緩く探す（短い語の誤爆を避けるため長さ4以上）
+    if len(w) >= 4:
+        step = max(1, len(w) // 2)
+        for i in range(0, max(1, len(full_text) - len(w) + 1), step):
+            cand = full_text[i : i + len(w)]
+            if _char_overlap(cand, w) >= 0.75:
+                return cand, i
+    return w, -1
+
+
+def _snippet_at(full_text: str, idx: int, word: str) -> str:
+    half = BATCH_ITEM_DISPLAY_MAX // 2
+    start = max(0, idx - half)
+    end = min(len(full_text), idx + len(word) + half)
+    snippet = " ".join(full_text[start:end].split())
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(full_text) else ""
+    return _clean_context(
+        f"{prefix}{snippet}{suffix}", word, max_chars=BATCH_ITEM_DISPLAY_MAX
+    )
+
+
+def _display_snippet_for_point(point: dict, *, full_text: str = "") -> dict[str, str | int]:
+    """現在の逐語録を優先して、表示用スニペットと surface_word を返す。
+
+    古い span_text（検出時点の文言）は、逐語録に語が無いときだけフォールバックする。
+    """
     word = str(point.get("anomaly_word") or point.get("word") or "").strip()
+    pos_raw = point.get("context_position_in_transcript", -1)
+    try:
+        pos_hint = int(pos_raw)
+    except (TypeError, ValueError):
+        pos_hint = -1
+
+    if full_text:
+        surface, idx = locate_surface_in_transcript(
+            full_text, word, pos_hint=pos_hint
+        )
+        if idx >= 0:
+            display = _snippet_at(full_text, idx, surface)
+            return {
+                "display": _highlight_word(display, surface),
+                "surface_word": surface,
+                "position": idx,
+                "location": _location_label(idx, len(full_text)),
+                "found_in_transcript": True,
+            }
+        # 語は消えているが位置ヒントがある → 今そこにある文を見せる
+        if pos_hint >= 0:
+            display = _snippet_at(full_text, pos_hint, word)
+            return {
+                "display": display,
+                "surface_word": word,
+                "position": pos_hint,
+                "location": _location_label(pos_hint, len(full_text)),
+                "found_in_transcript": False,
+            }
+
+    # full_text が無いときだけ検出時 span に頼る（陳腐化しやすい）
     span = str(point.get("span_text") or "").strip()
     if span:
-        return _clean_context(span, word, max_chars=BATCH_ITEM_DISPLAY_MAX)
-    if full_text and word:
-        pos_raw = point.get("context_position_in_transcript", -1)
-        try:
-            pos = int(pos_raw)
-        except (TypeError, ValueError):
-            pos = -1
-        if pos >= 0 and full_text[pos : pos + len(word)] == word:
-            idx = pos
-        else:
-            idx = find_standalone_word(full_text, word, hint_pos=pos)
-        if idx >= 0:
-            half = BATCH_ITEM_DISPLAY_MAX // 2
-            start = max(0, idx - half)
-            end = min(len(full_text), idx + len(word) + half)
-            snippet = " ".join(full_text[start:end].split())
-            prefix = "…" if start > 0 else ""
-            suffix = "…" if end < len(full_text) else ""
-            return _clean_context(f"{prefix}{snippet}{suffix}", word, max_chars=BATCH_ITEM_DISPLAY_MAX)
+        display = _clean_context(span, word, max_chars=BATCH_ITEM_DISPLAY_MAX)
+        return {
+            "display": _highlight_word(display, word),
+            "surface_word": word,
+            "position": pos_hint,
+            "location": "",
+            "found_in_transcript": False,
+        }
     for key in ("context", "text"):
         cleaned = _clean_context(str(point.get(key) or ""), word, max_chars=BATCH_ITEM_DISPLAY_MAX)
         if cleaned:
-            return cleaned
-    return word
+            return {
+                "display": _highlight_word(cleaned, word),
+                "surface_word": word,
+                "position": pos_hint,
+                "location": "",
+                "found_in_transcript": False,
+            }
+    return {
+        "display": word,
+        "surface_word": word,
+        "position": pos_hint,
+        "location": "",
+        "found_in_transcript": False,
+    }
 
 
 _CONF_RANK = {"medium": 0, "low": 1, "high": 2}
@@ -270,18 +402,28 @@ def build_batch_items(
             span_corr = str(p.get("span_corrected") or "").strip()
             if span_corr and len(span_corr) <= 40 and "。" not in span_corr:
                 candidate = span_corr
-        display = _display_snippet_for_point(p, full_text=full_text)
+        resolved = _display_snippet_for_point(p, full_text=full_text)
+        surface = str(resolved.get("surface_word") or word).strip() or word
+        # 既に候補どおりなら聞く必要なし
+        if candidate and surface == candidate:
+            continue
+        display = str(resolved.get("display") or surface)
         ranked.append(
             (
                 (_CONF_RANK.get(conf, 9), pos_key),
                 {
                     "anomaly_id": str(p.get("anomaly_id") or "").strip(),
-                    "word": word,
+                    # apply は現在の逐語録上の表記に対して行う
+                    "word": surface,
+                    "detected_word": word,
                     "context": display,
-                    "display": _highlight_word(display, word),
+                    "display": display,
                     "estimated_correction": candidate,
                     "anomaly_type": str(p.get("anomaly_type") or "").strip(),
                     "reason": str(p.get("reason") or "").strip()[:80],
+                    "location": str(resolved.get("location") or ""),
+                    "position": int(resolved.get("position") or -1),
+                    "found_in_transcript": bool(resolved.get("found_in_transcript")),
                 },
             )
         )
@@ -293,16 +435,18 @@ def build_batch_items(
 def build_batch_question_text(items: list[dict]) -> str:
     """番号付きの一括確認メッセージ本文を組み立てる。
 
-    単問形式と同様に、【該当語】付きの文脈と修正候補を出し、
-    どこを聞いているか・何に直す想定かを一目で分かるようにする。
+    現在の逐語録から抜いた引用＋【該当語】＋修正候補。
+    要約議事録には載らない旨を明示し、Doc検索で迷わないようにする。
     """
     lines = [
-        "議事録の音声認識で表記が不確かな箇所をまとめて確認します。",
-        "番号ごとに返信してください。",
+        "【重要】これは文字起こし原文（逐語録）の表記確認です。",
+        "Googleドキュメントの要約・決定事項・議題には出てきません。",
+        "Doc内検索では見つからないので、下の引用文だけを見て回答してください。",
+        "",
+        "番号ごとに返信:",
         "・候補どおり / そのままで正しい →「OK」",
         "・違う語 → 正しい表記",
-        "・議事録に不要 →「削除」",
-        "・分からない →「不明」",
+        "・不要 →「削除」 / 分からない →「不明」",
         "",
     ]
     for i, it in enumerate(items, 1):
@@ -312,10 +456,16 @@ def build_batch_question_text(items: list[dict]) -> str:
             display = word
         display = _highlight_word(display, word)
         candidate = str(it.get("estimated_correction") or "").strip()
+        loc = str(it.get("location") or "").strip()
+        loc_part = f"（逐語録{loc}）" if loc else "（逐語録）"
+        detected = str(it.get("detected_word") or "").strip()
+        note = ""
+        if detected and detected != word:
+            note = f" ※検出時は「{detected}」"
         if candidate:
-            lines.append(f"{i}.「{display}」→「{candidate}」？")
+            lines.append(f"{i}.{loc_part}「{display}」→「{candidate}」？{note}")
         else:
-            lines.append(f"{i}.「{display}」（正しい語 / 削除 / 不明）")
+            lines.append(f"{i}.{loc_part}「{display}」（正しい語 / 削除 / 不明）{note}")
     lines.append("")
     lines.append("例) 1 OK / 2 稟議決裁 / 3 削除 / 4 不明")
     return "\n".join(lines)

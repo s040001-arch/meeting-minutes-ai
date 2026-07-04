@@ -22,6 +22,11 @@ from recorrect_from_line_answer import _mark_batch_items_answered_in_unknowns
 
 class CoherenceBatchWhenPausedTests(unittest.TestCase):
     def test_batch_question_shows_context_highlight_and_candidate(self) -> None:
+        # 現在の逐語録（リング不足は既にリンク不足へ変化している）
+        transcript = (
+            "そういったところ、ちょっと人員のリンク不足みたいなところがなかなか払拭できてたり。"
+            "金額も大きいので、ちゃんと役にさんの倫理決済みたいな、個人だから。"
+        )
         points = [
             {
                 "type": "coherence_review",
@@ -31,7 +36,7 @@ class CoherenceBatchWhenPausedTests(unittest.TestCase):
                 "span_text": "人材のリング不足みたいなところをどう埋めるか",
                 "estimated_correction": "リソース不足",
                 "confidence": "medium",
-                "context_position_in_transcript": 10,
+                "context_position_in_transcript": 15,
             },
             {
                 "type": "coherence_review",
@@ -41,17 +46,23 @@ class CoherenceBatchWhenPausedTests(unittest.TestCase):
                 "span_text": "役員さんの倫理決済みたいなプロセスが必要",
                 "estimated_correction": "稟議決裁",
                 "confidence": "medium",
-                "context_position_in_transcript": 20,
+                "context_position_in_transcript": 50,
             },
         ]
-        items = build_batch_items(points)
+        items = build_batch_items(points, full_text=transcript)
         text = build_batch_question_text(items)
-        self.assertIn("【リング不足】", text)
+        # 古い「リング不足」ではなく、今の逐語録の「リンク不足」を聞く
+        self.assertIn("【リンク不足】", text)
         self.assertIn("→「リソース不足」？", text)
         self.assertIn("【倫理決済】", text)
         self.assertIn("→「稟議決裁」？", text)
-        self.assertIn("人材の", text)
+        self.assertIn("人員の", text)
+        self.assertIn("文字起こし原文", text)
+        self.assertIn("要約・決定事項", text)
         self.assertNotIn("ドライマンゴー", text)
+        # apply 対象は現在の surface
+        self.assertEqual(items[0]["word"], "リンク不足")
+        self.assertEqual(items[0]["detected_word"], "リング不足")
 
     def test_batch_payload_when_question_mode_line(self) -> None:
         pending = [
