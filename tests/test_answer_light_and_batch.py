@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from recognition_batch import RECOGNITION_BATCH_FORMAT, build_batch_items
+from recognition_batch import (
+    RECOGNITION_BATCH_FORMAT,
+    build_batch_items,
+    build_batch_question_text,
+)
 from run_question_cycle_once import (
     _build_coherence_single_question_payload,
     _mark_unknown_point_asked,
@@ -17,6 +21,38 @@ from recorrect_from_line_answer import _mark_batch_items_answered_in_unknowns
 
 
 class CoherenceBatchWhenPausedTests(unittest.TestCase):
+    def test_batch_question_shows_context_highlight_and_candidate(self) -> None:
+        points = [
+            {
+                "type": "coherence_review",
+                "anomaly_id": "ta_001",
+                "anomaly_word": "リング不足",
+                "text": "リング不足",
+                "span_text": "人材のリング不足みたいなところをどう埋めるか",
+                "estimated_correction": "リソース不足",
+                "confidence": "medium",
+                "context_position_in_transcript": 10,
+            },
+            {
+                "type": "coherence_review",
+                "anomaly_id": "ta_002",
+                "anomaly_word": "倫理決済",
+                "text": "倫理決済",
+                "span_text": "役員さんの倫理決済みたいなプロセスが必要",
+                "estimated_correction": "稟議決裁",
+                "confidence": "medium",
+                "context_position_in_transcript": 20,
+            },
+        ]
+        items = build_batch_items(points)
+        text = build_batch_question_text(items)
+        self.assertIn("【リング不足】", text)
+        self.assertIn("→「リソース不足」？", text)
+        self.assertIn("【倫理決済】", text)
+        self.assertIn("→「稟議決裁」？", text)
+        self.assertIn("人材の", text)
+        self.assertNotIn("ドライマンゴー", text)
+
     def test_batch_payload_when_question_mode_line(self) -> None:
         pending = [
             {

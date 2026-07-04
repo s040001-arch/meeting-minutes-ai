@@ -557,9 +557,10 @@ def _build_coherence_batch_question_payload(
     coherence_pending: list[dict],
     pending_meta: dict,
     doc_url: str,
+    full_text: str = "",
 ) -> dict | None:
     """QUESTION_MODE pause 時: 未回答 coherence を番号付き1通に束ねる。"""
-    items = build_batch_items(coherence_pending)
+    items = build_batch_items(coherence_pending, full_text=full_text)
     if not items:
         return None
     question_id = str(uuid.uuid4())
@@ -624,6 +625,7 @@ def _build_coherence_single_question_payload(
             coherence_pending=coherence_pending,
             pending_meta=pending_meta,
             doc_url=doc_url,
+            full_text=full_text,
         )
         if batch_payload is not None:
             return batch_payload

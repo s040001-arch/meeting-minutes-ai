@@ -125,22 +125,77 @@ def find_standalone_word(text: str, word: str, hint_pos: int = -1) -> int:
 
 # 1 通で確認する最大件数。長い逐語録では20件程度まで一括確認する。
 MAX_BATCH_ITEMS = 20
-# 各項目に添える前後文脈の最大文字数。
-CONTEXT_PREVIEW_CHARS = 40
+# 各項目に添える前後文脈の最大文字数（短すぎるとどこを聞いているか分からない）。
+CONTEXT_PREVIEW_CHARS = 120
+# LINE 1通に収めるため、1項目あたりの表示上限。
+BATCH_ITEM_DISPLAY_MAX = 160
 
 _OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
-def _clean_context(raw: str, anomaly_word: str) -> str:
+def _clean_context(raw: str, anomaly_word: str, *, max_chars: int = CONTEXT_PREVIEW_CHARS) -> str:
     s = " ".join(str(raw or "").strip().split())
     if not s:
         return ""
     # context が anomaly_word そのものだけなら文脈として無意味なので落とす
     if s == anomaly_word:
         return ""
-    if len(s) > CONTEXT_PREVIEW_CHARS:
-        s = s[:CONTEXT_PREVIEW_CHARS].rstrip() + "…"
+    if len(s) > max_chars:
+        # 該当語を中央付近に残す
+        word = str(anomaly_word or "").strip()
+        idx = s.find(word) if word else -1
+        if idx >= 0:
+            half = max(20, (max_chars - len(word)) // 2)
+            start = max(0, idx - half)
+            end = min(len(s), start + max_chars)
+            if end - start < max_chars:
+                start = max(0, end - max_chars)
+            s = ("…" if start > 0 else "") + s[start:end] + ("…" if end < len(s) else "")
+        else:
+            s = s[:max_chars].rstrip() + "…"
     return s
+
+
+def _highlight_word(display: str, word: str) -> str:
+    """該当語を【】で囲み、どこを聞いているか一目で分かるようにする。"""
+    w = str(word or "").strip()
+    d = str(display or "").strip()
+    if not w or not d or "【" in d:
+        return d
+    if w in d:
+        return d.replace(w, f"【{w}】", 1)
+    return d
+
+
+def _display_snippet_for_point(point: dict, *, full_text: str = "") -> str:
+    """span_text → 逐語録抜粋 → text/context の順で、読める長さの文脈を返す。"""
+    word = str(point.get("anomaly_word") or point.get("word") or "").strip()
+    span = str(point.get("span_text") or "").strip()
+    if span:
+        return _clean_context(span, word, max_chars=BATCH_ITEM_DISPLAY_MAX)
+    if full_text and word:
+        pos_raw = point.get("context_position_in_transcript", -1)
+        try:
+            pos = int(pos_raw)
+        except (TypeError, ValueError):
+            pos = -1
+        if pos >= 0 and full_text[pos : pos + len(word)] == word:
+            idx = pos
+        else:
+            idx = find_standalone_word(full_text, word, hint_pos=pos)
+        if idx >= 0:
+            half = BATCH_ITEM_DISPLAY_MAX // 2
+            start = max(0, idx - half)
+            end = min(len(full_text), idx + len(word) + half)
+            snippet = " ".join(full_text[start:end].split())
+            prefix = "…" if start > 0 else ""
+            suffix = "…" if end < len(full_text) else ""
+            return _clean_context(f"{prefix}{snippet}{suffix}", word, max_chars=BATCH_ITEM_DISPLAY_MAX)
+    for key in ("context", "text"):
+        cleaned = _clean_context(str(point.get(key) or ""), word, max_chars=BATCH_ITEM_DISPLAY_MAX)
+        if cleaned:
+            return cleaned
+    return word
 
 
 _CONF_RANK = {"medium": 0, "low": 1, "high": 2}
@@ -185,11 +240,17 @@ def parse_single_coherence_answer(answer_text: str, *, word: str) -> dict:
     }
 
 
-def build_batch_items(coherence_points: list[dict], *, limit: int = MAX_BATCH_ITEMS) -> list[dict]:
+def build_batch_items(
+    coherence_points: list[dict],
+    *,
+    limit: int = MAX_BATCH_ITEMS,
+    full_text: str = "",
+) -> list[dict]:
     """unknown_points の coherence 由来項目から、バッチ確認用 items を作る。
 
     anomaly_word が空のもの・重複(同一 word)は除外する。
     medium を優先し、同順位は transcript 上の出現位置順。
+    span_text / 逐語録抜粋を使い、どこを聞いているか分かる文脈を載せる。
     """
     ranked: list[tuple[tuple[int, int], dict]] = []
     seen_words: set[str] = set()
@@ -204,15 +265,23 @@ def build_batch_items(coherence_points: list[dict], *, limit: int = MAX_BATCH_IT
             pos_key = int(pos) if pos is not None else idx
         except (TypeError, ValueError):
             pos_key = idx
+        candidate = str(p.get("estimated_correction") or "").strip()
+        if not candidate:
+            span_corr = str(p.get("span_corrected") or "").strip()
+            if span_corr and len(span_corr) <= 40 and "。" not in span_corr:
+                candidate = span_corr
+        display = _display_snippet_for_point(p, full_text=full_text)
         ranked.append(
             (
                 (_CONF_RANK.get(conf, 9), pos_key),
                 {
                     "anomaly_id": str(p.get("anomaly_id") or "").strip(),
                     "word": word,
-                    "context": _clean_context(str(p.get("text") or ""), word),
-                    "estimated_correction": str(p.get("estimated_correction") or "").strip(),
+                    "context": display,
+                    "display": _highlight_word(display, word),
+                    "estimated_correction": candidate,
                     "anomaly_type": str(p.get("anomaly_type") or "").strip(),
+                    "reason": str(p.get("reason") or "").strip()[:80],
                 },
             )
         )
@@ -222,19 +291,33 @@ def build_batch_items(coherence_points: list[dict], *, limit: int = MAX_BATCH_IT
 
 
 def build_batch_question_text(items: list[dict]) -> str:
-    """番号付きの一括確認メッセージ本文を組み立てる。"""
+    """番号付きの一括確認メッセージ本文を組み立てる。
+
+    単問形式と同様に、【該当語】付きの文脈と修正候補を出し、
+    どこを聞いているか・何に直す想定かを一目で分かるようにする。
+    """
     lines = [
-        "議事録の音声認識で表記が不確かな箇所をまとめて確認させてください。",
-        "番号ごとに正しい表記を教えてください。",
-        "（合っていれば「OK」、分からなければ「不明」で構いません）",
+        "議事録の音声認識で表記が不確かな箇所をまとめて確認します。",
+        "番号ごとに返信してください。",
+        "・候補どおり / そのままで正しい →「OK」",
+        "・違う語 → 正しい表記",
+        "・議事録に不要 →「削除」",
+        "・分からない →「不明」",
         "",
     ]
     for i, it in enumerate(items, 1):
-        ctx = it.get("context") or ""
-        ctx_part = f"（…{ctx}…）" if ctx else ""
-        lines.append(f"{i}.「{it['word']}」{ctx_part}")
+        word = str(it.get("word") or "").strip()
+        display = str(it.get("display") or it.get("context") or "").strip()
+        if not display:
+            display = word
+        display = _highlight_word(display, word)
+        candidate = str(it.get("estimated_correction") or "").strip()
+        if candidate:
+            lines.append(f"{i}.「{display}」→「{candidate}」？")
+        else:
+            lines.append(f"{i}.「{display}」（正しい語 / 削除 / 不明）")
     lines.append("")
-    lines.append("例) 1 ドライマンゴー / 2 OK / 3 6ピース診断 / 4 不明")
+    lines.append("例) 1 OK / 2 稟議決裁 / 3 削除 / 4 不明")
     return "\n".join(lines)
 
 
