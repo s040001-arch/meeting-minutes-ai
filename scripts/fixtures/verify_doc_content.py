@@ -8,10 +8,12 @@ from export_minutes_to_google_docs import (
     load_or_create_google_docs_credentials,
     fetch_google_doc_text_with_retry,
 )
+from googleapiclient.discovery import build  # type: ignore
 
 doc_id = '1wsXCbkpW4HRV1GjF-XHK_hM3I9vCBo91VOWCg9B5yDQ'
 creds = load_or_create_google_docs_credentials('credentials.json', 'token.json')
-doc_text = fetch_google_doc_text_with_retry(doc_id, creds)
+docs_service = build('docs', 'v1', credentials=creds, cache_discovery=False)
+doc_text = fetch_google_doc_text_with_retry(docs_service, doc_id)
 
 print(f'doc_chars={len(doc_text)}')
 print(f'[補足:] count={doc_text.count("[補足:")}')
