@@ -755,6 +755,25 @@ def _is_keep_answer(s: str, target_word: str = "") -> bool:
     return any(p.search(surface) for p in _KEEP_PATTERNS)
 
 
+# バッチ回答で「削除」は delete 指示。correct の correction として解釈しない。
+_DELETE_LITERAL_TOKENS = frozenset({"削除", "delete", "消して"})
+
+
+def _coerce_parsed_row_action(
+    action: str, correction: str, *, word: str
+) -> tuple[str, str]:
+    """correct+correction=『削除』は語の置換ではなく delete 指示への誤解釈。"""
+    a = str(action or "unknown").strip().lower()
+    c = str(correction or "").strip()
+    w = str(word or "").strip()
+    if a == "correct":
+        if c in _DELETE_LITERAL_TOKENS and c != w:
+            return "delete", ""
+        if c.lower() in {"delete"} and w.lower() != "delete":
+            return "delete", ""
+    return a, c
+
+
 def _finalize_batch_item_action(
     action: str,
     correction: str,
@@ -816,6 +835,56 @@ def _normalize_answer_token(token: str, target_word: str = "") -> tuple[str, str
     return ("correct", s)
 
 
+def _batch_rows_from_numbered_matches(
+    matches: dict[int, str], items: list[dict]
+) -> list[dict]:
+    out: list[dict] = []
+    for i, it in enumerate(items, 1):
+        token = matches.get(i)
+        word = str(it.get("word") or "").strip()
+        if token is None:
+            action, correction = ("unknown", "")
+        else:
+            action, correction = _normalize_answer_token(
+                token, target_word=word
+            )
+            action, correction = _finalize_batch_item_action(
+                action, correction, token, it
+            )
+            action, correction = _coerce_parsed_row_action(
+                action, correction, word=word
+            )
+        out.append(
+            {
+                "anomaly_id": it.get("anomaly_id", ""),
+                "word": word,
+                "action": action,
+                "correction": correction,
+            }
+        )
+    return out
+
+
+def _parse_equals_numbered_answer(answer_text: str, items: list[dict]) -> list[dict] | None:
+    """「1=削除、2=相原さん、3=削除」のような = 区切り回答をパースする。"""
+    text = str(answer_text or "").strip()
+    if not text or ("=" not in text and "＝" not in text):
+        return None
+    matches: dict[int, str] = {}
+    pattern = re.compile(
+        r"(?:^|[、,\s])"
+        r"(\d{1,2})\s*[=＝]\s*"
+        r"([^、,\n]+)"
+    )
+    for m in pattern.finditer(text):
+        idx = int(m.group(1))
+        if 1 <= idx <= len(items):
+            matches[idx] = (m.group(2) or "").strip()
+    if not matches:
+        return None
+    return _batch_rows_from_numbered_matches(matches, items)
+
+
 def _parse_numbered_answer_with_regex(answer_text: str, items: list[dict]) -> list[dict] | None:
     """「1 ○○ / 2 OK」のような番号付き回答を素朴にパースする。
 
@@ -825,14 +894,14 @@ def _parse_numbered_answer_with_regex(answer_text: str, items: list[dict]) -> li
     if not text:
         return None
     # 区切り(改行 / スラッシュ / 全角スラッシュ / 読点)を跨いで「番号 + 値」を拾う
-    # 例: "1 ドライマンゴー", "2.OK", "③ 6ピース診断"
+    # 例: "1 ドライマンゴー", "2.OK", "1=削除", "③ 6ピース診断"
     circled = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
     matches: dict[int, str] = {}
     pattern = re.compile(
         r"(?:^|[\n/／、,])\s*"
         r"(?:(\d{1,2})|([" + circled + r"]))"
-        r"\s*[\.\):：\.、]?\s*"
-        r"([^\n/／]*)"
+        r"\s*[\.\):：=＝\.、]?\s*"
+        r"([^、,\n/／]+)"
     )
     for m in pattern.finditer("\n" + text):
         if m.group(1):
@@ -844,26 +913,7 @@ def _parse_numbered_answer_with_regex(answer_text: str, items: list[dict]) -> li
             matches[idx] = val
     if not matches:
         return None
-    out: list[dict] = []
-    for i, it in enumerate(items, 1):
-        token = matches.get(i)
-        if token is None:
-            # 言及されなかった項目は「不明(未回答)」扱い
-            action, correction = ("unknown", "")
-        else:
-            action, correction = _normalize_answer_token(token, target_word=str(it.get("word") or ""))
-            action, correction = _finalize_batch_item_action(
-                action, correction, token, it
-            )
-        out.append(
-            {
-                "anomaly_id": it.get("anomaly_id", ""),
-                "word": it["word"],
-                "action": action,
-                "correction": correction,
-            }
-        )
-    return out
+    return _batch_rows_from_numbered_matches(matches, items)
 
 
 def _extract_output_text(result: dict) -> str:
@@ -893,14 +943,18 @@ def _parse_batch_answer_with_llm(
     system_prompt = (
         "あなたは議事録の表記確認アシスタントです。"
         "音声認識で不確かだった語のリスト(items)と、ユーザーの一括回答(answer_text)が与えられます。"
-        "各 item について、ユーザーが正しい表記を指定したか・そのままで良いと言ったか・不明としたかを判定してください。"
+        "各 item について、ユーザーが正しい表記を指定したか・そのままで良いと言ったか・"
+        "削除指示か・不明としたかを判定してください。"
         "\n出力は JSON 配列のみ。各要素は次のキーを持つ:"
         '\n{"index": 整数(itemsのindex),'
-        ' "action": "correct"(訂正あり) | "keep"(そのままで良い/OK) | "unknown"(不明・未回答),'
+        ' "action": "correct"(訂正あり) | "keep"(そのままで良い/OK) | '
+        '"delete"(不要・削除) | "unknown"(不明・未回答),'
         ' "correction": "actionがcorrectのときの正しい表記。それ以外は空文字"}'
         "\n判定ルール:"
         "\n- ユーザーが具体的な語を書いていれば correct とし、その語を correction に入れる。"
         "\n- 『OK』『そのまま』『合ってる』等は keep。"
+        "\n- 『削除』『消して』『不要』等は delete（correction は空文字）。"
+        " delete は語を本文から取り除く指示であり、correction に『削除』と書かない。"
         "\n- 『不明』『わからない』や、その番号に言及が無い場合は unknown。"
         "\n- 番号と語の対応はユーザー回答の番号付けを尊重する。"
     )
@@ -949,11 +1003,17 @@ def _parse_batch_answer_with_llm(
     for i, it in enumerate(items, 1):
         el = by_index.get(i, {})
         action = str(el.get("action") or "unknown").strip().lower()
-        if action not in {"correct", "keep", "unknown"}:
+        if action not in {"correct", "keep", "unknown", "delete"}:
             action = "unknown"
         correction = str(el.get("correction") or "").strip().strip("「」『』\"'")
+        word = str(it.get("word") or "").strip()
+        action, correction = _coerce_parsed_row_action(
+            action, correction, word=word
+        )
         if action == "correct" and not correction:
             action = "unknown"
+        if action == "delete":
+            correction = ""
         out.append(
             {
                 "anomaly_id": it.get("anomaly_id", ""),
@@ -981,6 +1041,12 @@ def parse_batch_answer(
     """
     if not items:
         return []
+
+    equals_parsed = _parse_equals_numbered_answer(answer_text, items)
+    if equals_parsed is not None:
+        answered = sum(1 for p in equals_parsed if p["action"] != "unknown")
+        if answered >= max(1, len(items) // 2):
+            return equals_parsed
 
     regex_parsed = _parse_numbered_answer_with_regex(answer_text, items)
 
@@ -1027,6 +1093,9 @@ def apply_batch_corrections(transcript: str, parsed: list[dict]) -> tuple[str, l
             continue
         action = str(p.get("action") or "unknown").strip().lower()
         correction = str(p.get("correction") or "").strip()
+        action, correction = _coerce_parsed_row_action(
+            action, correction, word=word
+        )
         # 同じ語が返ってきた(=表記は正しい)場合は keep と同じく確定扱い(タグ除去)。
         if action == "correct" and (not correction or correction == word):
             action = "keep"

@@ -267,6 +267,57 @@ class AnswerLightCompletionAfterNoQuestionTests(unittest.TestCase):
             self.assertFalse(_question_cycle_generated_new_question(job))
 
 
+class BatchAnswerParseTests(unittest.TestCase):
+    """バッチ回答の番号分解（=区切り・削除指示）。"""
+
+    def test_equals_format_delete_and_correct(self) -> None:
+        from recognition_batch import apply_batch_corrections, parse_batch_answer
+
+        answer = "1=削除、2=相原さん、3=削除、4=整理できたり、5=研修、6=削除、7=削除"
+        items = [
+            {"anomaly_id": "a1", "word": "誠実から進める"},
+            {"anomaly_id": "a2", "word": "愛ナさん"},
+            {"anomaly_id": "a3", "word": "コロナベンダー"},
+            {"anomaly_id": "a4", "word": "作品できたり"},
+            {"anomaly_id": "a5", "word": "医学部さん研修"},
+            {"anomaly_id": "a6", "word": "農業形式"},
+            {"anomaly_id": "a7", "word": "真っ白を通して"},
+        ]
+        parsed = parse_batch_answer(answer_text=answer, items=items, api_key=None)
+        by_word = {p["word"]: p for p in parsed}
+        self.assertEqual(by_word["誠実から進める"]["action"], "delete")
+        self.assertEqual(by_word["愛ナさん"]["action"], "correct")
+        self.assertEqual(by_word["愛ナさん"]["correction"], "相原さん")
+        self.assertEqual(by_word["コロナベンダー"]["action"], "delete")
+        self.assertEqual(by_word["作品できたり"]["correction"], "整理できたり")
+        self.assertEqual(by_word["医学部さん研修"]["correction"], "研修")
+        self.assertEqual(by_word["農業形式"]["action"], "delete")
+        self.assertEqual(by_word["真っ白を通して"]["action"], "delete")
+        # 本文に「削除」literal が入らないこと
+        body = (
+            "あの誠実から進める等々でご相談。先日さんの愛ナさんにメール。"
+            "コロナベンダーサポート。作品できたり。医学部さん研修。"
+            "農業形式で。真っ白を通していこうか。"
+        )
+        out, applied = apply_batch_corrections(body, parsed)
+        self.assertNotIn("削除サポート", out)
+        self.assertNotIn("あの削除", out)
+        self.assertIn("相原さん", out)
+        self.assertIn("整理できたり", out)
+        self.assertIn("研修", out)
+        delete_actions = [a for a in applied if a.get("action") == "delete"]
+        self.assertGreaterEqual(len(delete_actions), 1)
+
+    def test_coerce_delete_literal_correction(self) -> None:
+        from recognition_batch import _coerce_parsed_row_action
+
+        action, corr = _coerce_parsed_row_action(
+            "correct", "削除", word="誠実から進める"
+        )
+        self.assertEqual(action, "delete")
+        self.assertEqual(corr, "")
+
+
 class WebhookLightResumeBranchTests(unittest.TestCase):
     def test_light_path_when_question_mode_line(self) -> None:
         from webhook_app import maybe_launch_auto_after_answer
