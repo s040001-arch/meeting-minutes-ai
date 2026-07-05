@@ -318,6 +318,64 @@ class BatchAnswerParseTests(unittest.TestCase):
         self.assertEqual(corr, "")
 
 
+class SmartDeleteTests(unittest.TestCase):
+    """delete のスマート削除: 断片のみ最小除去 + 削除のみ検証。"""
+
+    def test_deletion_only_edit_validator(self) -> None:
+        from recognition_batch import _is_deletion_only_edit
+
+        orig = "っていうところで、あの誠実から進める等々でご相談をさせていただいてた。"
+        # 純粋な削除 → OK
+        self.assertTrue(
+            _is_deletion_only_edit(orig, "っていうところで、ご相談をさせていただいてた。")
+        )
+        # 言い換え（挿入を含む）→ NG
+        self.assertFalse(
+            _is_deletion_only_edit(orig, "っていうところで、正式にご相談をさせていただいてた。")
+        )
+        # 全文同一 → NG（変更なしは呼び出し側で不採用）
+        self.assertFalse(_is_deletion_only_edit(orig, orig))
+        # 空 → NG
+        self.assertFalse(_is_deletion_only_edit(orig, ""))
+
+    def test_smart_delete_used_when_llm_returns_valid_deletion(self) -> None:
+        from recognition_batch import apply_batch_corrections
+
+        body = (
+            "それの今後あの運用の取り回しについてどうでしょうか?"
+            "っていうところで、あの誠実から進める等々でご相談をさせていただいてたので、"
+            "そちらのすり合わせをさせていただきたいと思います。"
+        )
+        smart = (
+            "っていうところで、ご相談をさせていただいてたので、"
+            "そちらのすり合わせをさせていただきたいと思います。"
+        )
+        parsed = [
+            {"anomaly_id": "a1", "word": "誠実から進める", "action": "delete", "correction": ""}
+        ]
+        with patch(
+            "recognition_batch._smart_delete_sentence_via_llm", return_value=smart
+        ):
+            out, applied = apply_batch_corrections(body, parsed, api_key="test-key")
+        self.assertNotIn("誠実から進める", out)
+        # 実発言（すり合わせ）は残っている
+        self.assertIn("すり合わせをさせていただきたい", out)
+        self.assertIn("ご相談をさせていただいてた", out)
+        self.assertEqual(applied[0]["mode"], "smart_fragment")
+
+    def test_fallback_to_span_delete_without_api_key(self) -> None:
+        from recognition_batch import apply_batch_corrections
+
+        body = "前の文です。あの誠実から進める等々でご相談をさせていただいてた。次の文です。"
+        parsed = [
+            {"anomaly_id": "a1", "word": "誠実から進める", "action": "delete", "correction": ""}
+        ]
+        out, applied = apply_batch_corrections(body, parsed)
+        self.assertNotIn("誠実から進める", out)
+        self.assertIn("前の文です。", out)
+        self.assertIn("次の文です。", out)
+
+
 class WebhookLightResumeBranchTests(unittest.TestCase):
     def test_light_path_when_question_mode_line(self) -> None:
         from webhook_app import maybe_launch_auto_after_answer

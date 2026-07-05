@@ -623,9 +623,93 @@ def _find_delete_span(transcript: str, *, span_hint: str, word: str) -> tuple[in
     return _expand_to_delete_span(transcript, start, length)
 
 
+def _is_deletion_only_edit(original: str, edited: str) -> bool:
+    """edited が original からの「削除のみ」で得られるか（挿入・言い換え禁止）。"""
+    import difflib
+
+    o = str(original or "")
+    e = str(edited or "")
+    if not e or len(e) >= len(o):
+        return False
+    sm = difflib.SequenceMatcher(None, o, e, autojunk=False)
+    for tag, _i1, _i2, j1, j2 in sm.get_opcodes():
+        if tag in ("insert", "replace") and (j2 - j1) > 0:
+            return False
+    return True
+
+
+def _smart_delete_sentence_via_llm(
+    sentence: str, word: str, *, api_key: str, model: str = "gpt-4.1", timeout_sec: int = 60
+) -> str | None:
+    """文から誤認識断片だけを最小限に取り除いた文を返す（失敗時 None）。
+
+    出力は「元の文からの削除のみ」で構成されていることを difflib で厳格検証する。
+    1文字でも挿入・言い換えがあれば不採用（幻覚防止）。
+    """
+    system_prompt = (
+        "あなたは文字起こしの校正者です。与えられた文から、指定された"
+        "音声認識の誤変換断片（と、それに直接付随して意味をなさなくなる助詞・"
+        "接続の最小限の断片のみ）を取り除いてください。"
+        "\n厳守事項:"
+        "\n- 出力は編集後の文のみ。説明・前置き・引用符は禁止。"
+        "\n- 残す部分は一字一句変更しない（言い換え・追加・順序変更は禁止）。"
+        "\n- 削除は必要最小限。実質的な発言内容は残す。"
+        "\n- 取り除くと文が成立しない場合は、元の文をそのまま出力する。"
+    )
+    user_payload = {"sentence": sentence, "remove_fragment": word}
+    try:
+        resp = requests.post(
+            _OPENAI_RESPONSES_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "temperature": 0.0,
+                "max_output_tokens": 1000,
+                "input": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+            },
+            timeout=timeout_sec,
+        )
+        if resp.status_code != 200:
+            return None
+        edited = _extract_output_text(resp.json()).strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not edited or word in edited:
+        return None
+    if not _is_deletion_only_edit(sentence, edited):
+        return None
+    return edited
+
+
 def _apply_delete_to_transcript(
-    transcript: str, *, span_hint: str, word: str
+    transcript: str, *, span_hint: str, word: str, api_key: str | None = None
 ) -> tuple[str, dict | None]:
+    w = str(word or "").strip()
+    # スマート削除: 該当文からガーブル断片だけを最小限取り除く（削除のみ検証付き）。
+    # 文まるごと削除（従来）は実発言まで巻き込むため、可能な限りこちらを使う。
+    if api_key and w:
+        idx = find_standalone_word(transcript, w)
+        if idx < 0:
+            idx = transcript.find(w)
+        if idx >= 0:
+            s, e = _expand_to_sentence_span(transcript, idx, len(w))
+            sentence = transcript[s:e]
+            edited = _smart_delete_sentence_via_llm(sentence, w, api_key=api_key)
+            if edited is not None and edited != sentence:
+                out = transcript[:s] + edited + transcript[e:]
+                return out, {
+                    "before": sentence.strip(),
+                    "after": edited.strip(),
+                    "action": "delete",
+                    "mode": "smart_fragment",
+                    "word": w,
+                }
     span = _find_delete_span(transcript, span_hint=span_hint, word=word)
     if span is None:
         return transcript, None
@@ -1076,11 +1160,15 @@ def parse_batch_answer(
     ]
 
 
-def apply_batch_corrections(transcript: str, parsed: list[dict]) -> tuple[str, list[dict]]:
+def apply_batch_corrections(
+    transcript: str, parsed: list[dict], *, api_key: str | None = None
+) -> tuple[str, list[dict]]:
     """parsed の指示に従って本文を一括補正し、[要確認] タグを処理する。
 
     - correct: word(+[要確認]) を correction に置換(全出現)。
     - keep:    word の直後の [要確認] タグだけ除去(語自体は確定でそのまま)。
+    - delete:  api_key があれば LLM スマート削除（文からガーブル断片のみ最小除去、
+               削除のみ検証付き）。無ければ従来の文スパン削除。
     - unknown: 何もしない([要確認] は残す)。
 
     返り値: (補正後テキスト, applied)。applied は実際に変更した項目の記録。
@@ -1102,15 +1190,16 @@ def apply_batch_corrections(transcript: str, parsed: list[dict]) -> tuple[str, l
         if action == "delete":
             before = out
             out, deleted = _apply_delete_to_transcript(
-                out, span_hint=correction, word=word
+                out, span_hint=correction, word=word, api_key=api_key
             )
             if out != before and deleted:
                 applied.append(
                     {
                         "anomaly_id": p.get("anomaly_id", ""),
                         "before": deleted.get("before", ""),
-                        "after": "",
+                        "after": deleted.get("after", ""),
                         "action": "delete",
+                        "mode": deleted.get("mode", "sentence_span"),
                         "word": word,
                     }
                 )

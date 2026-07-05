@@ -1477,7 +1477,7 @@ def main() -> None:
             model=args.model,
             timeout_sec=args.openai_timeout_sec,
         )
-        updated, applied = apply_batch_corrections(base_text, parsed)
+        updated, applied = apply_batch_corrections(base_text, parsed, api_key=api_key)
         save_after_qa_text(job_dir, updated)
         if out_path != after_qa_path(job_dir):
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
