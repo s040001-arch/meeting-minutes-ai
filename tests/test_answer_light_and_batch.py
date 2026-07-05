@@ -558,5 +558,125 @@ class ReenterCompletedJobTests(unittest.TestCase):
             self.assertEqual(total2, 1)
 
 
+class SpanHypothesisQuestionTests(unittest.TestCase):
+    """崩壊文スパンを仮説付きで確認する質問タイプ(span_hypothesis)。"""
+
+    TRANSCRIPT = (
+        "はい、よろしくお願いします。"
+        "ドネと協定を狩ることは廃止できるんじゃないかなと思ってまして。"
+        "その他はこれまで通りで進めます。"
+    )
+    SPAN = "ドネと協定を狩ることは廃止できるんじゃないかな"
+    HYPO = "NEST上の協定の確認は廃止できるんじゃないかな"
+
+    def _point(self) -> dict:
+        return {
+            "type": "coherence_review",
+            "anomaly_id": "span_001",
+            "anomaly_word": self.SPAN,
+            "text": self.SPAN,
+            "span_text": self.SPAN,
+            "span_corrected": self.HYPO,
+            "estimated_correction": self.HYPO,
+            "confidence": "medium",
+            "anomaly_type": "C",
+            "question_kind": "span_hypothesis",
+            "context_position_in_transcript": self.TRANSCRIPT.find(self.SPAN),
+            "force_question": True,
+            "status": "open",
+        }
+
+    def test_build_batch_items_produces_span_item(self) -> None:
+        items = build_batch_items([self._point()], full_text=self.TRANSCRIPT)
+        self.assertEqual(len(items), 1)
+        it = items[0]
+        self.assertEqual(it["question_kind"], "span_hypothesis")
+        self.assertEqual(it["word"], self.SPAN)
+        self.assertEqual(it["estimated_correction"], self.HYPO)
+        self.assertTrue(it["found_in_transcript"])
+
+    def test_question_text_shows_quote_and_hypothesis(self) -> None:
+        items = build_batch_items([self._point()], full_text=self.TRANSCRIPT)
+        text = build_batch_question_text(items)
+        self.assertIn("意味が取りにくい発言", text)
+        self.assertIn(self.SPAN, text)
+        self.assertIn(f"仮説:「{self.HYPO}」", text)
+        self.assertIn("という趣旨でしょうか", text)
+
+    def test_auto_type_c_with_span_corrected_becomes_span_item(self) -> None:
+        # 自動検出(C)でも span_corrected 仮説があれば文単位の質問になる
+        point = self._point()
+        point.pop("question_kind")
+        point.pop("force_question")
+        point["anomaly_word"] = "ドネと協定"
+        items = build_batch_items([point], full_text=self.TRANSCRIPT)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["question_kind"], "span_hypothesis")
+        self.assertEqual(items[0]["word"], self.SPAN)
+
+    def test_ok_answer_adopts_hypothesis(self) -> None:
+        from recognition_batch import apply_batch_corrections, parse_batch_answer
+
+        items = build_batch_items([self._point()], full_text=self.TRANSCRIPT)
+        parsed = parse_batch_answer(answer_text="1 OK", items=items, api_key=None)
+        self.assertEqual(parsed[0]["action"], "correct")
+        self.assertEqual(parsed[0]["correction"], self.HYPO)
+        updated, applied = apply_batch_corrections(self.TRANSCRIPT, parsed)
+        self.assertIn(self.HYPO, updated)
+        self.assertNotIn("ドネと協定", updated)
+        self.assertEqual(len(applied), 1)
+
+    def test_freetext_rewording_replaces_span(self) -> None:
+        from recognition_batch import apply_batch_corrections, parse_batch_answer
+
+        reword = "NEST上の協定確認の工程は廃止できるんじゃないかな"
+        parsed = parse_batch_answer(
+            answer_text=f"1 「{reword}」",
+            items=build_batch_items([self._point()], full_text=self.TRANSCRIPT),
+            api_key=None,
+        )
+        self.assertEqual(parsed[0]["action"], "correct")
+        self.assertEqual(parsed[0]["correction"], reword)
+        updated, _ = apply_batch_corrections(self.TRANSCRIPT, parsed)
+        self.assertIn(reword, updated)
+        self.assertNotIn("ドネと協定", updated)
+
+    def test_delete_answer_removes_span(self) -> None:
+        from recognition_batch import apply_batch_corrections, parse_batch_answer
+
+        items = build_batch_items([self._point()], full_text=self.TRANSCRIPT)
+        parsed = parse_batch_answer(answer_text="1 削除", items=items, api_key=None)
+        self.assertEqual(parsed[0]["action"], "delete")
+        updated, _ = apply_batch_corrections(self.TRANSCRIPT, parsed)
+        self.assertNotIn("ドネと協定", updated)
+        self.assertIn("よろしくお願いします", updated)
+        self.assertIn("これまで通り", updated)
+
+    def test_reenter_builds_span_hypothesis_point(self) -> None:
+        import reenter_completed_job as rc
+
+        spec = {"span": self.SPAN, "hypothesis": self.HYPO, "reason": "文崩壊"}
+        p = rc._build_injected_point(self.TRANSCRIPT, spec)
+        self.assertIsNotNone(p)
+        self.assertEqual(p["question_kind"], "span_hypothesis")
+        self.assertEqual(p["span_text"], self.SPAN)
+        self.assertEqual(p["span_corrected"], self.HYPO)
+        self.assertTrue(p["force_question"])
+        # span が逐語録に無い場合はスキップ（陳腐化防止）
+        p_missing = rc._build_injected_point(
+            self.TRANSCRIPT, {"span": "存在しないスパンです", "hypothesis": "x"}
+        )
+        self.assertIsNone(p_missing)
+
+    def test_stale_span_falls_back_without_crash(self) -> None:
+        # 逐語録が変わって span が見つからない -> 従来 word モードへフォールバック
+        point = self._point()
+        point["span_text"] = "もう存在しない古いスパン"
+        point["anomaly_word"] = "もう存在しない古いスパン"
+        items = build_batch_items([point], full_text=self.TRANSCRIPT)
+        # word も逐語録に無いので通常経路で処理される（クラッシュしない）
+        self.assertIsInstance(items, list)
+
+
 if __name__ == "__main__":
     unittest.main()

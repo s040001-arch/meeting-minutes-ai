@@ -67,7 +67,48 @@ def _snippet(text: str, idx: int, word: str, half: int = 60) -> str:
     return text[start:end].strip()
 
 
+def _build_injected_span_hypothesis(text: str, spec: dict) -> dict | None:
+    """崩壊文スパン＋復元仮説の注入項目を作る（文意確認モード）。
+
+    spec 例:
+      {"span": "ドネと協定を狩ることは廃止できる",
+       "hypothesis": "NEST上の協定の確認は廃止できる",
+       "reason": "Box節の文崩壊"}
+    span が逐語録に一致しない場合はスキップ（陳腐化防止）。
+    """
+    span = str(spec.get("span") or "").strip()
+    if not span:
+        return None
+    hypothesis = str(spec.get("hypothesis") or "").strip()
+    pos = text.find(span)
+    if pos < 0:
+        print(f"  SKIP (逐語録にスパンが見つからない): {span[:40]!r}…")
+        return None
+    conf = str(spec.get("confidence") or "medium").strip().lower()
+    return {
+        "type": COHERENCE_TYPE,
+        "source": COHERENCE_SOURCE,
+        "reentry_source": REENTRY_SOURCE_TAG,
+        "anomaly_id": _stable_anomaly_id(span[:40], pos),
+        "anomaly_word": span,
+        "text": span[:220],
+        "context": span[:220],
+        "span_text": span,
+        "estimated_correction": hypothesis,
+        "span_corrected": hypothesis,
+        "confidence": conf if conf in {"high", "medium", "low"} else "medium",
+        "anomaly_type": "C",
+        "question_kind": "span_hypothesis",
+        "reason": str(spec.get("reason") or "manual re-entry (文意確認)"),
+        "context_position_in_transcript": pos,
+        "force_question": True,
+        "status": "open",
+    }
+
+
 def _build_injected_point(text: str, spec: dict) -> dict | None:
+    if spec.get("span"):
+        return _build_injected_span_hypothesis(text, spec)
     word = str(spec.get("word") or "").strip()
     if not word:
         return None

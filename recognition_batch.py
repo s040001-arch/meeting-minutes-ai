@@ -428,6 +428,48 @@ def build_batch_items(
             pos_key = int(pos) if pos is not None else idx
         except (TypeError, ValueError):
             pos_key = idx
+
+        # 文意確認モード: 崩壊した文スパンを引用し、復元仮説ごと確認する。
+        # (a) 手動注入 question_kind=span_hypothesis、または
+        # (b) 検出カテゴリC（文崩壊）で span_corrected の仮説があるもの。
+        span_text = str(p.get("span_text") or "").strip()
+        span_corr = str(p.get("span_corrected") or "").strip()
+        explicit_span = str(p.get("question_kind") or "").strip() == "span_hypothesis"
+        auto_span = (
+            str(p.get("anomaly_type") or "").strip().upper() == "C"
+            and len(span_text) >= 12
+            and bool(span_corr)
+            and span_corr != span_text
+        )
+        if (explicit_span or auto_span) and full_text and span_text:
+            pos_span = full_text.find(span_text)
+            if pos_span >= 0:
+                if span_text in seen_words:
+                    continue
+                seen_words.add(span_text)
+                seen_words.add(word)
+                ranked.append(
+                    (
+                        (_CONF_RANK.get(conf, 9), pos_span),
+                        {
+                            "anomaly_id": str(p.get("anomaly_id") or "").strip(),
+                            "word": span_text,
+                            "detected_word": span_text,
+                            "context": span_text,
+                            "display": span_text[:220],
+                            "estimated_correction": span_corr,
+                            "question_kind": "span_hypothesis",
+                            "anomaly_type": "C",
+                            "reason": str(p.get("reason") or "").strip()[:80],
+                            "location": _location_label(pos_span, len(full_text)),
+                            "position": pos_span,
+                            "found_in_transcript": True,
+                        },
+                    )
+                )
+                continue
+            # span が現逐語録に無い（陳腐化）→ 従来の word モードにフォールバック
+
         candidate = str(p.get("estimated_correction") or "").strip()
         if not candidate:
             span_corr = str(p.get("span_corrected") or "").strip()
@@ -489,13 +531,25 @@ def build_batch_question_text(items: list[dict]) -> str:
     ]
     for i, it in enumerate(items, 1):
         word = str(it.get("word") or "").strip()
+        loc = str(it.get("location") or "").strip()
+        loc_part = f"（逐語録{loc}）" if loc else "（逐語録）"
+        if str(it.get("question_kind") or "") == "span_hypothesis":
+            # 文単位の仮説確認: 崩壊した発言を引用し、復元仮説ごと聞く
+            hypo = str(it.get("estimated_correction") or "").strip()
+            quote = word if len(word) <= 160 else word[:157] + "…"
+            lines.append(f"{i}.{loc_part}意味が取りにくい発言:")
+            lines.append(f"　「{quote}」")
+            if hypo:
+                lines.append(f"　→ 仮説:「{hypo}」という趣旨でしょうか？")
+                lines.append("　　OK=仮説どおり / 違えば正しい言い回し / 削除=発言ごと不要 / 不明")
+            else:
+                lines.append("　→ どういう発言だったか教えてください（言い回し / 削除 / 不明）")
+            continue
         display = str(it.get("display") or it.get("context") or "").strip()
         if not display:
             display = word
         display = _highlight_word(display, word)
         candidate = str(it.get("estimated_correction") or "").strip()
-        loc = str(it.get("location") or "").strip()
-        loc_part = f"（逐語録{loc}）" if loc else "（逐語録）"
         detected = str(it.get("detected_word") or "").strip()
         note = ""
         if detected and detected != word:
