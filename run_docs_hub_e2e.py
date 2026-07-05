@@ -305,48 +305,33 @@ def cmd_after_answer(args: argparse.Namespace) -> None:
             qresult = json.load(f)
         if str(qresult.get("question_status") or "") != "generated":
             from run_job_once import update_doc_title_from_hub
-            from question_mode import clear_pause_marker, has_pending_unknowns
+            from question_mode import clear_pause_marker
             from progress_tracker import update_job_progress
 
-            # 次質問なしでも pending が残る場合は success にしない（連鎖切れの誤完了防止）
-            if has_pending_unknowns(job_dir):
-                update_job_progress(
-                    input_root=args.input_root,
-                    job_id=args.job_id,
-                    phase="question_pause",
-                    status="success",
-                    detail={"reason": "pending_unknowns_remain"},
-                    overall_status="paused",
+            # 質問選定が「これ以上聞かない」と判断したら pending メタデータが
+            # 残っていても完了扱い（閾値未満の open 不明点など）。
+            clear_pause_marker(job_dir)
+            export_title = _resolve_export_title(args.job_id, args.input_root, args.title)
+            if export_title:
+                update_doc_title_from_hub(
+                    _meta_path(args.job_id, args.input_root),
+                    f"【処理完了】{export_title}",
+                    log_path,
                 )
                 record_visible_progress(
                     log_path=log_path,
                     visible_log_path=visible_log_path,
                     job_id=args.job_id,
-                    message="未回答の不明点が残っているため回答待ちを継続します",
+                    message=f"Googleドキュメント名を【処理完了】に更新しました",
                 )
-            else:
-                clear_pause_marker(job_dir)
-                export_title = _resolve_export_title(args.job_id, args.input_root, args.title)
-                if export_title:
-                    update_doc_title_from_hub(
-                        _meta_path(args.job_id, args.input_root),
-                        f"【処理完了】{export_title}",
-                        log_path,
-                    )
-                    record_visible_progress(
-                        log_path=log_path,
-                        visible_log_path=visible_log_path,
-                        job_id=args.job_id,
-                        message=f"Googleドキュメント名を【処理完了】に更新しました",
-                    )
-                update_job_progress(
-                    input_root=args.input_root,
-                    job_id=args.job_id,
-                    phase="done",
-                    status="success",
-                    detail={},
-                    overall_status="success",
-                )
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="done",
+                status="success",
+                detail={"reason": "no_new_question_after_cycle"},
+                overall_status="success",
+            )
     except (OSError, json.JSONDecodeError, TypeError):
         pass
     record_visible_progress(

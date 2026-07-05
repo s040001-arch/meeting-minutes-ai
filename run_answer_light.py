@@ -144,6 +144,20 @@ def _mark_doc_completed(job_dir: str, job_id: str, input_root: str, log_path: st
         print(f"[answer_light] doc_title_update_failed={e!r}", flush=True)
 
 
+def _question_cycle_generated_new_question(job_dir: str | Path) -> bool:
+    """直近の question_cycle が新規質問を生成したか。"""
+    qr = Path(job_dir) / "question_result.json"
+    if not qr.is_file():
+        return False
+    try:
+        data = json.loads(qr.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return str(data.get("question_status") or "").strip() == "generated"
+
+
 def main() -> int:
     load_dotenv_local()
     parser = argparse.ArgumentParser(description="Light apply after LINE answer (QUESTION_MODE)")
@@ -233,28 +247,45 @@ def main() -> int:
         if send_line:
             qcycle.append("--send-line")
         rc = _run(qcycle, log_path=log_path)
-        if not is_paused(job_dir):
-            write_pause_marker(
-                job_dir,
-                mode=os.environ.get("QUESTION_MODE", "line"),
-                question_artifacts=["question_result.json", "unknown_points.json"],
-                resume_hint=(
-                    "回答を本文に反映したあと "
-                    f"python reprocess_job.py --job-dir {job_dir} --from-step resume"
-                ),
+        if rc != 0:
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="question_pause",
+                status="failed",
+                detail={"pending_unknowns": pending, "next_question_exit": rc},
+                overall_status="paused",
             )
-        update_job_progress(
-            input_root=args.input_root,
-            job_id=args.job_id,
-            phase="question_pause",
-            status="success" if rc == 0 else "failed",
-            detail={"pending_unknowns": pending, "next_question_exit": rc},
-            overall_status="paused",
+            return rc
+        if _question_cycle_generated_new_question(job_dir):
+            if not is_paused(job_dir):
+                write_pause_marker(
+                    job_dir,
+                    mode=os.environ.get("QUESTION_MODE", "line"),
+                    question_artifacts=["question_result.json", "unknown_points.json"],
+                    resume_hint=(
+                        "回答を本文に反映したあと "
+                        f"python reprocess_job.py --job-dir {job_dir} --from-step resume"
+                    ),
+                )
+            update_job_progress(
+                input_root=args.input_root,
+                job_id=args.job_id,
+                phase="question_pause",
+                status="success",
+                detail={"pending_unknowns": pending, "next_question_exit": rc},
+                overall_status="paused",
+            )
+            print(f"[answer_light] status=paused pending={pending}", flush=True)
+            return 0
+        print(
+            "[answer_light] question_cycle returned no new question; "
+            "completing pipeline (threshold skip / no candidates)",
+            flush=True,
         )
-        print(f"[answer_light] status=paused pending={pending}", flush=True)
-        return 0 if rc == 0 else rc
+        # fall through → resume 6.1–6.3
 
-    # 3) All answered → resume minutes once
+    # 3) All answered or no further questions → resume minutes once
     print("[answer_light] all answered; launching resume", flush=True)
     rc = _run(
         [

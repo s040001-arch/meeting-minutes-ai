@@ -245,6 +245,28 @@ class MarkBatchAskedAndAnsweredTests(unittest.TestCase):
             self.assertEqual(by_id["ta_002"]["status"], "open")
 
 
+class AnswerLightCompletionAfterNoQuestionTests(unittest.TestCase):
+    def test_question_cycle_generated_detects_status(self) -> None:
+        from run_answer_light import _question_cycle_generated_new_question
+
+        with tempfile.TemporaryDirectory() as d:
+            job = Path(d)
+            (job / "question_result.json").write_text(
+                json.dumps({"question_status": "generated"}), encoding="utf-8"
+            )
+            self.assertTrue(_question_cycle_generated_new_question(job))
+            (job / "question_result.json").write_text(
+                json.dumps(
+                    {
+                        "question_status": "none",
+                        "message": "proposal_impact=6 が閾値 7 未満",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(_question_cycle_generated_new_question(job))
+
+
 class WebhookLightResumeBranchTests(unittest.TestCase):
     def test_light_path_when_question_mode_line(self) -> None:
         from webhook_app import maybe_launch_auto_after_answer
