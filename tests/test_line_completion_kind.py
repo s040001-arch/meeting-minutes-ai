@@ -59,6 +59,13 @@ class LineCompletionKindTests(unittest.TestCase):
             self.assertEqual(written["question_status"], "none")
             self.assertEqual(written["completion_kind"], "full")
 
+    def test_question_cycle_only_pushes_line_for_new_questions(self) -> None:
+        from run_question_cycle_once import should_push_line_for_result
+
+        self.assertTrue(should_push_line_for_result("generated"))
+        self.assertFalse(should_push_line_for_result("none"))
+        self.assertFalse(should_push_line_for_result(""))
+
 
 if __name__ == "__main__":
     unittest.main()

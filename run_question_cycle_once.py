@@ -986,6 +986,11 @@ def _normalize_question_text(text: str) -> str:
     return s
 
 
+def should_push_line_for_result(question_status: str) -> bool:
+    """LINE push は新規質問生成時のみ。question_status=none の [完了] は送らない。"""
+    return str(question_status or "").strip() == "generated"
+
+
 def main() -> None:
     load_dotenv_local()
     parser = argparse.ArgumentParser(
@@ -1320,18 +1325,22 @@ def main() -> None:
             raise RuntimeError("LINE_USER_ID is not set.")
         if not line_token:
             raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN is not set.")
-        try:
-            push_line_message(
-                channel_access_token=line_token,
-                user_id=line_user_id,
-                text=message_text,
-            )
-        except Exception as e:
-            # after-answer サイクル全体を落とさない（Docs 反映・Hub 更新は続行）
-            print(f"line_push_failed={e!r}")
-            line_push = "failed"
+        # 新規質問のみ LINE 送信。[完了] は run_answer_light / run_job_once 終端で
+        # 議事録再生成・Doc 反映の成功後に送る（ここで送ると処理中に誤完了通知になる）。
+        if not should_push_line_for_result(str(result_payload.get("question_status") or "")):
+            line_push = "skipped_no_question"
         else:
-            if result_payload.get("question_status") == "generated":
+            try:
+                push_line_message(
+                    channel_access_token=line_token,
+                    user_id=line_user_id,
+                    text=message_text,
+                )
+            except Exception as e:
+                # after-answer サイクル全体を落とさない（Docs 反映・Hub 更新は続行）
+                print(f"line_push_failed={e!r}")
+                line_push = "failed"
+            else:
                 line_push = "sent_question"
                 _mark_unknown_point_asked(
                     unknowns_path=unknowns_path,
@@ -1346,8 +1355,6 @@ def main() -> None:
                     question_format=str(result_payload.get("question_format") or ""),
                     selected_unknown=result_payload.get("selected_unknown"),
                 )
-            else:
-                line_push = "sent_completion"
 
     print(f"job_id={args.job_id}")
     print(f"unknowns={unknowns_path}")
