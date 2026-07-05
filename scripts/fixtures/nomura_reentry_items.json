@@ -1,0 +1,8 @@
+[
+  {"word": "統計", "correction": "同期", "hint_pos": 557, "confidence": "medium"},
+  {"word": "あやさん", "correction": "相原さん", "hint_pos": 7807, "confidence": "high"},
+  {"word": "ボール", "correction": "ゴール", "hint_pos": 11568, "confidence": "medium"},
+  {"word": "お客さん思考", "correction": "逆算思考", "hint_pos": 11580, "confidence": "medium", "force": true},
+  {"word": "決済", "correction": "決裁", "hint_pos": 13505, "confidence": "medium"},
+  {"word": "冠水", "correction": "感覚", "hint_pos": 16019, "confidence": "medium"}
+]

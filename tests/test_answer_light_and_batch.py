@@ -284,5 +284,128 @@ class PrefillRemovedTests(unittest.TestCase):
         self.assertNotIn('"role": "assistant"', src2)
 
 
+class TwoCharGateRelaxationTests(unittest.TestCase):
+    def test_gate_allows_2char_when_candidate_and_located(self) -> None:
+        from recognition_batch import is_valid_coherence_question_word as v
+
+        # 候補あり＋位置特定済み → 2字許可
+        self.assertTrue(v("決裁", has_candidate=True, located=True))
+        self.assertTrue(v("同期", has_candidate=True, located=True))
+        # 候補なし or 位置不明 → 従来どおり除外
+        self.assertFalse(v("決裁"))
+        self.assertFalse(v("決裁", has_candidate=True, located=False))
+        self.assertFalse(v("決裁", has_candidate=False, located=True))
+        # 1字は候補ありでも不可
+        self.assertFalse(v("裁", has_candidate=True, located=True))
+        # 3字以上は従来どおり無条件許可
+        self.assertTrue(v("あやさん"))
+
+    def test_build_batch_items_includes_2char_candidate_word(self) -> None:
+        transcript = (
+            "契約締結に向けて、稟議の決済を受けなければいけない事項を洗い出して、"
+            "それらを合意するタイミングを最初に双方で認識しておく。"
+        )
+        pos = transcript.find("決済")
+        points = [
+            {
+                "type": "coherence_review",
+                "anomaly_id": "two_001",
+                "anomaly_word": "決済",
+                "text": "決済",
+                "estimated_correction": "決裁",
+                "confidence": "medium",
+                "context_position_in_transcript": pos,
+            }
+        ]
+        items = build_batch_items(points, full_text=transcript)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["word"], "決済")
+        self.assertEqual(items[0]["estimated_correction"], "決裁")
+
+    def test_build_batch_items_drops_2char_without_candidate(self) -> None:
+        transcript = "契約締結に向けて、稟議の決済を受ける。"
+        points = [
+            {
+                "type": "coherence_review",
+                "anomaly_id": "two_002",
+                "anomaly_word": "決済",
+                "text": "決済",
+                "estimated_correction": "",
+                "confidence": "medium",
+                "context_position_in_transcript": transcript.find("決済"),
+            }
+        ]
+        items = build_batch_items(points, full_text=transcript)
+        self.assertEqual(len(items), 0)
+
+    def test_force_question_bypasses_gate_for_2char_no_candidate(self) -> None:
+        transcript = "お名前をご存じか分からないんですが、暑さというものなんですけど。"
+        points = [
+            {
+                "type": "coherence_review",
+                "anomaly_id": "two_003",
+                "anomaly_word": "暑さ",
+                "text": "暑さ",
+                "estimated_correction": "",
+                "confidence": "medium",
+                "context_position_in_transcript": transcript.find("暑さ"),
+                "force_question": True,
+            }
+        ]
+        items = build_batch_items(points, full_text=transcript)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["word"], "暑さ")
+
+
+class ReenterCompletedJobTests(unittest.TestCase):
+    def test_inject_locates_gates_and_is_idempotent(self) -> None:
+        import reenter_completed_job as rc
+
+        transcript = (
+            "お名前をご存じか分からないんですが、暑さというものなんですけど。"
+            "稟議の決済を受けなければいけない。今、あやさんと川口の方で。"
+        )
+        # located 2char with candidate -> ok
+        p1 = rc._build_injected_point(transcript, {"word": "決済", "correction": "決裁"})
+        self.assertIsNotNone(p1)
+        self.assertEqual(p1["anomaly_word"], "決済")
+        self.assertEqual(p1["status"], "open")
+        self.assertGreaterEqual(p1["context_position_in_transcript"], 0)
+        # 3char name-ish located, no candidate -> still ok (>=3)
+        p2 = rc._build_injected_point(transcript, {"word": "あやさん", "correction": "相原さん"})
+        self.assertIsNotNone(p2)
+        # not found in transcript -> skipped
+        p3 = rc._build_injected_point(transcript, {"word": "存在しない語", "correction": "x"})
+        self.assertIsNone(p3)
+        # 2char without candidate -> gate drop
+        p4 = rc._build_injected_point(transcript, {"word": "暑さ", "correction": ""})
+        self.assertIsNone(p4)
+        # 2char without candidate but force=true -> injected
+        p4f = rc._build_injected_point(
+            transcript, {"word": "暑さ", "correction": "", "force": True}
+        )
+        self.assertIsNotNone(p4f)
+        self.assertTrue(p4f["force_question"])
+        # stable id: same word+pos -> same id
+        p1b = rc._build_injected_point(transcript, {"word": "決済", "correction": "決裁"})
+        self.assertEqual(p1["anomaly_id"], p1b["anomaly_id"])
+
+    def test_merge_unknowns_idempotent(self) -> None:
+        import reenter_completed_job as rc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "unknown_points.json"
+            pts = [
+                {"anomaly_id": "reentry_aaa", "anomaly_word": "決済", "status": "open"},
+            ]
+            added, total = rc._merge_unknowns(path, pts)
+            self.assertEqual(added, 1)
+            self.assertEqual(total, 1)
+            # second time -> no dup
+            added2, total2 = rc._merge_unknowns(path, pts)
+            self.assertEqual(added2, 0)
+            self.assertEqual(total2, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

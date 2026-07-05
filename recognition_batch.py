@@ -30,6 +30,8 @@ def is_coherence_unknown_item(item: dict | None) -> bool:
 
 # LINE で 1 語ずつ確認する際の anomaly_word 最小長（「味」等の熟語内部分一致を除外）
 COHERENCE_MIN_QUESTION_WORD_LEN = 3
+# 修正候補あり かつ 逐語録上で位置特定済みなら、2 字誤変換(決裁/同期/感覚 等)も許可
+COHERENCE_MIN_QUESTION_WORD_LEN_WITH_CANDIDATE = 2
 
 _BOUNDARY_CHARS = set(
     " \t\n\r。、.,!?！？…：:；;''\"()（）[]【】「」『』/／・｜|"
@@ -40,9 +42,34 @@ _TRAILING_PARTICLES = set("のにはがをでもとやかねよわ")
 _COMPOUND_INTERIOR_PREV = _TRAILING_PARTICLES  # の|味 は OK、意|味 は NG
 
 
-def is_valid_coherence_question_word(word: str) -> bool:
+def is_valid_coherence_question_word(
+    word: str, *, has_candidate: bool = False, located: bool = False
+) -> bool:
+    """LINE で確認する anomaly_word の妥当性判定。
+
+    通常は 3 字以上を要求する（部分一致の誤検出爆発を防ぐ）。
+    ただし「修正候補あり かつ 逐語録上で位置特定済み」の場合は 2 字まで許可し、
+    日本語で頻出する 2 字誤変換（決裁/同期/感覚 等）を拾えるようにする。
+    候補なし・位置不明の 2 字は従来どおり除外する。
+    """
     w = str(word or "").strip()
+    if not w:
+        return False
+    if (
+        has_candidate
+        and located
+        and len(w) >= COHERENCE_MIN_QUESTION_WORD_LEN_WITH_CANDIDATE
+    ):
+        return True
     return len(w) >= COHERENCE_MIN_QUESTION_WORD_LEN
+
+
+def _point_located(pos) -> bool:
+    """context_position_in_transcript が有効な位置(>=0)かどうか。"""
+    try:
+        return pos is not None and int(pos) >= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_cjk_letter(ch: str) -> bool:
@@ -340,14 +367,19 @@ def select_next_coherence_point(coherence_points: list[dict]) -> dict | None:
         if not isinstance(p, dict):
             continue
         word = str(p.get("anomaly_word") or "").strip()
-        if not word or not is_valid_coherence_question_word(word):
-            continue
         conf = str(p.get("confidence") or "low").strip().lower()
         pos = p.get("context_position_in_transcript")
         try:
             pos_key = int(pos) if pos is not None else idx
         except (TypeError, ValueError):
             pos_key = idx
+        candidate = str(
+            p.get("estimated_correction") or p.get("span_corrected") or ""
+        ).strip()
+        if not word or not is_valid_coherence_question_word(
+            word, has_candidate=bool(candidate), located=_point_located(pos)
+        ):
+            continue
         ranked.append(((_CONF_RANK.get(conf, 9), pos_key), p))
     if not ranked:
         return None
@@ -388,9 +420,8 @@ def build_batch_items(
     seen_words: set[str] = set()
     for idx, p in enumerate(coherence_points):
         word = str(p.get("anomaly_word") or "").strip()
-        if not word or word in seen_words or not is_valid_coherence_question_word(word):
+        if not word or word in seen_words:
             continue
-        seen_words.add(word)
         conf = str(p.get("confidence") or "low").strip().lower()
         pos = p.get("context_position_in_transcript")
         try:
@@ -403,6 +434,13 @@ def build_batch_items(
             if span_corr and len(span_corr) <= 40 and "。" not in span_corr:
                 candidate = span_corr
         resolved = _display_snippet_for_point(p, full_text=full_text)
+        located = _point_located(pos) or bool(resolved.get("found_in_transcript"))
+        # force_question は手動キュレーション済み項目のみ付与される免除フラグ
+        if not bool(p.get("force_question")) and not is_valid_coherence_question_word(
+            word, has_candidate=bool(candidate), located=located
+        ):
+            continue
+        seen_words.add(word)
         surface = str(resolved.get("surface_word") or word).strip() or word
         # 既に候補どおりなら聞く必要なし
         if candidate and surface == candidate:

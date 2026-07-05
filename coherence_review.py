@@ -91,12 +91,21 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "\n- 『発見とか契約』→ 『派遣とか契約』"
         "\n- 『全部品』→ 会社名・製品名の誤変換の疑い"
         "\n- 『嬉しく1時間』等、意味が通らないフレーズ"
+        "\n- 自己紹介・呼びかけ直後の不自然語 → 氏名の誤変換の疑い"
+        "\n  例: 『暑さというもの』『あやさん』→ 実在氏名の可能性（"
+        "『相原』など参加者名との音の近さを確認）"
         "\n\n【検出対象カテゴリ】"
         "\nA. 明らかな造語(同一会議内に類似語が既出)"
         "\nB. 文脈と整合しない語・意味不明語"
-        "\nC. 文として崩壊している箇所"
+        "\nC. 文として崩壊している箇所（主述不整合・接続が不自然な発話分割崩れを含む）"
         "\nD. 助詞・指示語の誤認識"
         "\nE. 同音異義語の選択ミス"
+        "\nF. 人名らしき孤立語の誤変換（自己紹介・呼びかけ・参加者名の音写ミス）"
+        "\nG. 前段で確定した事実・文脈と矛盾する語（別セクションの決定と食い違う語）"
+        "\n\n【表記の正規化（候補提示のみ・自動確定しない）】"
+        "\n- 稟議・承認・会議体・押印・機関決定・本部長 等のガバナンス文脈近傍の"
+        "『決済』は『決裁』の誤りとして estimated_correction=『決裁』で候補提示する。"
+        "\n  （支払い・入金・カード等の金銭文脈の『決済』はそのまま。誤検出しない）"
         "\n\n【検出量】"
         "\n- medium は原則 15 件以下（質問品質優先）。"
         "\n- low は追加で最大 15 件まで（目視用タグ）。合計 30 件上限。"
@@ -414,7 +423,7 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
     **low は質問キューに入れない**（インライン [要確認] も付けない。内部記録のみ）。
     除外条件:
       - anomaly_word が空
-      - word が 3 字未満 / 30 字超
+      - word が 3 字未満（ただし候補あり＋位置特定済みは 2 字まで許可）/ 30 字超
       - high なのに推定正解が空
       - confidence=low
     """
@@ -430,7 +439,17 @@ def _coherence_to_unknown_points(anomalies: list[dict]) -> list[dict]:
         word = (an.get("anomaly_word") or "").strip()
         if not word:
             continue
-        if not is_valid_coherence_question_word(word):
+        _cand = str(
+            an.get("estimated_correction") or an.get("span_corrected") or ""
+        ).strip()
+        _pos = an.get("context_position_in_transcript")
+        try:
+            _located = _pos is not None and int(_pos) >= 0
+        except (TypeError, ValueError):
+            _located = False
+        if not is_valid_coherence_question_word(
+            word, has_candidate=bool(_cand), located=_located
+        ):
             continue
         # 30字超の "wordとして長すぎる断片" は単語確認質問に不向き(文崩壊扱い)
         if len(word) > 30:
