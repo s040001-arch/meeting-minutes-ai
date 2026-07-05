@@ -23,6 +23,8 @@ READABLE_CHUNK_TARGET_CHARS = 3500
 READABLE_CHUNK_MIN_CHARS = 800
 READABLE_MAX_PARALLEL = 4
 READABLE_MIN_OUTPUT_RATIO = 0.25
+# 検証失敗チャンクの再試行温度（0 の再試行は決定論的で無意味なため少し上げる）
+READABLE_RETRY_TEMPERATURE = 0.4
 
 _HEADING_LINE_RE = re.compile(r"^(?:###\s*)?▼")
 _PARAGRAPH_SEP = re.compile(r"\n\s*\n+")
@@ -280,9 +282,10 @@ def polish_transcript_text_with_stats(
         edited = _attempt(idx, chunk, temperature=0)
         if edited is not None:
             return idx, edited, False, False
-        # 1回だけリトライ（プロンプト同一・temperature 0 固定）
-        print(f"readable_chunk_retry idx={idx}")
-        edited = _attempt(idx, chunk, temperature=0)
+        # 1回だけリトライ。temperature=0 の再試行は決定論的で同じ検証失敗に
+        # 陥るため、わずかに温度を上げてサンプリングを変え、検証を通る別解を狙う。
+        print(f"readable_chunk_retry idx={idx} temperature={READABLE_RETRY_TEMPERATURE}")
+        edited = _attempt(idx, chunk, temperature=READABLE_RETRY_TEMPERATURE)
         if edited is not None:
             return idx, edited, False, True
         print(f"readable_chunk_retry_failed idx={idx} fallback=original")

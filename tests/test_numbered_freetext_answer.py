@@ -21,8 +21,10 @@ from pinpoint_answer_apply import (  # noqa: E402
 from recorrect_from_line_answer import (  # noqa: E402
     _extract_numbered_question_targets,
     _extract_question_header_hypothesis,
+    _numbered_targets_from_question_result,
     _parse_numbered_freetext_answer,
     _replace_standalone_all,
+    _replace_standalone_at,
     _try_handle_numbered_freetext_answer,
 )
 
@@ -101,6 +103,83 @@ class ReplaceStandaloneTests(unittest.TestCase):
         out, count = _replace_standalone_all(text, "ハングラーさん", "相原")
         self.assertEqual(count, 1)
         self.assertIn("相原がおっしゃっている", out)
+
+
+class SpanAnchoredReplaceTests(unittest.TestCase):
+    """P1精度: span_start 指定時は該当1箇所のみ置換し、他の正しい出現を残す。"""
+
+    def test_replace_only_targeted_occurrence(self) -> None:
+        # 「個数」が3回出現。うち2箇所目(pos=near 40)だけを工数に直す想定。
+        text = "個数の話。" + "x" * 30 + "個数を減らす。" + "y" * 30 + "個数は正しい。"
+        hint = text.find("個数を減らす")
+        out, count = _replace_standalone_at(text, "個数", "工数", hint)
+        self.assertEqual(count, 1)
+        self.assertEqual(out.count("個数"), 2)  # 他2箇所は保持
+        self.assertIn("工数を減らす", out)
+
+    def test_targets_from_question_result(self) -> None:
+        qr = {
+            "targets": [
+                {"anomaly_word": "白きさん", "span_start": 5},
+                {"anomaly_word": "ハングラーさん", "span_start": 40},
+            ]
+        }
+        specs = _numbered_targets_from_question_result(qr)
+        self.assertEqual(specs[1]["word"], "白きさん")
+        self.assertEqual(specs[1]["hint_pos"], 5)
+        self.assertEqual(specs[2]["word"], "ハングラーさん")
+        self.assertEqual(specs[2]["hint_pos"], 40)
+
+    def test_bundle_answer_precise_apply(self) -> None:
+        """editor bundle: 同語が複数あってもターゲット箇所だけ直る。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_id = "job_bundle"
+            job_dir = os.path.join(tmp, job_id)
+            os.makedirs(job_dir)
+            body = (
+                "個数の見積もりは合っている。\n"
+                "しかし個数が膨らんでしまう問題。\n"
+                "最終的な個数はこれで良い。\n"
+            )
+            out_path = os.path.join(job_dir, "merged_transcript_after_qa.txt")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(body)
+            with open(
+                os.path.join(job_dir, "unknown_points.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump([], f)
+            qr = {
+                "targets": [
+                    {"anomaly_word": "個数", "span_start": body.find("個数が膨らむ")
+                     if body.find("個数が膨らむ") >= 0 else body.find("個数が膨らん")},
+                    {"anomaly_word": "個数", "span_start": body.rfind("個数はこれで")},
+                ]
+            }
+            question_text = (
+                "以下の箇所はいずれも「工数」では？\n"
+                "1.「しかし【個数】が膨らんでしまう問題」\n"
+                "2.「最終的な【個数】はこれで良い」"
+            )
+            answer = "1番は「工数」。2番も「工数」です。"
+            handled = _try_handle_numbered_freetext_answer(
+                job_id=job_id,
+                input_root=tmp,
+                question_text=question_text,
+                answer_text=answer,
+                question_id="q_bundle",
+                out_path=out_path,
+                input_path=None,
+                question_result=qr,
+            )
+            self.assertTrue(handled)
+            with open(out_path, encoding="utf-8") as f:
+                result = f.read()
+            # 先頭の正しい「個数の見積もり」は保持、対象2箇所のみ工数
+            self.assertIn("個数の見積もりは合っている", result)
+            self.assertIn("しかし工数が膨らんでしまう", result)
+            self.assertIn("最終的な工数はこれで良い", result)
+            self.assertEqual(result.count("工数"), 2)
+            self.assertEqual(result.count("個数"), 1)
 
 
 class NumberedFreetextEndToEndTests(unittest.TestCase):

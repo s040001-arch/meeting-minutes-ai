@@ -17,6 +17,7 @@ from recognition_batch import (
     _apply_delete_to_transcript,
     _is_standalone_word_at,
     apply_batch_corrections,
+    find_standalone_word,
     is_coherence_unknown_item,
     parse_batch_answer,
     parse_single_coherence_answer,
@@ -623,8 +624,29 @@ def _parse_numbered_freetext_answer(answer_text: str) -> dict[int, str]:
     return out
 
 
+def _replace_standalone_at(
+    text: str, word: str, correction: str, hint_pos: int
+) -> tuple[str, int]:
+    """hint_pos に最も近い独立出現1件だけを correction に置換する（精密）。
+
+    editor bundle 由来のターゲットは span_start を持つため、その1箇所だけを
+    直す。誤って別の正しい出現まで潰さないための精密経路。
+    """
+    w = str(word or "").strip()
+    c = str(correction or "").strip()
+    if not w or not c or w == c:
+        return text, 0
+    pos = find_standalone_word(text, w, hint_pos=hint_pos)
+    if pos < 0:
+        if len(w) >= 3 and text.count(w) == 1:
+            pos = text.find(w)
+        else:
+            return text, 0
+    return text[:pos] + c + text[pos + len(w):], 1
+
+
 def _replace_standalone_all(text: str, word: str, correction: str) -> tuple[str, int]:
-    """word の独立出現をすべて correction に置換する。"""
+    """word の独立出現をすべて correction に置換する（span 情報が無い場合の代替）。"""
     w = str(word or "").strip()
     c = str(correction or "").strip()
     if not w or not c or w == c:
@@ -648,6 +670,34 @@ def _replace_standalone_all(text: str, word: str, correction: str) -> tuple[str,
         out = text[:idx] + c + text[idx + len(w):]
         count = 1
     return out, count
+
+
+def _numbered_targets_from_question_result(
+    question_result: dict | None,
+) -> dict[int, dict]:
+    """editor bundle の targets[] を番号→{word, hint_pos} に展開する。
+
+    bundle の質問文は enumerate(targets, 1) 順に組まれるため、番号 i は
+    targets[i-1] に対応する。span_start を持つので精密置換に使える。
+    """
+    out: dict[int, dict] = {}
+    if not isinstance(question_result, dict):
+        return out
+    targets = question_result.get("targets")
+    if not isinstance(targets, list) or len(targets) < 2:
+        return out
+    for i, t in enumerate(targets, 1):
+        if not isinstance(t, dict):
+            continue
+        word = str(t.get("anomaly_word") or "").strip()
+        if not word:
+            continue
+        try:
+            hint = int(t.get("span_start"))
+        except (TypeError, ValueError):
+            hint = -1
+        out[i] = {"word": word, "hint_pos": hint}
+    return out
 
 
 def _reopen_unknowns_for_question(
@@ -726,15 +776,22 @@ def _try_handle_numbered_freetext_answer(
     question_id: str,
     out_path: str,
     input_path: str | None,
+    question_result: dict | None = None,
 ) -> bool:
-    """複数番号の free-text 質問への「N番は〜」回答を番号分解して適用する。
+    """複数番号の質問（editor bundle 等）への「N番は〜」回答を番号分解して適用する。
 
-    質問文に番号付き【対象語】が2件以上あり、回答が番号に言及している場合のみ
-    処理する。分解できた番号は word→correction のピンポイント置換のみ行い、
-    回答文そのものが本文へ入る経路を遮断する。分解できなかった番号の unknown
-    は open に戻す（安全側・再質問）。処理した場合 True を返す。
+    番号→対象語は、可能なら question_result.targets[]（span_start 付き）から取り、
+    無ければ質問文の番号付き【対象語】から抽出する。2件以上あり、回答が番号に
+    言及している場合のみ処理する。span_start があればその1箇所だけを精密に直し、
+    正しい別出現を巻き込まない。分解できた番号は word→correction のピンポイント
+    置換のみ行い、回答文そのものが本文へ入る経路を遮断する。分解できなかった
+    番号の unknown は open に戻す（安全側・再質問）。処理した場合 True を返す。
     """
-    targets = _extract_numbered_question_targets(question_text)
+    target_specs = _numbered_targets_from_question_result(question_result)
+    if target_specs:
+        targets = {n: spec["word"] for n, spec in target_specs.items()}
+    else:
+        targets = {n: w for n, w in _extract_numbered_question_targets(question_text).items()}
     if len(targets) < 2:
         return False
     if not re.search(r"\d{1,2}\s*番", answer_text) and not _ANSWER_NUMBER_HEAD_RE.match(
@@ -762,7 +819,14 @@ def _try_handle_numbered_freetext_answer(
                 {"n": n, "word": word, "correction": word, "action": "keep", "count": 0}
             )
             continue
-        updated_text, count = _replace_standalone_all(updated_text, word, correction)
+        hint = int((target_specs.get(n) or {}).get("hint_pos", -1)) if target_specs else -1
+        if target_specs:
+            # span_start がある → その1箇所だけ精密に直す
+            updated_text, count = _replace_standalone_at(
+                updated_text, word, correction, hint
+            )
+        else:
+            updated_text, count = _replace_standalone_all(updated_text, word, correction)
         if count > 0:
             applied_pairs.append(
                 {"n": n, "word": word, "correction": correction, "action": "correct", "count": count}
@@ -1366,6 +1430,7 @@ def main() -> None:
             question_id=str(record.get("question_id") or ""),
             out_path=out_path,
             input_path=args.input,
+            question_result=question_result if isinstance(question_result, dict) else None,
         ):
             print(f"job_id={args.job_id}")
             print(f"answers_json={answers_json_path}")
