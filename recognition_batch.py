@@ -755,6 +755,26 @@ def _is_keep_answer(s: str, target_word: str = "") -> bool:
     return any(p.search(surface) for p in _KEEP_PATTERNS)
 
 
+def _finalize_batch_item_action(
+    action: str,
+    correction: str,
+    token: str,
+    item: dict,
+) -> tuple[str, str]:
+    """バッチ質問で候補提示ありのとき、OK は候補採用(correct)とみなす。
+
+    質問文は「候補どおり→OK」と「そのままで正しい→OK」の両方に OK を使うが、
+    estimated_correction がある項目でユーザーが OK と答えた場合は候補を採用する。
+    """
+    cand = str(item.get("estimated_correction") or "").strip()
+    if action != "keep" or not cand:
+        return action, correction
+    surface = _normalize_answer_surface(token).lower().replace(" ", "")
+    if surface in {"ok", "okay"}:
+        return "correct", cand
+    return action, correction
+
+
 def _normalize_answer_token(token: str, target_word: str = "") -> tuple[str, str]:
     """単一項目の回答トークンを (action, correction) に正規化する。
 
@@ -832,6 +852,9 @@ def _parse_numbered_answer_with_regex(answer_text: str, items: list[dict]) -> li
             action, correction = ("unknown", "")
         else:
             action, correction = _normalize_answer_token(token, target_word=str(it.get("word") or ""))
+            action, correction = _finalize_batch_item_action(
+                action, correction, token, it
+            )
         out.append(
             {
                 "anomaly_id": it.get("anomaly_id", ""),

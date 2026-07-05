@@ -356,6 +356,26 @@ class TwoCharGateRelaxationTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["word"], "暑さ")
 
+    def test_ok_with_candidate_means_accept_correction(self) -> None:
+        from recognition_batch import apply_batch_corrections, parse_batch_answer
+
+        transcript = "今、あやさんと川口の方でお話いただいてた。"
+        items = [
+            {
+                "anomaly_id": "x1",
+                "word": "あやさん",
+                "estimated_correction": "相原さん",
+                "context": "あやさん",
+            }
+        ]
+        parsed = parse_batch_answer(answer_text="1 OK", items=items, api_key=None)
+        self.assertEqual(parsed[0]["action"], "correct")
+        self.assertEqual(parsed[0]["correction"], "相原さん")
+        updated, applied = apply_batch_corrections(transcript, parsed)
+        self.assertIn("相原さん", updated)
+        self.assertNotIn("あやさん", updated)
+        self.assertEqual(len(applied), 1)
+
 
 class ReenterCompletedJobTests(unittest.TestCase):
     def test_inject_locates_gates_and_is_idempotent(self) -> None:

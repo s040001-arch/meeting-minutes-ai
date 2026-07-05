@@ -22,6 +22,11 @@ REPO = Path(__file__).resolve().parents[1]
 
 # 単語置換では直せない分割崩れ・残留誤変換（recorrect 後に適用）
 MANUAL_FIXES: list[tuple[str, str]] = [
+    ("あやさん", "相原さん"),
+    ("ボールを前描いた", "ゴールを前に置いた"),
+    ("お客さん思考", "逆算思考"),
+    ("決済", "決裁"),
+    ("冠水", "感覚"),
     ("実務が阻害要因になっているので、", ""),
     ("それをリンクとか、", "それを"),
     ("統計の方", "同期の方"),
@@ -45,8 +50,10 @@ def _build_batch_answer(question_result: dict) -> str:
     items = (question_result.get("selected_unknown") or {}).get("batch_items") or []
     parts: list[str] = []
     for i, it in enumerate(items, 1):
-        word = str(it.get("word") or "").strip()
-        if word in _KNOWN_OK_WORDS or it.get("estimated_correction"):
+        cand = str(it.get("estimated_correction") or "").strip()
+        if cand:
+            parts.append(f"{i} {cand}")
+        elif str(it.get("word") or "").strip() in _KNOWN_OK_WORDS:
             parts.append(f"{i} OK")
         else:
             parts.append(f"{i} 不明")
@@ -55,12 +62,13 @@ def _build_batch_answer(question_result: dict) -> str:
 
 def _save_answer_record(
     *,
+    job_dir: Path,
     question_id: str,
     question_text: str,
     answer_text: str,
-) -> None:
-    path = REPO / ANSWERS_JSON
-    path.parent.mkdir(parents=True, exist_ok=True)
+) -> str:
+    """ジョブ answers.json に追記（recorrect の優先読み込み先）。"""
+    path = job_dir / "answers.json"
     existing: list = []
     if path.is_file():
         try:
@@ -82,7 +90,8 @@ def _save_answer_record(
         }
     )
     path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"answer_saved question_id={question_id} text={answer_text!r}")
+    print(f"answer_saved path={path} question_id={question_id} text={answer_text!r}")
+    return str(path)
 
 
 def _apply_manual_fixes(job_dir: Path) -> int:
@@ -102,6 +111,16 @@ def _apply_manual_fixes(job_dir: Path) -> int:
 
 
 def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--direct-only",
+        action="store_true",
+        help="逐語録の手動置換と resume のみ（再注入・recorrect しない）",
+    )
+    args = ap.parse_args()
+
     load_dotenv_local()
     job_dir = REPO / INPUT_ROOT / JOB_ID
     if not job_dir.is_dir():
@@ -111,58 +130,60 @@ def main() -> int:
     env = os.environ.copy()
     env["QUESTION_MODE"] = env.get("QUESTION_MODE") or "line"
 
-    # 1) 注入 + 質問生成（LINE送信なし）
-    rc = _run(
-        [
-            _py(),
-            str(REPO / "reenter_completed_job.py"),
-            "--job-id",
-            JOB_ID,
-            "--input-root",
-            INPUT_ROOT,
-            "--items",
-            ITEMS,
-        ],
-        env=env,
-    )
-    if rc != 0:
-        return rc
+    if not args.direct_only:
+        # 1) 注入 + 質問生成（LINE送信なし）
+        rc = _run(
+            [
+                _py(),
+                str(REPO / "reenter_completed_job.py"),
+                "--job-id",
+                JOB_ID,
+                "--input-root",
+                INPUT_ROOT,
+                "--items",
+                ITEMS,
+            ],
+            env=env,
+        )
+        if rc != 0:
+            return rc
 
-    qr_path = job_dir / "question_result.json"
-    if not qr_path.is_file():
-        print("question_result.json missing after reenter")
-        return 1
-    question_result = json.loads(qr_path.read_text(encoding="utf-8"))
-    question_id = str(question_result.get("question_id") or "").strip()
-    if not question_id:
-        print("question_id missing")
-        return 1
+        qr_path = job_dir / "question_result.json"
+        if not qr_path.is_file():
+            print("question_result.json missing after reenter")
+            return 1
+        question_result = json.loads(qr_path.read_text(encoding="utf-8"))
+        question_id = str(question_result.get("question_id") or "").strip()
+        if not question_id:
+            print("question_id missing")
+            return 1
 
-    answer_text = _build_batch_answer(question_result)
-    _save_answer_record(
-        question_id=question_id,
-        question_text=str(question_result.get("question_text") or ""),
-        answer_text=answer_text,
-    )
+        answer_text = _build_batch_answer(question_result)
+        answers_path = _save_answer_record(
+            job_dir=job_dir,
+            question_id=question_id,
+            question_text=str(question_result.get("question_text") or ""),
+            answer_text=answer_text,
+        )
 
-    # 2) 回答反映
-    rc = _run(
-        [
-            _py(),
-            str(REPO / "recorrect_from_line_answer.py"),
-            "--job-id",
-            JOB_ID,
-            "--input-root",
-            INPUT_ROOT,
-            "--answers-json",
-            ANSWERS_JSON,
-            "--question-id",
-            question_id,
-        ],
-        env=env,
-    )
-    if rc != 0:
-        return rc
+        # 2) 回答反映
+        rc = _run(
+            [
+                _py(),
+                str(REPO / "recorrect_from_line_answer.py"),
+                "--job-id",
+                JOB_ID,
+                "--input-root",
+                INPUT_ROOT,
+                "--answers-json",
+                answers_path,
+                "--question-id",
+                question_id,
+            ],
+            env=env,
+        )
+        if rc != 0:
+            return rc
 
     # 3) 手動スパン修正
     _apply_manual_fixes(job_dir)
@@ -189,7 +210,7 @@ def main() -> int:
     clear_pause_marker(str(job_dir))
     from run_answer_light import _mark_doc_completed, send_completion_line
 
-    _mark_doc_completed(str(job_dir), JOB_ID, INPUT_ROOT, None)
+    _mark_doc_completed(str(job_dir), JOB_ID, INPUT_ROOT, "")
     send_line = bool(
         os.getenv("LINE_USER_ID", "").strip()
         and os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
