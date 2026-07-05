@@ -208,12 +208,14 @@ def _edit_one_chunk(
     client: anthropic.Anthropic,
     chunk_text: str,
     system_prompt: str | list,
+    *,
+    temperature: float = 0,
 ) -> str:
     shielded, mapping = _shield_flagged_tokens(chunk_text)
     resp = client.messages.create(
         model=READABLE_MODEL,
         max_tokens=READABLE_MAX_TOKENS,
-        temperature=0,
+        temperature=temperature,
         timeout=READABLE_TIMEOUT_SEC,
         system=system_prompt,
         messages=[{"role": "user", "content": shielded}],
@@ -229,46 +231,73 @@ def _edit_one_chunk(
     return _unshield_flagged_tokens(edited, mapping)
 
 
-def polish_transcript_text(
+def polish_transcript_text_with_stats(
     text: str,
     meeting_profile: dict[str, Any] | None = None,
-) -> str:
-    """Return readable transcript text. Falls back to input on failure."""
+) -> tuple[str, dict[str, Any]]:
+    """Return (readable text, stats). Falls back to input on failure.
+
+    stats = {"total_chunks": int, "failed_chunk_idx": [int, ...], "retried_ok": int}
+    failed_chunk_idx はリトライ後も検証に失敗し生テキストを採用したチャンク。
+    """
+    stats: dict[str, Any] = {"total_chunks": 0, "failed_chunk_idx": [], "retried_ok": 0}
     source = text.strip()
     if not source:
-        return text
+        return text, stats
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         print("readable_transcript_skipped=no_api_key")
-        return text
+        return text, stats
 
     segments = _expand_body_segments(split_for_readable_edit(source))
     body_indices = [i for i, (kind, _) in enumerate(segments) if kind == "body"]
+    stats["total_chunks"] = len(body_indices)
     if not body_indices:
-        return text.strip() + "\n"
+        return text.strip() + "\n", stats
 
     client = anthropic.Anthropic(api_key=api_key)
     system_prompt = _build_system_prompt(meeting_profile)
     edited_bodies: dict[int, str] = {}
 
-    def _process(idx: int) -> tuple[int, str]:
-        _, chunk = segments[idx]
+    def _attempt(idx: int, chunk: str, *, temperature: float) -> str | None:
+        """Return edited text or None on failure."""
         try:
-            edited = _edit_one_chunk(client, chunk, system_prompt)
+            edited = _edit_one_chunk(
+                client, chunk, system_prompt, temperature=temperature
+            )
         except Exception as e:
             print(f"readable_chunk_failed idx={idx} error={e!r}")
-            return idx, chunk
+            return None
         if not _validate_chunk_output(chunk, edited):
-            print(f"readable_chunk_validation_failed idx={idx} fallback=original")
-            return idx, chunk
-        return idx, edited.strip()
+            print(f"readable_chunk_validation_failed idx={idx}")
+            return None
+        return edited.strip()
+
+    def _process(idx: int) -> tuple[int, str, bool, bool]:
+        """Return (idx, body, failed, retried_ok)."""
+        _, chunk = segments[idx]
+        edited = _attempt(idx, chunk, temperature=0)
+        if edited is not None:
+            return idx, edited, False, False
+        # 1回だけリトライ（プロンプト同一・temperature 0 固定）
+        print(f"readable_chunk_retry idx={idx}")
+        edited = _attempt(idx, chunk, temperature=0)
+        if edited is not None:
+            return idx, edited, False, True
+        print(f"readable_chunk_retry_failed idx={idx} fallback=original")
+        return idx, chunk, True, False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=READABLE_MAX_PARALLEL) as executor:
         futures = [executor.submit(_process, idx) for idx in body_indices]
         for future in concurrent.futures.as_completed(futures):
-            idx, body = future.result()
+            idx, body, failed, retried_ok = future.result()
             edited_bodies[idx] = body
+            if failed:
+                stats["failed_chunk_idx"].append(idx)
+            if retried_ok:
+                stats["retried_ok"] += 1
+    stats["failed_chunk_idx"].sort()
 
     parts: list[str] = []
     for i, (kind, payload) in enumerate(segments):
@@ -279,9 +308,21 @@ def polish_transcript_text(
     result = "\n\n".join(p for p in parts if p.strip())
     print(
         "readable_transcript_applied="
-        f'{{"input_chars":{len(source)},"output_chars":{len(result)},"segments":{len(body_indices)}}}'
+        f'{{"input_chars":{len(source)},"output_chars":{len(result)},'
+        f'"segments":{len(body_indices)},'
+        f'"failed_chunks":{len(stats["failed_chunk_idx"])},'
+        f'"retried_ok":{stats["retried_ok"]}}}'
     )
-    return result.strip() + "\n"
+    return result.strip() + "\n", stats
+
+
+def polish_transcript_text(
+    text: str,
+    meeting_profile: dict[str, Any] | None = None,
+) -> str:
+    """Return readable transcript text. Falls back to input on failure."""
+    polished, _ = polish_transcript_text_with_stats(text, meeting_profile)
+    return polished
 
 
 def generate_readable_transcript(
@@ -291,12 +332,27 @@ def generate_readable_transcript(
     meeting_profile: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Write readable transcript file; return (text, output_path)."""
-    polished = polish_transcript_text(source_text, meeting_profile)
+    polished, _, out_path = generate_readable_transcript_with_stats(
+        job_dir=job_dir,
+        source_text=source_text,
+        meeting_profile=meeting_profile,
+    )
+    return polished, out_path
+
+
+def generate_readable_transcript_with_stats(
+    *,
+    job_dir: str,
+    source_text: str,
+    meeting_profile: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], str]:
+    """Write readable transcript file; return (text, stats, output_path)."""
+    polished, stats = polish_transcript_text_with_stats(source_text, meeting_profile)
     out_path = readable_transcript_path(job_dir)
     os.makedirs(job_dir, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(polished)
-    return polished, out_path
+    return polished, stats, out_path
 
 
 def resolve_minutes_transcript_text(
@@ -307,11 +363,33 @@ def resolve_minutes_transcript_text(
     meeting_profile: dict[str, Any] | None = None,
 ) -> tuple[str, str, bool]:
     """Return (transcript_text, source_label, readable_used)."""
+    text, source_label, readable_used, _ = resolve_minutes_transcript_text_with_stats(
+        job_dir=job_dir,
+        source_text=source_text,
+        source_path=source_path,
+        meeting_profile=meeting_profile,
+    )
+    return text, source_label, readable_used
+
+
+def resolve_minutes_transcript_text_with_stats(
+    *,
+    job_dir: str,
+    source_text: str,
+    source_path: str,
+    meeting_profile: dict[str, Any] | None = None,
+) -> tuple[str, str, bool, dict[str, Any]]:
+    """Return (transcript_text, source_label, readable_used, stats)."""
+    empty_stats: dict[str, Any] = {
+        "total_chunks": 0,
+        "failed_chunk_idx": [],
+        "retried_ok": 0,
+    }
     if not is_readable_transcript_enabled():
-        return source_text, source_path, False
-    readable_text, out_path = generate_readable_transcript(
+        return source_text, source_path, False, empty_stats
+    readable_text, stats, out_path = generate_readable_transcript_with_stats(
         job_dir=job_dir,
         source_text=source_text,
         meeting_profile=meeting_profile,
     )
-    return readable_text, out_path, True
+    return readable_text, out_path, True, stats

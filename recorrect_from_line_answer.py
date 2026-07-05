@@ -11,10 +11,11 @@ from edit_proposal_schema import (
     VERDICT_ASK_WITHOUT_CANDIDATE,
     normalize_verdict,
 )
-from pinpoint_answer_apply import apply_answers
+from pinpoint_answer_apply import apply_answers, looks_like_full_answer_text
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
     _apply_delete_to_transcript,
+    _is_standalone_word_at,
     apply_batch_corrections,
     is_coherence_unknown_item,
     parse_batch_answer,
@@ -540,6 +541,288 @@ def _extract_anomaly_words_from_question(question_text: str) -> list[str]:
         if w and w not in out:
             out.append(w)
     return out
+
+
+_NUMBERED_QUESTION_ITEM_RE = re.compile(
+    r"(?:^|\n)\s*(\d{1,2})\s*[\.．)）:：]?\s*([^\n]*)"
+)
+_ANSWER_NUMBER_HEAD_RE = re.compile(r"^\s*(\d{1,2})\s*(?:番|[\.．)）:：])?\s*(?:は|が)?\s*")
+
+
+def _extract_numbered_question_targets(question_text: str) -> dict[int, str]:
+    """質問文の「N.『…【word】…』」形式から番号→対象語のマップを作る。"""
+    targets: dict[int, str] = {}
+    for m in _NUMBERED_QUESTION_ITEM_RE.finditer(question_text or ""):
+        n = int(m.group(1))
+        body = m.group(2) or ""
+        wm = re.search(r"【([^】]{1,30})】", body)
+        if wm and n not in targets:
+            targets[n] = wm.group(1).strip()
+    return targets
+
+
+def _extract_question_header_hypothesis(question_text: str) -> str:
+    """番号付き列挙の前の質問ヘッダから仮説語（「西脇さん」では？ 等）を抽出。"""
+    text = question_text or ""
+    m = _NUMBERED_QUESTION_ITEM_RE.search(text)
+    header = text[: m.start()] if m else text
+    quoted = re.findall(r"[「『]([^」』]{1,20})[」』]", header)
+    return quoted[-1].strip() if quoted else ""
+
+
+_KEEP_HYPOTHESIS_MARK = "__KEEP_HYPOTHESIS__"
+
+
+def _parse_numbered_answer_clause(rest: str) -> str:
+    """回答の1節（『N番は』を除いた残り）から訂正語を抽出する。
+
+    返り値: 訂正語 / _KEEP_HYPOTHESIS_MARK（仮説どおりでOK） / ""（解釈不能）。
+    """
+    s = str(rest or "").strip()
+    if not s:
+        return ""
+    # 「A」ではなく「B」 → B
+    m = re.search(
+        r"[「『][^」』]{1,20}[」』]\s*(?:ではなく|じゃなく(?:て)?)\s*[「『]?([^」』\s。、]{1,20})[」』]?",
+        s,
+    )
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"(?:ではなく|じゃなく(?:て)?)\s*[「『]?([^」』\s。、]{1,20})[」』]?", s)
+    if m:
+        return m.group(1).strip()
+    # 「A」で正しい/で合ってる/でOK → A
+    m = re.search(r"[「『]([^」』]{1,20})[」』]\s*(?:で正しい|で合(?:っ)?て|でOK|でok|で問題な)", s)
+    if m:
+        return m.group(1).strip()
+    if re.search(r"(?:で正しい|正しい|そのまま|合っ?てる|合っています|OK|ok|問題ない)", s):
+        return _KEEP_HYPOTHESIS_MARK
+    m = re.search(r"[「『]([^」』]{1,20})[」』]", s)
+    if m:
+        return m.group(1).strip()
+    token = s.strip(" 。、！？!?")
+    if token and len(token) <= 20 and not re.search(r"[。、\s]", token):
+        return token
+    return ""
+
+
+def _parse_numbered_freetext_answer(answer_text: str) -> dict[int, str]:
+    """「1番は…。2番は…。」形式の回答を番号→訂正語に分解する。"""
+    out: dict[int, str] = {}
+    clauses: list[str] = []
+    for line in str(answer_text or "").splitlines():
+        clauses.extend(c for c in re.split(r"[。\n]", line) if c.strip())
+    for clause in clauses:
+        m = _ANSWER_NUMBER_HEAD_RE.match(clause)
+        if not m:
+            continue
+        n = int(m.group(1))
+        parsed = _parse_numbered_answer_clause(clause[m.end():])
+        if parsed and n not in out:
+            out[n] = parsed
+    return out
+
+
+def _replace_standalone_all(text: str, word: str, correction: str) -> tuple[str, int]:
+    """word の独立出現をすべて correction に置換する。"""
+    w = str(word or "").strip()
+    c = str(correction or "").strip()
+    if not w or not c or w == c:
+        return text, 0
+    out = text
+    count = 0
+    start = 0
+    while True:
+        idx = out.find(w, start)
+        if idx < 0:
+            break
+        if _is_standalone_word_at(out, idx, len(w)):
+            out = out[:idx] + c + out[idx + len(w):]
+            count += 1
+            start = idx + len(c)
+        else:
+            start = idx + 1
+    if count == 0 and len(w) >= 3 and text.count(w) == 1:
+        # 独立性判定に落ちても、3字以上かつ全文で一意なら安全に置換できる
+        idx = text.find(w)
+        out = text[:idx] + c + text[idx + len(w):]
+        count = 1
+    return out, count
+
+
+def _reopen_unknowns_for_question(
+    *, job_id: str, input_root: str, question_id: str, exclude_words: set[str]
+) -> int:
+    """指定質問に紐づく unknown を open に戻す（適用済み語は除く）。"""
+    unknown_points = _load_unknown_points(job_id, input_root)
+    if not unknown_points:
+        return 0
+    qid = str(question_id or "").strip()
+    reopened = 0
+    for item in unknown_points:
+        linked = qid and (
+            str(item.get("answered_by_question_id") or "").strip() == qid
+            or str(item.get("asked_by_question_id") or "").strip() == qid
+        )
+        if not linked:
+            continue
+        word = str(item.get("anomaly_word") or "").strip()
+        if word and word in exclude_words:
+            continue
+        if str(item.get("status") or "").strip().lower() in {"answered", "asked"}:
+            item["status"] = "open"
+            item.pop("answer", None)
+            item.pop("correction_action", None)
+            item.pop("correction_word", None)
+            reopened += 1
+    if reopened > 0:
+        _save_unknown_points(job_id, input_root, unknown_points)
+    return reopened
+
+
+def _mark_numbered_freetext_answered(
+    *,
+    job_id: str,
+    input_root: str,
+    applied_pairs: list[dict],
+    answer_text: str,
+    question_id: str,
+) -> int:
+    from datetime import datetime, timezone
+
+    unknown_points = _load_unknown_points(job_id, input_root)
+    if not unknown_points:
+        return 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    words = {str(p.get("word") or "").strip() for p in applied_pairs}
+    updated = 0
+    for item in unknown_points:
+        word = str(item.get("anomaly_word") or "").strip()
+        if not word or word not in words:
+            continue
+        if str(item.get("status") or "").strip().lower() == "answered" and item.get(
+            "correction_action"
+        ):
+            continue
+        pair = next((p for p in applied_pairs if str(p.get("word") or "").strip() == word), {})
+        item["status"] = "answered"
+        item["answer"] = answer_text
+        item["answered_by_question_id"] = question_id
+        item["answered_at"] = now_iso
+        item["correction_action"] = str(pair.get("action") or "correct")
+        item["correction_word"] = str(pair.get("correction") or "")
+        updated += 1
+    if updated > 0:
+        _save_unknown_points(job_id, input_root, unknown_points)
+    return updated
+
+
+def _try_handle_numbered_freetext_answer(
+    *,
+    job_id: str,
+    input_root: str,
+    question_text: str,
+    answer_text: str,
+    question_id: str,
+    out_path: str,
+    input_path: str | None,
+) -> bool:
+    """複数番号の free-text 質問への「N番は〜」回答を番号分解して適用する。
+
+    質問文に番号付き【対象語】が2件以上あり、回答が番号に言及している場合のみ
+    処理する。分解できた番号は word→correction のピンポイント置換のみ行い、
+    回答文そのものが本文へ入る経路を遮断する。分解できなかった番号の unknown
+    は open に戻す（安全側・再質問）。処理した場合 True を返す。
+    """
+    targets = _extract_numbered_question_targets(question_text)
+    if len(targets) < 2:
+        return False
+    if not re.search(r"\d{1,2}\s*番", answer_text) and not _ANSWER_NUMBER_HEAD_RE.match(
+        answer_text
+    ):
+        return False
+
+    hypothesis = _extract_question_header_hypothesis(question_text)
+    parsed = _parse_numbered_freetext_answer(answer_text)
+
+    job_dir = os.path.join(input_root, job_id)
+    base_text, _ = _load_recorrect_base_text(job_dir, input_path)
+
+    applied_pairs: list[dict] = []
+    skipped: list[dict] = []
+    updated_text = base_text
+    for n, word in sorted(targets.items()):
+        raw = parsed.get(n, "")
+        correction = hypothesis if raw == _KEEP_HYPOTHESIS_MARK else raw
+        if not correction or looks_like_full_answer_text(correction):
+            skipped.append({"n": n, "word": word, "reason": "unparsed"})
+            continue
+        if correction == word:
+            applied_pairs.append(
+                {"n": n, "word": word, "correction": word, "action": "keep", "count": 0}
+            )
+            continue
+        updated_text, count = _replace_standalone_all(updated_text, word, correction)
+        if count > 0:
+            applied_pairs.append(
+                {"n": n, "word": word, "correction": correction, "action": "correct", "count": count}
+            )
+        else:
+            skipped.append({"n": n, "word": word, "reason": "word_not_found"})
+
+    reflect_meta = {
+        "question_id": question_id,
+        "mode": "numbered_freetext",
+        "applied": bool(applied_pairs),
+        "applied_count": len(applied_pairs),
+        "skipped": skipped,
+        "pairs": applied_pairs,
+    }
+    log_reflect_entry(reflect_meta)
+    print(
+        "recorrect_incorporate_mode=numbered_freetext "
+        f"targets={len(targets)} applied={len(applied_pairs)} skipped={len(skipped)}"
+    )
+
+    if updated_text != base_text:
+        ensure_after_qa_initialized(job_dir)
+        save_after_qa_text(job_dir, updated_text)
+        if out_path != after_qa_path(job_dir):
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(updated_text)
+
+    applied_words = {
+        str(p.get("word") or "").strip() for p in applied_pairs
+    }
+    _mark_numbered_freetext_answered(
+        job_id=job_id,
+        input_root=input_root,
+        applied_pairs=applied_pairs,
+        answer_text=answer_text,
+        question_id=question_id,
+    )
+    if skipped:
+        reopened = _reopen_unknowns_for_question(
+            job_id=job_id,
+            input_root=input_root,
+            question_id=question_id,
+            exclude_words=applied_words,
+        )
+        print(f"recorrect_numbered_freetext_reopened={reopened}")
+
+    # 学習辞書にも登録（correct のみ）
+    corrections = [
+        {"before": p["word"], "after": p["correction"], "action": "correct"}
+        for p in applied_pairs
+        if p.get("action") == "correct"
+    ]
+    if corrections:
+        learned = _persist_batch_corrections_to_learned_dict(
+            job_id=job_id, applied=corrections, base_text=base_text
+        )
+        print(f"numbered_freetext_learned_added={learned}")
+    return True
 
 
 def _anchor_strings_for_span(
@@ -1071,6 +1354,25 @@ def main() -> None:
         input_root=args.input_root,
     )
     out_path = args.output or after_qa_path(job_dir)
+
+    # 複数番号 free-text 質問への「N番は〜」回答: 番号分解してピンポイント適用。
+    # （回答文そのものが本文へ混入する事故の遮断。recognition_batch は既存経路）
+    if not _is_recognition_batch_question(question_result):
+        if _try_handle_numbered_freetext_answer(
+            job_id=args.job_id,
+            input_root=args.input_root,
+            question_text=question_text,
+            answer_text=answer_text,
+            question_id=str(record.get("question_id") or ""),
+            out_path=out_path,
+            input_path=args.input,
+        ):
+            print(f"job_id={args.job_id}")
+            print(f"answers_json={answers_json_path}")
+            print(f"output={out_path}")
+            print(f"question_id={record.get('question_id')}")
+            print(f"answer_job_id={record.get('job_id')}")
+            return
 
     # 認識ゆれ(1 語 1 問): after_qa を都度更新（Phase 4 incremental）。
     if _is_coherence_review_question(question_result):

@@ -2,9 +2,11 @@ import argparse
 import os
 
 from meeting_profile import load_meeting_profile, resolve_display_title
-from readable_transcript import resolve_minutes_transcript_text
+from readable_transcript import resolve_minutes_transcript_text_with_stats
 from transcript_paths import resolve_transcript_path_for_minutes
 from transcript_section_summarizer import add_section_headings
+
+READABLE_PARTIAL_NOTICE = "※一部区間は整文を適用できませんでした（逐語のまま掲載しています）"
 
 
 def build_minutes_text(
@@ -12,13 +14,42 @@ def build_minutes_text(
     transcript_text: str,
     *,
     readable: bool = False,
+    notice: str = "",
 ) -> str:
     section_label = "発言録（整文）" if readable else "発言録（逐語）"
+    notice_block = f"{notice}\n\n" if notice.strip() else ""
     return (
         f"# {title}\n\n"
+        f"{notice_block}"
         f"## {section_label}\n\n"
         f"{transcript_text.strip()}\n"
     )
+
+
+def _record_readable_fallback_progress(
+    *, job_id: str, input_root: str, stats: dict
+) -> None:
+    """整文フォールバック発生を progress.json に記録する（非致命）。"""
+    try:
+        from progress_tracker import update_job_progress
+
+        failed = list(stats.get("failed_chunk_idx") or [])
+        total = int(stats.get("total_chunks") or 0)
+        update_job_progress(
+            input_root=input_root,
+            job_id=job_id,
+            phase="step_6_1_minutes_draft",
+            status="running",
+            detail={
+                "readable_fallback": True,
+                "failed_chunk_idx": failed,
+                "failed_chunk_count": len(failed),
+                "total_chunks": total,
+                "failed_ratio": round(len(failed) / total, 3) if total else 0.0,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"readable_fallback_progress_record_failed={e!r}")
 
 
 def _add_section_headings_safe(
@@ -75,12 +106,25 @@ def main() -> None:
         job_id=args.job_id,
     )
 
-    transcript_text, minutes_source_path, readable_used = resolve_minutes_transcript_text(
+    (
+        transcript_text,
+        minutes_source_path,
+        readable_used,
+        readable_stats,
+    ) = resolve_minutes_transcript_text_with_stats(
         job_dir=job_dir,
         source_text=source_text,
         source_path=in_path,
         meeting_profile=meeting_profile,
     )
+
+    failed_chunk_idx = list(readable_stats.get("failed_chunk_idx") or [])
+    if readable_used and failed_chunk_idx:
+        _record_readable_fallback_progress(
+            job_id=args.job_id,
+            input_root=args.input_root,
+            stats=readable_stats,
+        )
 
     # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。
     annotated = _add_section_headings_safe(transcript_text, meeting_profile)
@@ -88,6 +132,7 @@ def main() -> None:
         title=title,
         transcript_text=annotated,
         readable=readable_used,
+        notice=READABLE_PARTIAL_NOTICE if (readable_used and failed_chunk_idx) else "",
     )
 
     out_path = args.output or os.path.join(

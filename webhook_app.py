@@ -405,6 +405,60 @@ def _merge_correction_pairs(pairs: list[dict[str, str]]) -> tuple[int, int]:
     _save_correction_dict(current)
     return added, updated
 
+
+def _apply_correction_pairs_to_transcript(
+    job_id: str, pairs: list[dict[str, str]]
+) -> int:
+    """確定した置換ペアを現在の after_qa 本文にも即時適用する（P2）。
+
+    find_standalone_word で位置特定できた独立出現のみ置換。見つからない語は
+    スキップ（辞書追加のみで次ジョブから効く）。適用件数を返す。
+    """
+    jid = str(job_id or "").strip()
+    if not jid or not pairs:
+        return 0
+    try:
+        from line_answer_reflect import (
+            after_qa_path,
+            ensure_after_qa_initialized,
+            load_after_qa_text,
+            save_after_qa_text,
+        )
+        from recognition_batch import _is_standalone_word_at, find_standalone_word
+
+        job_dir = os.path.join("data", "transcriptions", jid)
+        if not os.path.isdir(job_dir):
+            return 0
+        ensure_after_qa_initialized(job_dir)
+        if not os.path.isfile(after_qa_path(job_dir)):
+            return 0
+        text = load_after_qa_text(job_dir)
+        applied = 0
+        for item in pairs:
+            wrong = str(item.get("wrong") or "").strip()
+            correct = str(item.get("correct") or "").strip()
+            if len(wrong) < 2 or not correct or wrong == correct:
+                continue
+            if find_standalone_word(text, wrong) < 0:
+                continue
+            start = 0
+            while True:
+                idx = text.find(wrong, start)
+                if idx < 0:
+                    break
+                if _is_standalone_word_at(text, idx, len(wrong)):
+                    text = text[:idx] + correct + text[idx + len(wrong):]
+                    applied += 1
+                    start = idx + len(correct)
+                else:
+                    start = idx + 1
+        if applied > 0:
+            save_after_qa_text(job_dir, text)
+        return applied
+    except Exception as e:  # noqa: BLE001
+        print(f"correction_pairs_body_apply_failed={e!r}")
+        return 0
+
 def _env_auto_after_answer_enabled() -> bool:
     v = os.getenv(AUTO_AFTER_ANSWER_ENV, "").strip().lower()
     if not v:
@@ -1103,19 +1157,23 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
     if pairs:
         added, updated = _merge_correction_pairs(pairs)
         correction_save_ok = True
+        body_applied = _apply_correction_pairs_to_transcript(job_id_for_save, pairs)
         print("correction_dict_update=")
         print(
             {
                 "job_id": job_id_for_save,
                 "added": added,
                 "updated": updated,
+                "body_applied": body_applied,
                 "pairs": pairs,
             }
         )
         if job_id_for_save:
             _record_job_visible_log(
                 job_id_for_save,
-                f"Step 16: 修正依頼反映 correction_pairs={len(pairs)} added={added} updated={updated}",
+                "Step 16: 修正依頼反映 "
+                f"correction_pairs={len(pairs)} added={added} updated={updated} "
+                f"body_applied={body_applied}",
             )
 
     if has_answer or pairs:

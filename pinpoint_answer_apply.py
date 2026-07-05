@@ -248,6 +248,28 @@ def replacement_word(
     return ans
 
 
+_NUMBERED_ANSWER_MARK_RE = re.compile(r"\d{1,2}\s*番")
+
+
+def looks_like_full_answer_text(repl: str) -> bool:
+    """置換語が「回答文そのもの」に見える場合 True（本文混入ガード）。
+
+    例: 「1番は「西脇さん」で正しい。2番は「西脇さん」ではなく「相原」。」
+    のような複数番号回答が単語置換として紛れ込む事故を遮断する。
+    """
+    r = str(repl or "").strip()
+    if not r:
+        return False
+    if _NUMBERED_ANSWER_MARK_RE.search(r) and (
+        "正しい" in r or "ではなく" in r or "じゃなくて" in r or "。" in r
+    ):
+        return True
+    inner = r.rstrip("。")
+    if len(r) >= 20 and ("。" in inner or r.count("「") >= 2):
+        return True
+    return False
+
+
 def resolve_span_after(
     item: dict[str, Any],
     answer: str,
@@ -272,6 +294,8 @@ def resolve_span_after(
     i, j = loc
     matched = sb[i:j]
     repl = replacement_word(sb, aw, answer, hyp, matched_text=matched)
+    if repl != matched and looks_like_full_answer_text(repl):
+        raise ValueError("replacement_looks_like_full_answer_text")
     span_after = sb[:i] + repl + sb[j:]
     if span_after == sb:
         meta["apply_mode"] = "anomaly_keep_unchanged"

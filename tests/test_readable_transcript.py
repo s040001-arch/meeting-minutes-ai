@@ -74,7 +74,7 @@ class PolishTests(unittest.TestCase):
             "はい。ありがとうございました。お疲れ様でした。ござい。"
         )
 
-        def fake_edit(_client, chunk, _system):
+        def fake_edit(_client, chunk, _system, **_kw):
             return (
                 chunk.replace("はい。", "")
                 .replace("ありがとうございました。", "")
@@ -102,7 +102,7 @@ class GenerateFileTests(unittest.TestCase):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
                 with patch(
                     "readable_transcript._edit_one_chunk",
-                    side_effect=lambda _c, chunk, _s: chunk,
+                    side_effect=lambda _c, chunk, _s, **_kw: chunk,
                 ):
                     generate_readable_transcript(job_dir=job_dir, source_text=after_qa)
 
@@ -119,6 +119,58 @@ class MinutesTextTests(unittest.TestCase):
         readable = build_minutes_text("t", "body", readable=True)
         self.assertIn("発言録（逐語）", verbatim)
         self.assertIn("発言録（整文）", readable)
+
+    def test_notice_prepended_before_section(self) -> None:
+        out = build_minutes_text(
+            "t", "body", readable=True, notice="※一部区間は整文を適用できませんでした"
+        )
+        self.assertIn("※一部区間は整文を適用できませんでした", out)
+        self.assertLess(
+            out.index("※一部区間"), out.index("## 発言録（整文）")
+        )
+
+    def test_no_notice_by_default(self) -> None:
+        out = build_minutes_text("t", "body", readable=True)
+        self.assertNotIn("※一部区間", out)
+
+
+class ChunkRetryTests(unittest.TestCase):
+    """P4: 検証失敗チャンクの1回リトライと failed_chunk_idx 記録。"""
+
+    def test_retry_succeeds_second_time(self) -> None:
+        from readable_transcript import polish_transcript_text_with_stats
+
+        source = "75万円の話。85万円も出た。"
+        calls: list[int] = []
+
+        def flaky_edit(_client, chunk, _system, **_kw):
+            calls.append(1)
+            if len(calls) == 1:
+                return ""  # 1回目は検証失敗（空出力）
+            return chunk
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+            with patch("readable_transcript._edit_one_chunk", side_effect=flaky_edit):
+                out, stats = polish_transcript_text_with_stats(source)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(stats["failed_chunk_idx"], [])
+        self.assertEqual(stats["retried_ok"], 1)
+        self.assertIn("75万円", out)
+
+    def test_retry_fails_records_failed_chunk(self) -> None:
+        from readable_transcript import polish_transcript_text_with_stats
+
+        source = "75万円の話。85万円も出た。"
+
+        def always_bad(_client, _chunk, _system, **_kw):
+            return ""
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+            with patch("readable_transcript._edit_one_chunk", side_effect=always_bad):
+                out, stats = polish_transcript_text_with_stats(source)
+        self.assertEqual(len(stats["failed_chunk_idx"]), 1)
+        # 生テキスト採用（内容は保持される）
+        self.assertIn("75万円", out)
 
 
 if __name__ == "__main__":
