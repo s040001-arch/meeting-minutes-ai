@@ -64,6 +64,13 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
     except Exception as e:  # noqa: BLE001
         print(f"coherence_world_knowledge_fetch_failed={e!r}")
     known_patterns = ", ".join(sorted(PIXEL_RECOGNIZER_REPLACEMENTS.keys())[:30])
+    # 過去のQ&A・チャット修正で確定した文脈依存ペア（学習辞書 scope=context）
+    context_hints_block = ""
+    try:
+        from learned_corrections_store import format_context_hints_block
+        context_hints_block = format_context_hints_block()
+    except Exception as e:  # noqa: BLE001
+        print(f"coherence_context_hints_load_failed={e!r}")
     static_prompt = (
         "あなたは議事録（逐語録）の品質管理担当です。"
         "目的は「会議で言ったことを正確な文字起こしとして残す」ことです。"
@@ -142,7 +149,9 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "\n- low: 候補が複数 / 不確実 / もっともらい / フィラー的 / 固有名詞で確信が持てない"
         "\n\n違和感が無ければ空配列 [] を返してください。"
     )
-    return cached_system(static_prompt, profile_block + world_block)
+    return cached_system(
+        static_prompt, profile_block + world_block + context_hints_block
+    )
 
 
 def _extract_text_from_anthropic(resp) -> str:
@@ -601,7 +610,7 @@ def _persist_auto_fixes_to_learned_dict(
     if not auto_entries:
         return 0
     try:
-        from learned_corrections_store import add_learned_correction
+        from learned_corrections_store import add_learned_correction, suggest_scope
     except Exception as e:  # noqa: BLE001
         print(f"learned_corrections_import_failed={e!r}")
         return 0
@@ -629,6 +638,7 @@ def _persist_auto_fixes_to_learned_dict(
                 job_id=job_id,
                 example=example,
                 confidence=str(entry.get("confidence") or "high"),
+                scope=suggest_scope(wrong),
             )
         except Exception as e:  # noqa: BLE001
             print(f"learned_corrections_add_failed wrong={wrong!r} err={e!r}")

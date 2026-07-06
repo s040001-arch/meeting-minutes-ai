@@ -20,14 +20,23 @@
     "<wrong>": {
       "to": "<correct>",
       "confidence": "high",
+      "scope": "global|context",
       "occurrences": 3,
       "first_seen": "YYYY-MM-DD",
       "last_seen": "YYYY-MM-DD",
-      "sources": [{"job_id": "...", "via": "coherence_review|line_qa", "ts": "ISO8601"}],
+      "sources": [{"job_id": "...", "via": "coherence_review|line_qa|chat_fix", "ts": "ISO8601"}],
       "examples": ["短い前後文脈、最大3件"]
     }
   }
 }
+
+【scope の意味】
+- global  : wrong 表記が実在語として現れない（例: 就高年収→集合研修）。
+            Step 4.2 の機械補正で無条件に置換してよい。
+- context : wrong 表記が実在語（例: 本数→工数、本社→御社）。
+            盲目置換すると誤爆するため機械補正には使わず、
+            coherence_review の検出プロンプトに「既知の文脈依存ペア」として
+            注入し、文脈が合うときだけ candidate 付きで検出・質問させる。
 """
 from __future__ import annotations
 
@@ -54,6 +63,31 @@ _BLACKLIST_WRONG = {
     "はい", "うん", "ええ", "そう", "そうですね", "ありがとうございます",
     "なるほど", "わかりました", "了解", "失礼します",
 }
+
+# wrong が実在語（別の会議では正しい表記でありうる）と分かっているペア。
+# 盲目置換せず scope=context で蓄積し、検出プロンプトのヒントに使う。
+_KNOWN_REAL_WORD_WRONGS = {
+    "本数", "個数", "工数", "回収", "改修", "給食", "休職", "転機", "天気",
+    "転勤", "配信", "廃止", "本社", "御社", "弊社", "車内", "社内", "今週",
+    "音叉", "王者", "聖書", "恩師", "医者", "祖母", "ベッド", "ペット",
+    "コース", "交通", "決済", "決裁", "精神", "作品", "研究", "面倒",
+    "教育機関", "研修室", "実証校", "ミスト", "マツダ", "ランキング",
+}
+
+
+def suggest_scope(wrong: str) -> str:
+    """置換ペアの安全な scope を推定する。
+
+    - 既知の実在語、または 3 文字以下の短い語 → "context"
+      （短い語は別会議で正当に出現する可能性が高く、盲目置換は品質リスク）
+    - それ以外（実在しにくい崩れ表記）→ "global"
+    """
+    w = (wrong or "").strip()
+    if w in _KNOWN_REAL_WORD_WRONGS:
+        return "context"
+    if len(w) <= 3:
+        return "context"
+    return "global"
 
 
 def _now_iso() -> str:
@@ -130,17 +164,59 @@ def load_store(path: str = DEFAULT_LEARNED_PATH) -> dict[str, Any]:
 
 
 def load_learned_dict(path: str = DEFAULT_LEARNED_PATH) -> dict[str, str]:
-    """mechanical 補正で適用する {wrong: to} のフラット辞書を返す。"""
+    """mechanical 補正で適用する {wrong: to} のフラット辞書を返す。
+
+    scope="context" のエントリは盲目置換すると誤爆するため除外する
+    （そちらは load_context_hints() → coherence 検出プロンプトで使う）。
+    """
     store = load_store(path)
     out: dict[str, str] = {}
     for wrong, entry in (store.get("asr_corrections") or {}).items():
         if not isinstance(entry, dict):
+            continue
+        if str(entry.get("scope") or "global") == "context":
             continue
         to = str(entry.get("to") or "").strip()
         if not to:
             continue
         out[str(wrong).strip()] = to
     return out
+
+
+def load_context_hints(path: str = DEFAULT_LEARNED_PATH) -> list[dict[str, str]]:
+    """coherence 検出プロンプトへ注入する文脈依存ペアの一覧を返す。
+
+    各要素: {"wrong": ..., "to": ..., "example": 代表例1件}
+    """
+    store = load_store(path)
+    out: list[dict[str, str]] = []
+    for wrong, entry in (store.get("asr_corrections") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("scope") or "global") != "context":
+            continue
+        to = str(entry.get("to") or "").strip()
+        if not to:
+            continue
+        examples = entry.get("examples") or []
+        example = str(examples[0]) if examples else ""
+        out.append({"wrong": str(wrong).strip(), "to": to, "example": example})
+    out.sort(key=lambda d: d["wrong"])
+    return out
+
+
+def format_context_hints_block(path: str = DEFAULT_LEARNED_PATH, limit: int = 40) -> str:
+    """検出プロンプト用の「過去に確定した文脈依存ペア」ブロックを組み立てる。"""
+    hints = load_context_hints(path)[:limit]
+    if not hints:
+        return ""
+    lines = [
+        "\n\n【過去のQ&Aで確定した文脈依存の誤変換ペア（文脈が合致するときのみ候補提示する）】"
+    ]
+    for h in hints:
+        ex = f"（例: {h['example']}）" if h["example"] else ""
+        lines.append(f"\n- 『{h['wrong']}』→『{h['to']}』の疑い{ex}")
+    return "".join(lines)
 
 
 def add_learned_correction(
@@ -151,11 +227,13 @@ def add_learned_correction(
     job_id: str,
     example: str = "",
     confidence: str = "high",
+    scope: str = "global",
     path: str = DEFAULT_LEARNED_PATH,
 ) -> dict[str, Any]:
     """学習辞書に置換ペアを追加(既存ならカウント更新)。
 
-    via: "coherence_review" | "line_qa"
+    via: "coherence_review" | "line_qa" | "chat_fix"
+    scope: "global"(機械補正で無条件置換) | "context"(検出ヒントのみ)
     返り値: {"action": "added|updated|skipped", "reason": "...", "wrong": ..., "right": ...}
     """
     wrong = (wrong or "").strip()
@@ -163,6 +241,8 @@ def add_learned_correction(
     ok, reason = _validate_pair(wrong, right)
     if not ok:
         return {"action": "skipped", "reason": reason, "wrong": wrong, "right": right}
+    if scope not in {"global", "context"}:
+        scope = "global"
 
     store = load_store(path)
     corrections: dict[str, Any] = store.setdefault("asr_corrections", {})
@@ -174,6 +254,7 @@ def add_learned_correction(
         entry = {
             "to": right,
             "confidence": confidence,
+            "scope": scope,
             "occurrences": 1,
             "first_seen": today,
             "last_seen": today,

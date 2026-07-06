@@ -133,6 +133,7 @@ def _persist_coherence_answer_to_learned_dict(
         from learned_corrections_store import (
             DEFAULT_LEARNED_PATH,
             add_learned_correction,
+            suggest_scope,
         )
 
         result = add_learned_correction(
@@ -142,6 +143,7 @@ def _persist_coherence_answer_to_learned_dict(
             job_id=job_id,
             example=example,
             confidence="high",
+            scope=suggest_scope(wrong),
             path=learned_path or DEFAULT_LEARNED_PATH,
         )
         return result
@@ -436,7 +438,11 @@ def _persist_batch_corrections_to_learned_dict(
     if not corrections:
         return 0
     try:
-        from learned_corrections_store import DEFAULT_LEARNED_PATH, add_learned_correction
+        from learned_corrections_store import (
+            DEFAULT_LEARNED_PATH,
+            add_learned_correction,
+            suggest_scope,
+        )
     except Exception as e:  # noqa: BLE001
         print(f"learned_corrections_import_failed={e!r}")
         return 0
@@ -455,7 +461,8 @@ def _persist_batch_corrections_to_learned_dict(
         try:
             result = add_learned_correction(
                 wrong=wrong, right=right, via="line_qa", job_id=job_id,
-                example=example, confidence="high", path=DEFAULT_LEARNED_PATH,
+                example=example, confidence="high",
+                scope=suggest_scope(wrong), path=DEFAULT_LEARNED_PATH,
             )
             if result.get("action") in ("added", "updated"):
                 persisted += 1
