@@ -85,7 +85,9 @@ def _load_anthropic_api_key() -> str:
     return key
 
 
-def _build_system_prompt(meeting_profile: dict | None) -> str | list:
+def _build_system_prompt(
+    meeting_profile: dict | None, *, notation_block: str = ""
+) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
     world_block = ""
     try:
@@ -203,7 +205,9 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "長文でも逐語録を最後まで読み、編集対象を探せ。"
         "固有名詞・数値・同音異義・崩れ片の見落としを避ける。"
     )
-    return cached_system(static_prompt, profile_block + world_block)
+    return cached_system(
+        static_prompt, profile_block + world_block + notation_block
+    )
 
 
 def _extract_text_from_anthropic(resp) -> str:
@@ -242,7 +246,18 @@ def _parse_json_array(raw: str) -> list[dict]:
 
 def _call_opus_for_proposals(text: str, meeting_profile: dict | None) -> list[dict]:
     client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
-    system_prompt = _build_system_prompt(meeting_profile)
+    notation_block = ""
+    try:
+        from notation_consistency import build_notation_block_for_text
+
+        notation_block = build_notation_block_for_text(text)
+        if notation_block:
+            print(f"editor_notation_block_injected chars={len(notation_block)}")
+    except Exception as e:  # noqa: BLE001
+        print(f"editor_notation_block_build_failed={e!r}")
+    system_prompt = _build_system_prompt(
+        meeting_profile, notation_block=notation_block
+    )
     payload_text = text if len(text) <= FULL_TEXT_CHAR_CAP else text[:FULL_TEXT_CHAR_CAP]
     resp = client.messages.create(
         model=CONTEXTUAL_EDITOR_MODEL,

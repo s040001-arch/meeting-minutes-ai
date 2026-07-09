@@ -52,7 +52,9 @@ def _load_anthropic_api_key() -> str:
     return key
 
 
-def _build_system_prompt(meeting_profile: dict | None) -> str | list:
+def _build_system_prompt(
+    meeting_profile: dict | None, *, notation_block: str = ""
+) -> str | list:
     profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
     # Phase 2: Layer 2 由来の世界モデルを inject (関連企業/人物/手法/相原氏のスタイル)
     world_block = ""
@@ -176,7 +178,8 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "\n\n違和感が無ければ空配列 [] を返してください。"
     )
     return cached_system(
-        static_prompt, profile_block + world_block + context_hints_block
+        static_prompt,
+        profile_block + world_block + context_hints_block + notation_block,
     )
 
 
@@ -281,7 +284,20 @@ def _parse_json_array(raw: str) -> list[dict]:
 
 def _call_opus_for_anomalies(text: str, meeting_profile: dict | None) -> list[dict]:
     client = anthropic.Anthropic(api_key=_load_anthropic_api_key())
-    system_prompt = _build_system_prompt(meeting_profile)
+    # 全文突き合わせの表記ゆれ候補を機械抽出してプロンプトに注入する
+    # （例: 7年次/8年時 の混在。LLM 任せでは取りこぼす一貫性検査を機械が肩代わり）
+    notation_block = ""
+    try:
+        from notation_consistency import build_notation_block_for_text
+
+        notation_block = build_notation_block_for_text(text)
+        if notation_block:
+            print(f"notation_block_injected chars={len(notation_block)}")
+    except Exception as e:  # noqa: BLE001
+        print(f"notation_block_build_failed={e!r}")
+    system_prompt = _build_system_prompt(
+        meeting_profile, notation_block=notation_block
+    )
     # 全文渡し。安全のため60k字を上限(本案件は約2万字なので余裕)
     payload_text = text if len(text) <= 60_000 else text[:60_000]
     # Opus 4.8 は temperature/assistant prefill を受け付けない。

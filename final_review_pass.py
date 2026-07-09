@@ -1,0 +1,239 @@
+"""最終批評パス: 完成した整文を単一目的で全文一読し、残存問題を検出・修正する。
+
+背景 (2026-07-09 NREPT案件):
+    パイプライン各層は多目的＋ガードレールで保守的に動くため、
+    「表記ゆれの不統一」「崩れ断片の残存」「相槌の織り込み」のような
+    全体を見れば分かる問題を取りこぼす。チャットでの人手レビューと同じ
+    「批評だけ」を最終成果物に対して行う層を追加する。
+
+モード (env FINAL_REVIEW_MODE):
+    - "shadow" (デフォルト): 検出のみ。final_review_report.json に記録。本文は変更しない。
+    - "apply": 検出に加え、安全条件を満たす high 確信の修正だけ本文に適用。
+    - "off": 何もしない（API 呼び出しなし）。
+
+モデル (env FINAL_REVIEW_MODEL): デフォルトは Sonnet（批評は破壊操作ではないため
+    安価なモデルから試せる）。必要なら Opus 等に差し替え可能。
+"""
+from __future__ import annotations
+
+import json
+import os
+from typing import Any
+
+import anthropic
+
+from anthropic_prompt_cache import cached_system
+
+FINAL_REVIEW_REPORT_FILENAME = "final_review_report.json"
+DEFAULT_FINAL_REVIEW_MODEL = "claude-sonnet-4-6"
+FINAL_REVIEW_MAX_TOKENS = 8192
+FINAL_REVIEW_TIMEOUT_SEC = 300
+FINAL_REVIEW_CHAR_CAP = 60_000
+
+# apply モードの安全条件
+APPLY_MIN_QUOTE_LEN = 4
+APPLY_MAX_FIXES = 20
+APPLY_LEN_RATIO_MIN = 0.3
+APPLY_LEN_RATIO_MAX = 3.0
+# fix が quote に無い内容文字（漢字・かな等）を何種類まで持ち込めるか。
+# 同音異義の1字置換（時→次、刺→差）は通し、語の推測追加（「解決研修は」等）は弾く。
+APPLY_MAX_NEW_CONTENT_CHARS = 2
+
+_PUNCT_CHARS = set("、。！？!?・…「」『』（）()[]{}〈〉 \u3000\n\t,.")
+
+
+def resolve_final_review_mode() -> str:
+    raw = os.environ.get("FINAL_REVIEW_MODE", "").strip().lower()
+    if raw in ("off", "shadow", "apply"):
+        return raw
+    return "shadow"
+
+
+def resolve_final_review_model() -> str:
+    return (
+        os.environ.get("FINAL_REVIEW_MODEL", "").strip()
+        or DEFAULT_FINAL_REVIEW_MODEL
+    )
+
+
+def _build_system_prompt(notation_block: str) -> str | list:
+    static_prompt = (
+        "あなたは完成済みの議事録（発言録・整文）の最終レビュアーです。"
+        "唯一の任務は、残存する品質問題を全文一読で発見して報告することです。"
+        "本文の書き直しはしません。発見のみを JSON 配列で返してください。"
+        "\n\n【検出対象（4種のみ）】"
+        "\n1. notation: 同一概念の表記不統一・同音異義の誤選択"
+        "（例: 同じ文書内に『7年次』と『8年時』が混在 → 少数派が誤りの疑い。"
+        "『にってい→2点』のような音の誤変換も含む）"
+        "\n2. fragment: 文として成立していない崩れ断片"
+        "（例: 『あんまり見と一緒でフレームアップめっちゃいます』のような意味不明文、"
+        "言いかけの残骸『します。』の孤立）"
+        "\n3. backchannel: 話し手の文中に縫い込まれた聞き手の相槌"
+        "（例: 『はいで、L2が5クラス』『実施をしない方向、はいに考えています』）"
+        "\n4. unnatural: 文脈上明らかに不自然な語・表現"
+        "（例: 稟議文脈の『決済』、『傘を刺そう』等の表記誤り）"
+        "\n\n【検出してはいけないもの】"
+        "\n- 口語らしさ・話し言葉のくだけた表現（整文は逐語性を残す方針）"
+        "\n- 固有名詞・数値・事実（正誤を判断する材料がなければ触れない）"
+        "\n- `[要確認]` タグ済みの箇所（既に人の確認待ち）"
+        "\n- `▼` 見出し行"
+        "\n\n【出力スキーマ】JSON 配列のみ。説明・前置き・コードフェンス禁止。"
+        "\n各要素:"
+        '\n{"type":"notation|fragment|backchannel|unnatural",'
+        '"quote":"本文から一字一句そのまま抜いた該当箇所（10〜60字）",'
+        '"issue":"何が問題か1文",'
+        '"fix":"quote 全体の修正後文字列（確信がなければ空文字）",'
+        '"confidence":"high|medium|low"}'
+        "\n\n【確信度】"
+        "\n- high: 文脈から修正が一意に定まる（fix 必須）"
+        "\n- medium: 問題は確実だが修正候補に迷いがある"
+        "\n- low: 違和感レベル"
+        "\n\n問題がなければ空配列 [] を返す。最大30件。"
+    )
+    return cached_system(static_prompt, notation_block)
+
+
+def _extract_text(resp: Any) -> str:
+    parts: list[str] = []
+    for block in getattr(resp, "content", None) or []:
+        t = getattr(block, "text", None)
+        if t:
+            parts.append(t)
+    return "".join(parts)
+
+
+def _parse_findings(raw: str) -> list[dict]:
+    s = (raw or "").strip()
+    start = s.find("[")
+    end = s.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    try:
+        data = json.loads(s[start : end + 1])
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [x for x in data if isinstance(x, dict)]
+
+
+def _call_reviewer(text: str) -> list[dict]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+    notation_block = ""
+    try:
+        from notation_consistency import build_notation_block_for_text
+
+        notation_block = build_notation_block_for_text(text)
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_notation_block_failed={e!r}")
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=resolve_final_review_model(),
+        max_tokens=FINAL_REVIEW_MAX_TOKENS,
+        timeout=FINAL_REVIEW_TIMEOUT_SEC,
+        system=_build_system_prompt(notation_block),
+        messages=[
+            {
+                "role": "user",
+                "content": text[:FINAL_REVIEW_CHAR_CAP],
+            }
+        ],
+    )
+    return _parse_findings(_extract_text(resp))
+
+
+def apply_safe_fixes(text: str, findings: list[dict]) -> tuple[str, list[dict], list[dict]]:
+    """high 確信・quote 一意・長さ比が穏当な修正のみ適用する。
+
+    返り値: (適用後テキスト, applied, skipped)
+    """
+    applied: list[dict] = []
+    skipped: list[dict] = []
+    out = text
+    for f in findings:
+        quote = str(f.get("quote") or "")
+        fix = str(f.get("fix") or "")
+        confidence = str(f.get("confidence") or "").lower()
+        new_content_chars = {
+            ch for ch in fix if ch not in _PUNCT_CHARS and ch not in quote
+        }
+        reason = ""
+        if confidence != "high" or not fix or fix == quote:
+            reason = "not_high_or_no_fix"
+        elif len(quote) < APPLY_MIN_QUOTE_LEN:
+            reason = "quote_too_short"
+        elif "[要確認]" in quote or "[要確認]" in fix:
+            reason = "flagged_span"
+        elif out.count(quote) != 1:
+            reason = f"quote_count={out.count(quote)}"
+        elif not (
+            APPLY_LEN_RATIO_MIN <= len(fix) / max(len(quote), 1) <= APPLY_LEN_RATIO_MAX
+        ):
+            reason = "length_ratio_out_of_range"
+        elif len(new_content_chars) > APPLY_MAX_NEW_CONTENT_CHARS:
+            # 削除・同音1〜2字置換のみ許可。語の推測追加を伴う書き換えは適用しない
+            reason = f"too_many_new_chars={len(new_content_chars)}"
+        elif len(applied) >= APPLY_MAX_FIXES:
+            reason = "max_fixes_reached"
+        if reason:
+            skipped.append({**f, "skip_reason": reason})
+            continue
+        out = out.replace(quote, fix, 1)
+        applied.append(f)
+    return out, applied, skipped
+
+
+def run_final_review(
+    *,
+    job_dir: str,
+    text: str,
+) -> tuple[str, dict[str, Any]]:
+    """整文テキストへの最終批評を実行する。
+
+    返り値: (テキスト(applyモードなら修正済み), レポートdict)
+    off モードや失敗時は入力テキストをそのまま返す（非致命）。
+    """
+    mode = resolve_final_review_mode()
+    report: dict[str, Any] = {
+        "mode": mode,
+        "model": resolve_final_review_model(),
+        "input_chars": len(text),
+        "findings": [],
+        "applied": [],
+        "skipped": [],
+    }
+    if mode == "off" or not text.strip():
+        return text, report
+
+    try:
+        findings = _call_reviewer(text)
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_failed={e!r} (non-fatal)")
+        report["error"] = repr(e)
+        _write_report(job_dir, report)
+        return text, report
+
+    report["findings"] = findings
+    out_text = text
+    if mode == "apply":
+        out_text, applied, skipped = apply_safe_fixes(text, findings)
+        report["applied"] = applied
+        report["skipped"] = skipped
+    _write_report(job_dir, report)
+    print(
+        "final_review_done "
+        f"mode={mode} findings={len(findings)} "
+        f"applied={len(report['applied'])} skipped={len(report['skipped'])}"
+    )
+    return out_text, report
+
+
+def _write_report(job_dir: str, report: dict[str, Any]) -> None:
+    try:
+        path = os.path.join(job_dir, FINAL_REVIEW_REPORT_FILENAME)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"final_review_report_write_failed={e!r}")

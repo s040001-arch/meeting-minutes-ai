@@ -89,6 +89,13 @@ def _build_system_prompt(meeting_profile: dict[str, Any] | None) -> str | list:
         "\n- 言い淀み・言い直し・フィラー（えーと、あの、まあ、ちょっと 等）"
         "\n- 単純な言い直しによる重複（同じ趣旨の言い直しで片方が明らかに冗長な場合）"
         "\n- 途中切れ片（「ござい」等、文として成立しない断片）"
+        "\n\n【相槌の織り込み解消（重要）】"
+        "\n- 話し手の一文の中に聞き手の相槌（はい・うん・ええ・なるほど・そうですね 等）が"
+        "縫い込まれている場合、相槌だけを取り除き話し手の文を自然につなげる。"
+        "\n  例: 『はいで、L2が5クラスで109名』→『で、L2が5クラスで109名』"
+        "\n  例: 『実施をしない方向、はいに考えています』→『実施をしない方向に考えています』"
+        "\n- ただし相槌の除去で話し手の語順・語彙は変えないこと（接合のみ）。"
+        "\n- 質問への回答としての『はい』『いいえ』（同意・返答の実質を持つもの）は残す。"
         "\n\n【絶対に触らない／変えないもの】"
         "\n- 決定・事実・数値・固有名詞・論点・理由・立場・アクション"
         "\n- 意味やニュアンスが変わる箇所（迷ったら残す）"
@@ -351,6 +358,24 @@ def generate_readable_transcript_with_stats(
 ) -> tuple[str, dict[str, Any], str]:
     """Write readable transcript file; return (text, stats, output_path)."""
     polished, stats = polish_transcript_text_with_stats(source_text, meeting_profile)
+
+    # 最終批評パス（単一目的の全文レビュー）。off/shadow/apply は env で制御。
+    # 失敗しても polished をそのまま使う（非致命）。
+    try:
+        from final_review_pass import resolve_final_review_mode, run_final_review
+
+        if resolve_final_review_mode() != "off":
+            polished, review_report = run_final_review(
+                job_dir=job_dir, text=polished
+            )
+            stats["final_review"] = {
+                "mode": review_report.get("mode"),
+                "findings": len(review_report.get("findings") or []),
+                "applied": len(review_report.get("applied") or []),
+            }
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_pass_skipped={e!r}")
+
     out_path = readable_transcript_path(job_dir)
     os.makedirs(job_dir, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
