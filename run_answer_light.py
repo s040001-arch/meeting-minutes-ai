@@ -222,6 +222,29 @@ def main() -> int:
     print(f"[answer_light] pending_unknowns={pending}", flush=True)
 
     if pending > 0:
+        send_line = bool(args.send_line or (should_send_line() and _line_push_env_ready()))
+        if send_line:
+            try:
+                from integrated_questions import send_deferred_line_bundle_if_any
+
+                deferred = send_deferred_line_bundle_if_any(job_dir, send_line=True)
+                if deferred.get("sent"):
+                    print(
+                        "[answer_light] deferred_bundle sent "
+                        f"targets={deferred.get('target_count')}",
+                        flush=True,
+                    )
+                    update_job_progress(
+                        input_root=args.input_root,
+                        job_id=args.job_id,
+                        phase="question_pause",
+                        status="success",
+                        detail={"pending_unknowns": pending, "deferred_bundle": deferred},
+                        overall_status="paused",
+                    )
+                    return 0
+            except Exception as e:  # noqa: BLE001
+                print(f"[answer_light] deferred_bundle_failed={e!r}", flush=True)
         # 2) Next question only (no minutes / docs)
         unknowns_path = os.path.join(job_dir, "unknown_points.json")
         from transcript_paths import resolve_transcript_path_for_minutes

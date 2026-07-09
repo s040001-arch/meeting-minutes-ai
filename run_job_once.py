@@ -175,6 +175,30 @@ def ensure_after_qa_exists(job_dir: str, log_path: str) -> None:
         )
 
 
+def refresh_stale_after_qa(job_dir: str, log_path: str) -> bool:
+    """Step 4.3 確定直後の系譜不変条件を守る。
+
+    回答未反映（answers.json なし）なのに after_qa が既に存在する場合、
+    それは古い系譜（例: Step 4.25 apply の先取り作成）なので ai.txt から
+    作り直す。人の回答が入った after_qa は温存する。
+    作り直した場合 True を返す。
+    """
+    after_qa = os.path.join(job_dir, "merged_transcript_after_qa.txt")
+    answers = os.path.join(job_dir, "answers.json")
+    ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
+    if not os.path.isfile(after_qa) or not os.path.isfile(ai_path):
+        return False
+    if os.path.isfile(answers):
+        return False
+    shutil.copyfile(ai_path, after_qa)
+    log_line(
+        log_path,
+        "step_4_3_ai_correct: refreshed stale merged_transcript_after_qa.txt "
+        "from merged_transcript_ai.txt (no answers.json yet)",
+    )
+    return True
+
+
 def line_push_env_ready() -> bool:
     """LINE Messaging API push に必要な環境変数が揃っているか。"""
     uid = os.getenv("LINE_USER_ID", "").strip()
@@ -268,6 +292,8 @@ def run_transcription_stage_docs_export(
         subfolder_name,
         "--write-doc-meta-json",
         hub_meta_path,
+        "--upload-local-file",
+        os.path.abspath(merged_path),
     ]
     hub_doc_id = load_google_doc_hub_doc_id(hub_meta_path)
     if hub_doc_id:
@@ -893,6 +919,8 @@ def main() -> None:
             "yes",
             "on",
         )
+        editor_apply_ran = False
+        _editor_apply_report_path = os.path.join(job_dir, "editor_apply_report.json")
         if _editor_enabled:
             current_phase = "step_4_25_contextual_editor"
             current_step_label = "Step 4.25: 全文編集者（shadow）"
@@ -902,6 +930,12 @@ def main() -> None:
                 job_id=args.job_id,
                 message="全文編集者レビューを実行中...（shadow: 提案のみ・本文は変更しません）",
             )
+            # 前回実行の残骸で apply 判定を誤らないように消しておく
+            try:
+                if os.path.isfile(_editor_apply_report_path):
+                    os.remove(_editor_apply_report_path)
+            except OSError:
+                pass
             try:
                 editor_result = subprocess.run(
                     [
@@ -931,6 +965,15 @@ def main() -> None:
                     )
                 if editor_result.returncode == 0:
                     log_line(log_path, "step_4_25_contextual_editor: success")
+                    # apply モードで実行された場合は編集者出力（ai.txt）を
+                    # Step 4.3 の入力として引き継ぐ（修正の直列積み上げ）
+                    editor_apply_ran = os.path.isfile(_editor_apply_report_path)
+                    if editor_apply_ran:
+                        log_line(
+                            log_path,
+                            "step_4_25_contextual_editor: apply mode detected; "
+                            "step_4_3 will use editor output as input",
+                        )
                     update_job_progress(
                         input_root=args.input_root,
                         job_id=args.job_id,
@@ -951,7 +994,15 @@ def main() -> None:
 
         # --- Step 4.3: AI correction (full-text, Claude) ---
         log_line(log_path, "step_4_3_ai_correct: starting full_text mode (Claude)")
-        with open(mechanical_path, "r", encoding="utf-8") as f:
+        # 4.25 apply 実行済みなら編集者出力（ai.txt）を入力にして修正を積み上げる
+        correction_input_path = mechanical_path
+        if editor_apply_ran and os.path.isfile(ai_path):
+            correction_input_path = ai_path
+            log_line(
+                log_path,
+                "step_4_3_ai_correct: input=editor output (merged_transcript_ai.txt)",
+            )
+        with open(correction_input_path, "r", encoding="utf-8") as f:
             mechanical_text = f.read()
 
         log_line(
@@ -1003,6 +1054,8 @@ def main() -> None:
 
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)
+
+        refresh_stale_after_qa(job_dir, log_path)
 
         ratio = len(ai_text) / max(len(mechanical_text), 1)
         correction_meta = get_last_correct_full_text_meta()
@@ -1323,22 +1376,37 @@ def main() -> None:
             current_step_label = "質問回答待ち"
             review_path = write_questions_review_md(job_dir, job_id=args.job_id)
             line_bundle_meta: dict = {}
-            # QUESTION_MODE=line: 波及グループを1通にまとめて LINE 送信（既存1問サイクルに加え上書き）
+            # 認識ゆれバッチ送信直後は bundle を同時送信しない（1通ずつ回答しやすくする）
             if question_mode_should_send_line(q_mode):
                 try:
-                    from integrated_questions import write_and_maybe_push_line_bundle
+                    from integrated_questions import (
+                        save_deferred_line_bundle,
+                        should_defer_line_bundle,
+                        write_and_maybe_push_line_bundle,
+                    )
 
-                    line_bundle_meta = write_and_maybe_push_line_bundle(
-                        job_dir,
-                        send_line=(not args.no_send_line and line_push_env_ready()),
-                    )
-                    log_line(
-                        log_path,
-                        "step_5_line_bundle: "
-                        f"sent={line_bundle_meta.get('sent')} "
-                        f"reason={line_bundle_meta.get('reason')} "
-                        f"targets={line_bundle_meta.get('target_count')}",
-                    )
+                    send_line = not args.no_send_line and line_push_env_ready()
+                    if should_defer_line_bundle(job_dir):
+                        line_bundle_meta = save_deferred_line_bundle(job_dir)
+                        log_line(
+                            log_path,
+                            "step_5_line_bundle: deferred "
+                            f"saved={line_bundle_meta.get('saved')} "
+                            f"reason={line_bundle_meta.get('reason')} "
+                            f"targets={line_bundle_meta.get('target_count')}",
+                        )
+                    else:
+                        line_bundle_meta = write_and_maybe_push_line_bundle(
+                            job_dir,
+                            send_line=send_line,
+                        )
+                        log_line(
+                            log_path,
+                            "step_5_line_bundle: "
+                            f"sent={line_bundle_meta.get('sent')} "
+                            f"reason={line_bundle_meta.get('reason')} "
+                            f"targets={line_bundle_meta.get('target_count')}",
+                        )
                 except Exception as _lb_exc:  # noqa: BLE001
                     log_line(log_path, f"step_5_line_bundle: error (non-fatal) {_lb_exc!r}")
                     line_bundle_meta = {"sent": False, "reason": f"error:{_lb_exc!r}"}

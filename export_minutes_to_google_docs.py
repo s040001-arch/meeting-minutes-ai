@@ -612,7 +612,7 @@ def main() -> None:
         default=None,
         help=(
             "指定時: Docs を配置したのと同じ Drive サブフォルダへ、このローカルファイルをアップロードする "
-            "（--drive-parent-folder-id でサブフォルダが決まった場合のみ有効）"
+            "（新規作成時は --drive-parent-folder-id でサブフォルダが決まる。更新時は hub の subfolder_id または Doc の親フォルダを使用）"
         ),
     )
     parser.add_argument(
@@ -731,6 +731,20 @@ def main() -> None:
             )
 
     target_folder_id = None
+    existing_meta: dict = {}
+    if args.write_doc_meta_json and os.path.isfile(args.write_doc_meta_json):
+        try:
+            with open(args.write_doc_meta_json, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing_meta = loaded
+        except Exception:
+            existing_meta = {}
+
+    source_drive_file_id = str(existing_meta.get("source_drive_file_id") or "").strip()
+    source_file_url = str(existing_meta.get("source_file_url") or "").strip()
+    source_file_name = str(existing_meta.get("source_file_name") or "").strip()
+
     # 新規作成時のみ Drive フォルダへ配置（既存 doc 更新では既存の場所を維持）
     if args.drive_parent_folder_id and not args.update_doc_id:
         subfolder_name = args.drive_subfolder_name or title
@@ -748,41 +762,51 @@ def main() -> None:
             f.write(f"drive_parent_folder_id={args.drive_parent_folder_id}\n")
             f.write(f"drive_subfolder_name={subfolder_name}\n")
             f.write(f"target_folder_id={target_folder_id}\n")
-
-        if args.upload_local_file:
-            up_path = os.path.abspath(args.upload_local_file.strip())
+    elif args.update_doc_id:
+        target_folder_id = str(existing_meta.get("subfolder_id") or "").strip() or None
+        if not target_folder_id:
             try:
-                up_id = upload_local_file_to_drive_folder(
-                    drive_service=drive_service,
-                    local_path=up_path,
-                    folder_id=target_folder_id,
+                file_meta = (
+                    drive_service.files()
+                    .get(fileId=doc_id, fields="parents", supportsAllDrives=True)
+                    .execute()
                 )
-                print(f"drive_uploaded_local_file_id={up_id} path={up_path}")
+                parents = file_meta.get("parents") or []
+                if parents:
+                    target_folder_id = str(parents[0])
+            except Exception as exc:
+                print(f"resolve_doc_parent_folder_failed={exc!r}")
+
+    if args.upload_local_file and target_folder_id and not source_drive_file_id:
+        up_path = os.path.abspath(args.upload_local_file.strip())
+        try:
+            up_id = upload_local_file_to_drive_folder(
+                drive_service=drive_service,
+                local_path=up_path,
+                folder_id=target_folder_id,
+            )
+            source_drive_file_id = up_id
+            source_file_url = f"https://drive.google.com/file/d/{up_id}/view"
+            source_file_name = os.path.basename(up_path)
+            print(f"drive_uploaded_local_file_id={up_id} path={up_path}")
+            with open(write_log_path, "a", encoding="utf-8") as f:
+                f.write(f"upload_local_file={up_path}\n")
+                f.write(f"uploaded_drive_file_id={up_id}\n")
+            if args.delete_local_after_upload:
+                os.remove(up_path)
+                print(f"deleted_local_after_upload={up_path}")
                 with open(write_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"upload_local_file={up_path}\n")
-                    f.write(f"uploaded_drive_file_id={up_id}\n")
-                if args.delete_local_after_upload:
-                    os.remove(up_path)
-                    print(f"deleted_local_after_upload={up_path}")
-                    with open(write_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"deleted_local_after_upload={up_path}\n")
-            except OSError as e:
-                with open(write_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"upload_local_file_error={e}\n")
-                raise
+                    f.write(f"deleted_local_after_upload={up_path}\n")
+        except OSError as e:
+            with open(write_log_path, "a", encoding="utf-8") as f:
+                f.write(f"upload_local_file_error={e}\n")
+            raise
+    elif args.upload_local_file and source_drive_file_id:
+        print(f"drive_source_already_uploaded={source_drive_file_id}")
 
     if args.write_doc_meta_json:
         meta_path = args.write_doc_meta_json
         os.makedirs(os.path.dirname(meta_path) or ".", exist_ok=True)
-        existing_meta = {}
-        if os.path.isfile(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    existing_meta = loaded
-            except Exception:
-                existing_meta = {}
         meta_payload = {
             "job_id": args.job_id,
             "doc_id": doc_id,
@@ -796,6 +820,11 @@ def main() -> None:
             meta_payload["folder_id"] = folder_id
         if subfolder_id:
             meta_payload["subfolder_id"] = subfolder_id
+        if source_drive_file_id:
+            meta_payload["source_drive_file_id"] = source_drive_file_id
+            meta_payload["source_file_url"] = source_file_url
+            if source_file_name:
+                meta_payload["source_file_name"] = source_file_name
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_payload, f, ensure_ascii=False, indent=2)
 

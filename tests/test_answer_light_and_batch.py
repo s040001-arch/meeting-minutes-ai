@@ -662,11 +662,45 @@ class SpanHypothesisQuestionTests(unittest.TestCase):
         self.assertEqual(p["span_text"], self.SPAN)
         self.assertEqual(p["span_corrected"], self.HYPO)
         self.assertTrue(p["force_question"])
-        # span が逐語録に無い場合はスキップ（陳腐化防止）
         p_missing = rc._build_injected_point(
             self.TRANSCRIPT, {"span": "存在しないスパンです", "hypothesis": "x"}
         )
         self.assertIsNone(p_missing)
+
+    def test_sanitize_hypothesis_fillers_strips_soft_fillers(self) -> None:
+        from recognition_batch import sanitize_hypothesis_fillers as s
+
+        self.assertEqual(
+            s("ま必要なあの項目を必要な集計式であの集計をしている"),
+            "必要な項目を必要な集計式で集計をしている",
+        )
+        self.assertEqual(
+            s("はい。あそのファイルベースでのやり取りっていうこと、うん。"),
+            "はい。あそのファイルベースでのやり取りっていうこと。",
+        )
+        cleaned = s(
+            "別になんかすごい勢いでこう急いでるっていうわけではないですけれども、"
+            "体感としてはあのいつぐらいから"
+        )
+        self.assertNotIn("なんか", cleaned)
+        self.assertNotIn("あの", cleaned)
+        self.assertIn("すごい勢い", cleaned)
+
+    def test_span_hypothesis_batch_shows_sanitized_hypothesis(self) -> None:
+        point = self._point()
+        point["span_corrected"] = (
+            "ま必要なあの項目を必要な集計式であの集計をしている"
+        )
+        point["estimated_correction"] = point["span_corrected"]
+        point["span_text"] = point["span_corrected"]
+        point["anomaly_word"] = point["span_text"]
+        items = build_batch_items([point], full_text=point["span_text"])
+        self.assertEqual(len(items), 1)
+        hypo = items[0]["estimated_correction"]
+        self.assertNotIn("あの", hypo)
+        self.assertNotIn("ま必要", hypo)
+        text = build_batch_question_text(items)
+        self.assertIn(hypo, text)
 
     def test_stale_span_falls_back_without_crash(self) -> None:
         # 逐語録が変わって span が見つからない -> 従来 word モードへフォールバック
@@ -676,6 +710,22 @@ class SpanHypothesisQuestionTests(unittest.TestCase):
         items = build_batch_items([point], full_text=self.TRANSCRIPT)
         # word も逐語録に無いので通常経路で処理される（クラッシュしない）
         self.assertIsInstance(items, list)
+
+    def test_batch_question_shows_explicit_target_when_not_in_quote(self) -> None:
+        from recognition_batch import _format_batch_word_item_lines
+
+        lines = _format_batch_word_item_lines(
+            index=3,
+            loc_part="（逐語録中盤）",
+            word="プレセナ",
+            display="…モジュールとかでこうより補強できる…",
+            candidate="競合分析",
+            detected="プレセナ",
+        )
+        text = "\n".join(lines)
+        self.assertIn("該当語「プレセナ」", text)
+        self.assertIn("競合分析", text)
+        self.assertNotIn("【", text)
 
 
 if __name__ == "__main__":

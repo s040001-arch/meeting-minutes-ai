@@ -54,14 +54,12 @@ def build_line_message(result: dict) -> str:
                 cascade = str(result.get("cascade_note") or "").strip()
             if cascade:
                 parts.append(f"（{cascade}）")
-            if doc_url:
-                # バッチは逐語録上の誤変換確認。要約Docには該当語が載らない。
-                label = (
-                    "参考（要約Doc・該当語は載っていません）"
-                    if question_format == "recognition_batch"
-                    else "議事録"
-                )
-                parts.append(f"{label}: {doc_url}")
+            if question_format == "recognition_batch":
+                source_url = str(result.get("source_transcript_url") or "").strip()
+                if source_url:
+                    parts.append(f"参照（アップした原文・検索用）: {source_url}")
+            elif doc_url:
+                parts.append(f"議事録: {doc_url}")
             return "\n".join(parts)
 
         selected_text = _trim_preview(str(selected.get("text", "")).strip(), limit=180)

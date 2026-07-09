@@ -7,7 +7,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from coherence_review import _coherence_to_unknown_points, _enrich_anomaly
+from coherence_review import (
+    _build_system_prompt,
+    _coherence_to_unknown_points,
+    _enrich_anomaly,
+)
 from recognition_batch import parse_single_coherence_answer
 from run_question_cycle_once import (
     COHERENCE_SNIPPET_MAX,
@@ -171,6 +175,38 @@ class CoherenceSnippetExpansionTests(unittest.TestCase):
         self.assertGreater(len(new), len(old))
         self.assertIn(word, new)
         self.assertLessEqual(len(new), COHERENCE_SNIPPET_MAX + 2)
+
+
+def _prompt_text() -> str:
+    prompt = _build_system_prompt(None)
+    if isinstance(prompt, list):
+        parts: list[str] = []
+        for block in prompt:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text") or ""))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(prompt)
+
+
+class CoherencePromptGuidanceTests(unittest.TestCase):
+    """整文にすり抜けた誤変換クラスの検出指示・ペアリング制約が入っていること。"""
+
+    def test_context_inconsistent_homophone_category_present(self) -> None:
+        text = _prompt_text()
+        self.assertIn("文脈に噛み合わない誤変換", text)
+        self.assertIn("語彙の暗記ではなく必ず文脈で", text)
+        # 例示は典型パターンの少数に留める（具体ペアは学習辞書ヒントで注入）
+        for token in ("競合分析", "最小工数", "類型化"):
+            self.assertIn(token, text)
+        self.assertIn("過去のQ&Aで確定した文脈依存の誤変換ペア", text)
+
+    def test_candidate_pairing_guardrail_present(self) -> None:
+        text = _prompt_text()
+        self.assertIn("anomaly_word", text)
+        self.assertIn("無関係な別", text)
+        self.assertIn("プレセナ", text)
 
 
 if __name__ == "__main__":

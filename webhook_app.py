@@ -388,14 +388,54 @@ def _save_correction_dict(data: dict[str, str]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _merge_correction_pairs(pairs: list[dict[str, str]]) -> tuple[int, int]:
+def _merge_correction_pairs(
+    pairs: list[dict[str, str]], *, job_id: str = ""
+) -> tuple[int, int, int]:
+    """確定した置換ペアを scope 判定つきで辞書へ取り込む。
+
+    - suggest_scope == "global"（実在しにくい崩れ表記）
+      → correction_dict へ追加（次ジョブから機械補正で無条件置換）
+    - suggest_scope == "context"（実在語・短い語。例: 富士山, 決済）
+      → correction_dict には入れず、学習辞書に scope=context で記録。
+      別会議で正当に出現し得る語を盲目置換すると本文汚染になるため
+      （2026-07-08 デイシス案件: 富士山→藤井さん の全ジョブ誤置換）。
+      文脈判定つきの coherence 検出ヒントとしてのみ効かせる。
+
+    返り値: (correction_dict added, correction_dict updated, learned context 件数)
+    """
+    try:
+        from learned_corrections_store import add_learned_correction, suggest_scope
+    except ImportError:
+        add_learned_correction = None
+        suggest_scope = None
+
     current = _load_correction_dict()
     added = 0
     updated = 0
+    learned = 0
     for item in pairs:
         wrong = str(item.get("wrong") or "").strip()
         correct = str(item.get("correct") or "").strip()
         if not wrong or not correct or wrong == correct:
+            continue
+        scope = suggest_scope(wrong) if suggest_scope else "global"
+        if scope == "context":
+            if add_learned_correction:
+                r = add_learned_correction(
+                    wrong=wrong,
+                    right=correct,
+                    via="line_correction",
+                    job_id=job_id,
+                    confidence="high",
+                    scope="context",
+                )
+                if r.get("action") in ("added", "updated"):
+                    learned += 1
+                print(
+                    "correction_pair_context_scope="
+                    f"{wrong!r}->{correct!r} learned_action={r.get('action')} "
+                    f"reason={r.get('reason')}"
+                )
             continue
         if wrong not in current:
             added += 1
@@ -403,7 +443,7 @@ def _merge_correction_pairs(pairs: list[dict[str, str]]) -> tuple[int, int]:
             updated += 1
         current[wrong] = correct
     _save_correction_dict(current)
-    return added, updated
+    return added, updated, learned
 
 
 def _apply_correction_pairs_to_transcript(
@@ -1155,7 +1195,9 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
     added = 0
     updated = 0
     if pairs:
-        added, updated = _merge_correction_pairs(pairs)
+        added, updated, learned_ctx = _merge_correction_pairs(
+            pairs, job_id=job_id_for_save
+        )
         correction_save_ok = True
         body_applied = _apply_correction_pairs_to_transcript(job_id_for_save, pairs)
         print("correction_dict_update=")
@@ -1164,6 +1206,7 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 "job_id": job_id_for_save,
                 "added": added,
                 "updated": updated,
+                "learned_context": learned_ctx,
                 "body_applied": body_applied,
                 "pairs": pairs,
             }
@@ -1173,7 +1216,7 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
                 job_id_for_save,
                 "Step 16: 修正依頼反映 "
                 f"correction_pairs={len(pairs)} added={added} updated={updated} "
-                f"body_applied={body_applied}",
+                f"learned_context={learned_ctx} body_applied={body_applied}",
             )
 
     if has_answer or pairs:

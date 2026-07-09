@@ -512,6 +512,123 @@ def _load_doc_url(job_dir: Path) -> str:
     return ""
 
 
+DEFERRED_LINE_BUNDLE_FILENAME = "deferred_line_bundle.json"
+
+
+def _deferred_bundle_path(job_dir: Path) -> Path:
+    return job_dir / DEFERRED_LINE_BUNDLE_FILENAME
+
+
+def _load_question_result(job_dir: Path) -> dict | None:
+    path = job_dir / "question_result.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def should_defer_line_bundle(job_dir: str | Path) -> bool:
+    """認識ゆれバッチを送った直後は、波及バンドルを同時に送らない。"""
+    qr = _load_question_result(Path(job_dir))
+    if not qr:
+        return False
+    if str(qr.get("question_status") or "") != "generated":
+        return False
+    if str(qr.get("question_format") or "") == "recognition_batch":
+        return True
+    su = qr.get("selected_unknown")
+    return isinstance(su, dict) and bool(su.get("batch_items"))
+
+
+def save_deferred_line_bundle(job_dir: str | Path) -> dict[str, Any]:
+    """次の回答サイクル用に bundle 質問を保存（LINE は送らない）。"""
+    job = Path(job_dir)
+    payload = select_next_line_bundle(job)
+    if payload is None:
+        return {"saved": False, "reason": "no_bundle"}
+    out = _deferred_bundle_path(job)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "saved": True,
+        "reason": "deferred_after_recognition_batch",
+        "question_id": payload.get("question_id"),
+        "target_count": len(payload.get("targets") or []),
+    }
+
+
+def send_deferred_line_bundle_if_any(
+    job_dir: str | Path,
+    *,
+    send_line: bool,
+) -> dict[str, Any]:
+    """保存済み bundle があれば question_result に載せて LINE 送信。"""
+    job = Path(job_dir)
+    path = _deferred_bundle_path(job)
+    if not path.is_file():
+        return {"sent": False, "reason": "no_deferred_bundle"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"sent": False, "reason": "invalid_deferred_bundle"}
+    if not isinstance(payload, dict):
+        return {"sent": False, "reason": "invalid_deferred_bundle"}
+    from transcript_paths import load_source_transcript_url
+
+    payload["source_transcript_url"] = load_source_transcript_url(str(job))
+    from line_send_question import build_line_message, push_line_message
+
+    q_path = job / "question_result.json"
+    msg_path = job / "question_message.txt"
+    q_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    message_text = build_line_message(payload)
+    note = str(payload.get("cascade_note") or "").strip()
+    if note and note not in message_text:
+        message_text = message_text.rstrip() + f"\n\n（{note}）"
+    msg_path.write_text(message_text, encoding="utf-8")
+    from run_question_cycle_once import write_line_pending_context
+
+    write_line_pending_context(
+        job_id=job.name,
+        question_id=str(payload.get("question_id") or ""),
+        question_text=str(payload.get("question_text") or ""),
+        selected_unknown=payload.get("selected_unknown") or {},
+        selection_audit=payload.get("selection_audit") or {},
+    )
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    out: dict[str, Any] = {
+        "sent": False,
+        "reason": "written_only",
+        "question_id": payload.get("question_id"),
+        "target_count": len(payload.get("targets") or []),
+    }
+    if not send_line:
+        return out
+    import os
+
+    user_id = os.getenv("LINE_USER_ID", "").strip()
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if not user_id or not token:
+        out["reason"] = "line_credentials_missing"
+        return out
+    try:
+        push_line_message(
+            channel_access_token=token,
+            user_id=user_id,
+            text=message_text,
+        )
+        out["sent"] = True
+        out["reason"] = "sent_deferred_bundle"
+    except Exception as e:  # noqa: BLE001
+        out["reason"] = f"push_failed:{e!r}"
+    return out
+
+
 def write_and_maybe_push_line_bundle(
     job_dir: str | Path,
     *,
@@ -520,9 +637,12 @@ def write_and_maybe_push_line_bundle(
     """Write question_result / message for cascade bundle; optionally push LINE."""
     from line_send_question import build_line_message, push_line_message
     from run_question_cycle_once import write_line_pending_context
+    from transcript_paths import load_source_transcript_url
 
     job = Path(job_dir)
     payload = select_next_line_bundle(job)
+    if payload is not None:
+        payload["source_transcript_url"] = load_source_transcript_url(str(job))
     result: dict[str, Any] = {"sent": False, "reason": "no_bundle"}
     if payload is None:
         return result

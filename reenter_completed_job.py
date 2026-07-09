@@ -37,6 +37,7 @@ from recognition_batch import (
     build_batch_question_text,
     find_standalone_word,
     is_valid_coherence_question_word,
+    sanitize_hypothesis_fillers,
 )
 
 UNKNOWN_POINTS_FILENAME = "unknown_points.json"
@@ -79,7 +80,7 @@ def _build_injected_span_hypothesis(text: str, spec: dict) -> dict | None:
     span = str(spec.get("span") or "").strip()
     if not span:
         return None
-    hypothesis = str(spec.get("hypothesis") or "").strip()
+    hypothesis = sanitize_hypothesis_fillers(str(spec.get("hypothesis") or "").strip())
     pos = text.find(span)
     if pos < 0:
         print(f"  SKIP (逐語録にスパンが見つからない): {span[:40]!r}…")

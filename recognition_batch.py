@@ -18,6 +18,80 @@ VERIFY_TAG = "[要確認]"
 COHERENCE_SOURCE = "coherence_review"
 COHERENCE_TYPE = "coherence_review"
 
+# span_hypothesis の仮説文から除くフィラー（意味は変えず口語のノイズのみ）
+_HYPOTHESIS_FILLER_PHRASES: tuple[str, ...] = (
+    "うんとかま",
+    "お疲れ様です",
+    "えーと",
+    "ええと",
+    "えっと",
+    "そのー",
+    "うーん",
+    "なんか",
+    "まあ",
+    "あのね",
+    "あの",
+    "えー",
+    "あー",
+    "ええ",
+    "うん",
+)
+
+
+def _remove_filler_phrase_at_boundaries(text: str, filler: str) -> str:
+    """文頭・句読点直後など、フィラーとして独立している箇所だけ除去。"""
+    if not filler:
+        return text
+    esc = re.escape(filler)
+    text = re.sub(rf"(?m)^[ \t\u3000]*{esc}[ \t\u3000]*(?:[、，])?", "", text)
+    text = re.sub(rf"(?<=[。！？!?])\s*{esc}[ \t\u3000]*(?:[、，])?", "", text)
+    text = re.sub(rf"(?<=[、，])\s*{esc}[ \t\u3000]*(?:[、，])?", "", text)
+    return text
+
+
+def sanitize_hypothesis_fillers(text: str) -> str:
+    """span_hypothesis の復元仮説から口語フィラーを除去する。
+
+    ユーザーが OK だけで済むよう、仮説提示・反映の両方で使う。
+    「はい」は相槌として残す（mechanical 補正と同様）。
+    """
+    s = str(text or "")
+    if not s.strip():
+        return s
+    for filler in sorted(_HYPOTHESIS_FILLER_PHRASES, key=len, reverse=True):
+        s = _remove_filler_phrase_at_boundaries(s, filler)
+    # 語・助詞直後に続くソフトフィラー（「別になんか」「式であの」等）
+    _after_filler = r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]"
+    s = re.sub(
+        rf"(?<=[\u4e00-\u9fff\u3040-\u309f])なんか(?={_after_filler})",
+        "",
+        s,
+    )
+    s = re.sub(
+        rf"(?<=[\u4e00-\u9fff\u3040-\u309f])あの(?={_after_filler})",
+        "",
+        s,
+    )
+    # 文頭・句点直後・助詞直後の「ま」（まず/また/まだ は残す）
+    s = re.sub(
+        r"^ま(?!ず|た|だ|で|す|せ)(?=[\u4e00-\u9fff\u30a0-\u30ff])",
+        "",
+        s,
+        flags=re.MULTILINE,
+    )
+    s = re.sub(
+        r"(?<=[。！？!?、\nにをはがでと])ま(?!ず|た|だ|で|す|せ)(?=[\u4e00-\u9fff\u30a0-\u30ff])",
+        "",
+        s,
+    )
+    # 句末の相槌
+    s = re.sub(r"(?:、)?(?:うん|ね|ええ)(?=[。!?！？?]|$)", "", s)
+    s = re.sub(r"[ \t\u3000]+", " ", s)
+    s = re.sub(r"、{2,}", "、", s)
+    s = re.sub(r"^[、，\s]+", "", s)
+    s = re.sub(r"[、，\s]+(?=[。!?！？?])", "", s)
+    return s.strip()
+
 
 def is_coherence_unknown_item(item: dict | None) -> bool:
     if not isinstance(item, dict):
@@ -194,6 +268,38 @@ def _highlight_word(display: str, word: str) -> str:
     return d
 
 
+def _format_batch_word_item_lines(
+    *,
+    index: int,
+    loc_part: str,
+    word: str,
+    display: str,
+    candidate: str,
+    detected: str,
+) -> list[str]:
+    """単語確認バッチ1件分の表示行。該当語が引用内に無いときは明示する。"""
+    w = str(word or "").strip()
+    d = str(display or w).strip()
+    highlighted = _highlight_word(d, w)
+    if not highlighted and w:
+        highlighted = w
+    detected = str(detected or "").strip()
+    note = f" ※検出時は「{detected}」" if detected and detected != w else ""
+    cand = str(candidate or "").strip()
+    if "【" not in highlighted and w:
+        lines = [f"{index}.{loc_part}該当語「{w}」"]
+        if d and d != w:
+            lines.append(f"　前後文:「{d}」")
+        if cand:
+            lines.append(f"　→「{cand}」？{note}")
+        else:
+            lines.append(f"　→ 正しい語 / 削除 / 不明{note}")
+        return lines
+    if cand:
+        return [f"{index}.{loc_part}「{highlighted}」→「{cand}」？{note}"]
+    return [f"{index}.{loc_part}「{highlighted}」（正しい語 / 削除 / 不明）{note}"]
+
+
 def _location_label(pos: int, total: int) -> str:
     if total <= 0 or pos < 0:
         return ""
@@ -319,12 +425,15 @@ def _display_snippet_for_point(point: dict, *, full_text: str = "") -> dict[str,
         # 語は消えているが位置ヒントがある → 今そこにある文を見せる
         if pos_hint >= 0:
             display = _snippet_at(full_text, pos_hint, word)
+            surface_at_hint, _ = locate_surface_in_transcript(
+                full_text, word, pos_hint=pos_hint
+            )
             return {
-                "display": display,
-                "surface_word": word,
+                "display": _highlight_word(display, surface_at_hint or word),
+                "surface_word": surface_at_hint or word,
                 "position": pos_hint,
                 "location": _location_label(pos_hint, len(full_text)),
-                "found_in_transcript": False,
+                "found_in_transcript": bool(surface_at_hint and surface_at_hint in full_text),
             }
 
     # full_text が無いときだけ検出時 span に頼る（陳腐化しやすい）
@@ -448,6 +557,7 @@ def build_batch_items(
                     continue
                 seen_words.add(span_text)
                 seen_words.add(word)
+                span_corr_clean = sanitize_hypothesis_fillers(span_corr)
                 ranked.append(
                     (
                         (_CONF_RANK.get(conf, 9), pos_span),
@@ -457,7 +567,7 @@ def build_batch_items(
                             "detected_word": span_text,
                             "context": span_text,
                             "display": span_text[:220],
-                            "estimated_correction": span_corr,
+                            "estimated_correction": span_corr_clean,
                             "question_kind": "span_hypothesis",
                             "anomaly_type": "C",
                             "reason": str(p.get("reason") or "").strip()[:80],
@@ -548,16 +658,18 @@ def build_batch_question_text(items: list[dict]) -> str:
         display = str(it.get("display") or it.get("context") or "").strip()
         if not display:
             display = word
-        display = _highlight_word(display, word)
         candidate = str(it.get("estimated_correction") or "").strip()
         detected = str(it.get("detected_word") or "").strip()
-        note = ""
-        if detected and detected != word:
-            note = f" ※検出時は「{detected}」"
-        if candidate:
-            lines.append(f"{i}.{loc_part}「{display}」→「{candidate}」？{note}")
-        else:
-            lines.append(f"{i}.{loc_part}「{display}」（正しい語 / 削除 / 不明）{note}")
+        lines.extend(
+            _format_batch_word_item_lines(
+                index=i,
+                loc_part=loc_part,
+                word=word,
+                display=display,
+                candidate=candidate,
+                detected=detected,
+            )
+        )
     lines.append("")
     lines.append("例) 1 OK / 2 稟議決裁 / 3 削除 / 4 不明")
     return "\n".join(lines)
@@ -928,6 +1040,8 @@ def _finalize_batch_item_action(
         return action, correction
     surface = _normalize_answer_surface(token).lower().replace(" ", "")
     if surface in {"ok", "okay"}:
+        if str(item.get("question_kind") or "") == "span_hypothesis":
+            cand = sanitize_hypothesis_fillers(cand)
         return "correct", cand
     return action, correction
 
@@ -1214,6 +1328,28 @@ def parse_batch_answer(
     ]
 
 
+def _replace_span_best_effort(text: str, word: str, correction: str) -> tuple[str, bool]:
+    """span_hypothesis 向け: 完全一致 → タグ付き → 長い前方一致の順で置換。"""
+    if not word or not correction or word == correction:
+        return text, False
+    tagged = f"{word}{VERIFY_TAG}"
+    if tagged in text:
+        return text.replace(tagged, correction), True
+    if word in text:
+        return text.replace(word, correction), True
+    if len(word) < 10:
+        return text, False
+    for length in range(min(len(word), 100), 8, -1):
+        prefix = word[:length]
+        idx = text.find(prefix)
+        if idx < 0:
+            continue
+        end = min(len(text), idx + len(word))
+        replaced_len = end - idx
+        return text[:idx] + correction + text[end:], True
+    return text, False
+
+
 def apply_batch_corrections(
     transcript: str, parsed: list[dict], *, api_key: str | None = None
 ) -> tuple[str, list[dict]]:
@@ -1259,12 +1395,20 @@ def apply_batch_corrections(
                 )
             continue
         if action == "correct":
-            tagged = f"{word}{VERIFY_TAG}"
+            if correction and len(word) >= 12:
+                correction = sanitize_hypothesis_fillers(correction)
             before = out
+            tagged = f"{word}{VERIFY_TAG}"
             if tagged in out:
                 out = out.replace(tagged, correction)
-            if word in out:
+            elif word in out:
                 out = out.replace(word, correction)
+            elif len(word) >= 10:
+                out, replaced = _replace_span_best_effort(out, word, correction)
+                if not replaced:
+                    continue
+            else:
+                continue
             if out != before:
                 applied.append(
                     {"anomaly_id": p.get("anomaly_id", ""), "before": word,

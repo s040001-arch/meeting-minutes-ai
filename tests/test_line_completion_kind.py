@@ -66,6 +66,33 @@ class LineCompletionKindTests(unittest.TestCase):
         self.assertFalse(should_push_line_for_result("none"))
         self.assertFalse(should_push_line_for_result(""))
 
+    def test_recognition_batch_uses_source_transcript_url(self) -> None:
+        msg = build_line_message(
+            {
+                "question_status": "generated",
+                "question_format": "recognition_batch",
+                "question_text": "1. テスト",
+                "doc_url": "https://docs.google.com/document/d/abc/edit",
+                "source_transcript_url": "https://drive.google.com/file/d/xyz/view",
+            }
+        )
+        self.assertIn("参照（アップした原文・検索用）", msg)
+        self.assertIn("drive.google.com/file/d/xyz/view", msg)
+        self.assertNotIn("該当語は載っていません", msg)
+        self.assertNotIn("docs.google.com", msg)
+
+    def test_recognition_batch_omits_link_without_source(self) -> None:
+        msg = build_line_message(
+            {
+                "question_status": "generated",
+                "question_format": "recognition_batch",
+                "question_text": "1. テスト",
+                "doc_url": "https://docs.google.com/document/d/abc/edit",
+            }
+        )
+        self.assertNotIn("docs.google.com", msg)
+        self.assertNotIn("drive.google.com", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

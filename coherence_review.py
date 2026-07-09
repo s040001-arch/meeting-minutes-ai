@@ -101,12 +101,29 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         "\n- 自己紹介・呼びかけ直後の不自然語 → 氏名の誤変換の疑い"
         "\n  例: 『暑さというもの』『あやさん』→ 実在氏名の可能性（"
         "『相原』など参加者名との音の近さを確認）"
+        "\n\n【重要: 単語としては日本語だが文脈に噛み合わない誤変換（取りこぼし多発）】"
+        "\n1語ずつ見れば実在する日本語でも、直前・直後の話題（並列されている手法名・"
+        "教材の提供元・作業量・分類など）と噛み合わなければ、同音・近音の誤変換を疑い"
+        "候補を提示する。判定は語彙の暗記ではなく必ず文脈で行うこと。"
+        "\n典型パターン（例示）:"
+        "\n- 並列文脈: 『環境分析とか火球分析』→ 分析手法の並列なら『競合分析』の誤変換"
+        "（存在しない手法名は並列相手から復元できる）"
+        "\n- 固有名詞の近音: 『姿勢のに提供している研修』→ 提供元を語る文脈なら"
+        "社名（例: 資生堂）の誤変換。後続発言で正しい固有名詞が言い直されていれば確定"
+        "\n- 漢語の同音: 『最小項数でご提案』→ 作業量文脈なら『最小工数』、"
+        "『阻害要因の累計化』→ 分類文脈なら『類型化』、"
+        "『全部漏らされてる』→ 網羅の文脈なら『網羅されてる』"
+        "\n※過去のQ&A・チャット修正で確定したペアは末尾の"
+        "【過去のQ&Aで確定した文脈依存の誤変換ペア】に列挙される。"
+        "同種の文脈に合致したら優先的に候補提示すること。"
         "\n\n【検出対象カテゴリ】"
         "\nA. 明らかな造語(同一会議内に類似語が既出)"
         "\nB. 文脈と整合しない語・意味不明語"
         "\nC. 文として崩壊している箇所（主述不整合・接続が不自然な発話分割崩れを含む）。"
         "単語置換では直らない崩壊は必ず C とし、span_text に崩壊部を含む発言全体、"
         "span_corrected に『本来こういう発言だったのでは』という復元仮説（自然な全文）を入れる。"
+        "仮説には口語フィラー（あの・ま・うん・なんか・えー等）は含めないこと"
+        "（フィラーは機械的に除去するため、ユーザー確認の対象にしない）。"
         "確信が持てなくても、会議の文脈から最も自然な仮説を1つ立てること"
         "（この仮説はそのままユーザーへの確認質問に使われる）。"
         "\nD. 助詞・指示語の誤認識"
@@ -141,6 +158,15 @@ def _build_system_prompt(meeting_profile: dict | None) -> str | list:
         '"confidence":"high|medium|low",'
         '"auto_fixable":true/false,'
         '"reason":"判定根拠を1文（50字以内）"}'
+        "\n\n【候補と該当語の対応（厳守・質問のズレ防止）】"
+        "\n- estimated_correction は anomaly_word（違和感の中心語）そのものの正しい表記・"
+        "言い換えでなければならない。無関係な別の語を候補に入れてはならない。"
+        "\n- anomaly_word は span_text 内に実在する連続文字列であること"
+        "（引用の中に必ず含まれる語を中心語に選ぶ）。"
+        "\n- 正しい語（誤変換でない語）に別語の候補を付けてはならない。"
+        "候補を付けるのは、その語自体が誤変換だと判断できるときだけ。"
+        "\n- 自社名・製品名・研修手法名など profile / 世界モデルに記載の既知固有名詞"
+        "（例: プレセナ）は誤変換として扱わない。別語の候補も付けない。"
         "\n\n【確信度の判定基準（厳格化）】"
         "\n- high (auto_fixable=true): 推定正解語が同一テキスト内に既出 かつ "
         "音声認識誤りであることが明白。span_corrected を必ず埋める。"
@@ -333,6 +359,10 @@ def _enrich_anomaly(item: dict, idx: int, text: str) -> dict:
         llm_span_text=str(item.get("span_text") or "").strip(),
     )
     span_corrected = llm_span_corrected or str(span_fields.get("span_corrected") or estimated or "").strip()
+    if anomaly_type == "C" and span_corrected:
+        from recognition_batch import sanitize_hypothesis_fillers
+
+        span_corrected = sanitize_hypothesis_fillers(span_corrected)
     span_start = int(span_fields.get("span_start") or -1)
     auto_fixable = (
         confidence == "high"

@@ -17,6 +17,7 @@ from recognition_batch import (
     _apply_delete_to_transcript,
     _is_standalone_word_at,
     apply_batch_corrections,
+    build_batch_items,
     find_standalone_word,
     is_coherence_unknown_item,
     parse_batch_answer,
@@ -347,6 +348,148 @@ def _is_recognition_batch_question(question_result: dict | None) -> bool:
         return True
     su = question_result.get("selected_unknown")
     return isinstance(su, dict) and bool(su.get("batch_items"))
+
+
+_BATCH_ANSWER_NUM_RE = re.compile(r"(?:^|\n)\s*(\d{1,2})\s*[\.．:：]")
+
+
+def _looks_like_recognition_batch_qa(question_text: str, answer_text: str) -> bool:
+    qt = str(question_text or "")
+    if "番号ごとに" not in qt and "文字起こし原文" not in qt:
+        return False
+    nums = _BATCH_ANSWER_NUM_RE.findall(str(answer_text or ""))
+    return len(set(nums)) >= 2
+
+
+def _load_line_pending_context() -> dict | None:
+    path = os.path.join("data", "line_pending_context.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _recover_recognition_batch_items(
+    *,
+    job_id: str,
+    input_root: str,
+    question_id: str,
+    question_result: dict | None,
+) -> list[dict]:
+    """question_result から batch_items が失われたときの復元。"""
+    qr = question_result if isinstance(question_result, dict) else {}
+    su = qr.get("selected_unknown")
+    if isinstance(su, dict):
+        items = su.get("batch_items")
+        if isinstance(items, list) and items:
+            return items
+
+    pending = _load_line_pending_context()
+    if (
+        isinstance(pending, dict)
+        and str(pending.get("question_id") or "").strip() == question_id
+        and str(pending.get("job_id") or "").strip() == job_id
+    ):
+        psu = pending.get("selected_unknown")
+        if isinstance(psu, dict):
+            items = psu.get("batch_items")
+            if isinstance(items, list) and items:
+                return items
+
+    asked_path = os.path.join(input_root, job_id, "asked_questions.json")
+    if os.path.isfile(asked_path):
+        try:
+            with open(asked_path, "r", encoding="utf-8") as f:
+                asked = json.load(f)
+            if isinstance(asked, list):
+                for entry in reversed(asked):
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(entry.get("question_id") or "").strip() != question_id:
+                        continue
+                    items = entry.get("batch_items")
+                    if isinstance(items, list) and items:
+                        return items
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    job_dir = os.path.join(input_root, job_id)
+    for name in (
+        "merged_transcript_after_qa.txt",
+        "merged_transcript_ai.txt",
+        "merged_transcript.txt",
+    ):
+        tp = os.path.join(job_dir, name)
+        if os.path.isfile(tp):
+            with open(tp, "r", encoding="utf-8") as f:
+                full_text = f.read()
+            break
+    else:
+        full_text = ""
+
+    batch_points: list[dict] = []
+    for item in _load_unknown_points(job_id, input_root):
+        if not _is_coherence_item(item):
+            continue
+        st = str(item.get("status") or "").strip().lower()
+        qid = str(item.get("answered_by_question_id") or "").strip()
+        if qid == question_id or st == "asked":
+            batch_points.append(item)
+    if batch_points and full_text:
+        return build_batch_items(batch_points, full_text=full_text)
+    return []
+
+
+def _handle_recognition_batch_answer(
+    *,
+    job_id: str,
+    input_root: str,
+    question_result: dict,
+    answer_text: str,
+    question_id: str,
+    out_path: str,
+    batch_items: list[dict],
+    model: str,
+    openai_timeout_sec: int,
+) -> None:
+    api_key, key_source = resolve_openai_api_key()
+    print(f"debug_openai_api_key_found={bool(api_key)}")
+    print(f"debug_openai_api_key_source={key_source}")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    job_dir = os.path.join(input_root, job_id)
+    ensure_after_qa_initialized(job_dir)
+    base_text = load_after_qa_text(job_dir)
+    parsed = parse_batch_answer(
+        answer_text=answer_text,
+        items=batch_items,
+        api_key=api_key,
+        model=model,
+        timeout_sec=openai_timeout_sec,
+    )
+    updated, applied = apply_batch_corrections(base_text, parsed, api_key=api_key)
+    save_after_qa_text(job_dir, updated)
+    if out_path != after_qa_path(job_dir):
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+    answered = _mark_batch_items_answered_in_unknowns(
+        job_id=job_id,
+        input_root=input_root,
+        parsed=parsed,
+        answer_text=answer_text,
+        question_id=question_id,
+        batch_items=batch_items,
+    )
+    learned = _persist_batch_corrections_to_learned_dict(
+        job_id=job_id, applied=applied, base_text=base_text
+    )
+    print(f"recorrect_incorporate_mode=recognition_batch items={len(batch_items)}")
+    print(f"recognition_batch_applied={len(applied)} answered_marked={answered} learned_added={learned}")
 
 
 def _mark_batch_items_answered_in_unknowns(
@@ -1428,7 +1571,34 @@ def main() -> None:
 
     # 複数番号 free-text 質問への「N番は〜」回答: 番号分解してピンポイント適用。
     # （回答文そのものが本文へ混入する事故の遮断。recognition_batch は既存経路）
+    qid = str(record.get("question_id") or "").strip()
     if not _is_recognition_batch_question(question_result):
+        batch_items = []
+        if _looks_like_recognition_batch_qa(question_text, answer_text):
+            batch_items = _recover_recognition_batch_items(
+                job_id=args.job_id,
+                input_root=args.input_root,
+                question_id=qid,
+                question_result=question_result if isinstance(question_result, dict) else None,
+            )
+        if len(batch_items) >= 2:
+            _handle_recognition_batch_answer(
+                job_id=args.job_id,
+                input_root=args.input_root,
+                question_result=question_result if isinstance(question_result, dict) else {},
+                answer_text=answer_text,
+                question_id=qid,
+                out_path=out_path,
+                batch_items=batch_items,
+                model=args.model,
+                openai_timeout_sec=args.openai_timeout_sec,
+            )
+            print(f"job_id={args.job_id}")
+            print(f"answers_json={answers_json_path}")
+            print(f"output={out_path}")
+            print(f"question_id={record.get('question_id')}")
+            print(f"answer_job_id={record.get('job_id')}")
+            return
         if _try_handle_numbered_freetext_answer(
             job_id=args.job_id,
             input_root=args.input_root,
@@ -1469,40 +1639,25 @@ def main() -> None:
 
     # レガシー: 認識ゆれの一括確認(バッチ)への回答。
     if _is_recognition_batch_question(question_result):
-        api_key, key_source = resolve_openai_api_key()
-        print(f"debug_openai_api_key_found={bool(api_key)}")
-        print(f"debug_openai_api_key_source={key_source}")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set.")
-        ensure_after_qa_initialized(job_dir)
-        base_text = load_after_qa_text(job_dir)
         batch_items = (question_result.get("selected_unknown") or {}).get("batch_items") or []
-        parsed = parse_batch_answer(
-            answer_text=answer_text,
-            items=batch_items,
-            api_key=api_key,
-            model=args.model,
-            timeout_sec=args.openai_timeout_sec,
-        )
-        updated, applied = apply_batch_corrections(base_text, parsed, api_key=api_key)
-        save_after_qa_text(job_dir, updated)
-        if out_path != after_qa_path(job_dir):
-            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write(updated)
-        answered = _mark_batch_items_answered_in_unknowns(
+        if not batch_items:
+            batch_items = _recover_recognition_batch_items(
+                job_id=args.job_id,
+                input_root=args.input_root,
+                question_id=qid,
+                question_result=question_result,
+            )
+        _handle_recognition_batch_answer(
             job_id=args.job_id,
             input_root=args.input_root,
-            parsed=parsed,
+            question_result=question_result,
             answer_text=answer_text,
-            question_id=str(record.get("question_id") or ""),
+            question_id=qid,
+            out_path=out_path,
             batch_items=batch_items if isinstance(batch_items, list) else [],
+            model=args.model,
+            openai_timeout_sec=args.openai_timeout_sec,
         )
-        learned = _persist_batch_corrections_to_learned_dict(
-            job_id=args.job_id, applied=applied, base_text=base_text
-        )
-        print(f"recorrect_incorporate_mode=recognition_batch items={len(batch_items)}")
-        print(f"recognition_batch_applied={len(applied)} answered_marked={answered} learned_added={learned}")
         print(f"job_id={args.job_id}")
         print(f"input={in_path}")
         print(f"output={out_path}")

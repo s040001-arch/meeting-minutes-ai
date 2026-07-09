@@ -27,6 +27,7 @@ from recognition_batch import (
     select_next_coherence_point,
 )
 from repo_env import load_dotenv_local
+from transcript_paths import load_source_transcript_url
 from unknown_point_filters import (
     filter_answerable_unknown_points,
     question_targets_non_answerable_topic,
@@ -77,6 +78,9 @@ def _append_asked_question(
         "selected_text": str((selected_unknown or {}).get("text") or "").strip(),
         "selected_type": str((selected_unknown or {}).get("type") or "").strip(),
         "selected_hypothesis": str((selected_unknown or {}).get("hypothesis") or "").strip(),
+        "batch_items": (selected_unknown or {}).get("batch_items")
+        if isinstance(selected_unknown, dict)
+        else None,
         "asked_at": datetime.now(timezone.utc).isoformat(),
     })
     path = _asked_questions_path(job_dir)
@@ -337,6 +341,55 @@ def _split_pending_by_source(pending: list[dict]) -> tuple[list[dict], list[dict
         else:
             regular.append(item)
     return regular, coherence
+
+
+def _collect_recognition_batch_scope(job_dir: str) -> list[dict]:
+    """過去に送信した recognition_batch の項目（重複質問抑止用）。"""
+    scopes: list[dict] = []
+    for entry in _load_asked_questions(job_dir):
+        if str(entry.get("question_format") or "") != RECOGNITION_BATCH_FORMAT:
+            continue
+        for it in entry.get("batch_items") or []:
+            if isinstance(it, dict):
+                scopes.append(it)
+    return scopes
+
+
+def _item_covered_by_prior_batch(item: dict, batch_items: list[dict]) -> bool:
+    """同一論点が既にバッチ質問に含まれていたら再質問しない。"""
+    word = str(item.get("anomaly_word") or item.get("text") or "").strip()
+    cand = str(item.get("estimated_correction") or item.get("span_corrected") or "").strip()
+    if not word and not cand:
+        return False
+    for bi in batch_items:
+        bw = str(bi.get("word") or "").strip()
+        bd = str(bi.get("detected_word") or "").strip()
+        bc = str(bi.get("estimated_correction") or "").strip()
+        if word and word in {bw, bd}:
+            return True
+        if word and bw and (word in bw or bw in word):
+            return True
+        if word and bd and word in bd:
+            return True
+        if cand and bc and cand == bc:
+            return True
+    return False
+
+
+def _filter_pending_after_recognition_batch(
+    pending: list[dict], job_dir: str
+) -> tuple[list[dict], int]:
+    batch_items = _collect_recognition_batch_scope(job_dir)
+    if not batch_items:
+        return pending, 0
+    kept: list[dict] = []
+    dropped = 0
+    for item in pending:
+        if _item_covered_by_prior_batch(item, batch_items):
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
 
 
 def _coherence_phase_complete_marker_path(job_dir: str) -> str:
@@ -1060,6 +1113,15 @@ def main() -> None:
     unknown_points_all = load_unknown_points(unknowns_path)
     pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)
     regular_pending, coherence_pending = _split_pending_by_source(pending_all)
+    coherence_pending, dropped_batch_coherence = _filter_pending_after_recognition_batch(
+        coherence_pending, job_dir
+    )
+    regular_pending, dropped_batch_regular = _filter_pending_after_recognition_batch(
+        regular_pending, job_dir
+    )
+    pending_meta["dropped_prior_recognition_batch_count"] = (
+        dropped_batch_coherence + dropped_batch_regular
+    )
     # 未決定・検討中・顧客確認予定など、相原に聞いても答えられない論点を除外。
     regular_pending, dropped_non_answerable = filter_answerable_unknown_points(regular_pending)
     pending_meta["regular_pending_count"] = len(regular_pending)
@@ -1294,6 +1356,7 @@ def main() -> None:
                     selection_audit=selection_audit,
                 )
 
+    result_payload["source_transcript_url"] = load_source_transcript_url(job_dir)
     with open(question_output, "w", encoding="utf-8") as f:
         json.dump(result_payload, f, ensure_ascii=False, indent=2)
 

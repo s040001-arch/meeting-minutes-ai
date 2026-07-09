@@ -128,6 +128,47 @@ class LineBundleSelectTests(unittest.TestCase):
             self.assertIn("targets", payload["selected_unknown"])
 
 
+class DeferLineBundleTests(unittest.TestCase):
+    def test_should_defer_after_recognition_batch(self) -> None:
+        from integrated_questions import should_defer_line_bundle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp) / "job_defer"
+            job.mkdir()
+            (job / "question_result.json").write_text(
+                json.dumps(
+                    {
+                        "question_status": "generated",
+                        "question_format": "recognition_batch",
+                        "selected_unknown": {"batch_items": [{"word": "決済"}]},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(should_defer_line_bundle(job))
+
+    def test_save_deferred_bundle(self) -> None:
+        from integrated_questions import (
+            DEFERRED_LINE_BUNDLE_FILENAME,
+            save_deferred_line_bundle,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp) / "job_save"
+            job.mkdir()
+            proposals = [
+                _proposal(pid="1", word="野村", hyp="野村不動産", span="野村です", start=10),
+            ]
+            (job / "edit_proposals.json").write_text(
+                json.dumps({"proposals": proposals}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            meta = save_deferred_line_bundle(job)
+            self.assertTrue(meta.get("saved"))
+            self.assertTrue((job / DEFERRED_LINE_BUNDLE_FILENAME).is_file())
+
+
 class BuildMdStatsTests(unittest.TestCase):
     def test_empty_inputs(self) -> None:
         md, stats = build_integrated_md(

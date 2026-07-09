@@ -435,9 +435,10 @@ def _apply_proposals_to_job(
     with open(ai_path, "w", encoding="utf-8") as f:
         f.write(out_text)
 
-    after_qa_path = os.path.join(job_dir, "merged_transcript_after_qa.txt")
-    with open(after_qa_path, "w", encoding="utf-8") as f:
-        f.write(out_text)
+    # NOTE: merged_transcript_after_qa.txt はここでは書かない。
+    # after_qa は Step 4.3（AI補正）確定後に ai.txt から初期化される。
+    # ここで機械補正系譜のテキストを先取り作成すると、Step 4.3 の修復が
+    # after_qa に引き継がれない系譜バグになる（2026-07-08 デイシス案件）。
 
     questions_added = _merge_editor_questions_to_unknown_points(job_dir, proposals)
 
