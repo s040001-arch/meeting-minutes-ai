@@ -60,7 +60,10 @@ def resolve_final_review_model() -> str:
     )
 
 
-def _build_system_prompt(notation_block: str) -> str | list:
+def _build_system_prompt(
+    notation_block: str,
+    meeting_profile_block: str = "",
+) -> str | list:
     static_prompt = (
         "あなたは完成済みの議事録（要約セクションと発言録・整文）の最終レビュアーです。"
         "唯一の任務は、残存する品質問題を全文一読で発見して報告することです。"
@@ -96,6 +99,15 @@ def _build_system_prompt(notation_block: str) -> str | list:
         "見出し・要約も『山口部長』なら、挟まった『川口』は聞き取り揺れ。"
         "quote 全体を自然な応答に直した fix を high で提示する。"
         "\n- 正しい姓を一意に決められない場合は medium、fix は空文字とする。"
+        "\n- 会議プロファイルの参加者名はファイル名等から得た強い根拠である。"
+        "近接文脈で同じ役職・人物を指し、一方の姓だけが参加者一覧にあり、"
+        "別人を示す根拠がなければ、参加者一覧の姓を正として high の fix を出す。"
+        "\n\n【一般語・専門用語の文脈確定】"
+        "\n- 『何本部長』のように直後の役職質問から助詞脱落が一意なら"
+        "『何の本部長』として high。"
+        "\n- 対照群ごとに同じ調査を行い差分をリフト値とする説明で、"
+        "『承認にそれぞれ』等の意味不明語があれば、調査方法から"
+        "『両群にそれぞれ』と一意に定まるため high。"
         "\n\n【出力スキーマ】JSON 配列のみ。説明・前置き・コードフェンス禁止。"
         "\n各要素:"
         '\n{"type":"notation|fragment|backchannel|unnatural",'
@@ -112,7 +124,10 @@ def _build_system_prompt(notation_block: str) -> str | list:
         "\n- low: 違和感レベル"
         f"\n\n問題がなければ空配列 [] を返す。最大{FINAL_REVIEW_MAX_FINDINGS}件。"
     )
-    return cached_system(static_prompt, notation_block)
+    variable_blocks = "\n\n".join(
+        x for x in (meeting_profile_block, notation_block) if x.strip()
+    )
+    return cached_system(static_prompt, variable_blocks)
 
 
 def _extract_text(resp: Any) -> str:
@@ -139,7 +154,10 @@ def _parse_findings(raw: str) -> list[dict]:
     return [x for x in data if isinstance(x, dict)]
 
 
-def _call_reviewer(text: str) -> list[dict]:
+def _call_reviewer(
+    text: str,
+    meeting_profile: dict[str, Any] | None = None,
+) -> list[dict]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
@@ -150,12 +168,19 @@ def _call_reviewer(text: str) -> list[dict]:
         notation_block = build_notation_block_for_text(text)
     except Exception as e:  # noqa: BLE001
         print(f"final_review_notation_block_failed={e!r}")
+    profile_block = ""
+    try:
+        from meeting_profile import format_meeting_profile_for_prompt
+
+        profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_profile_block_failed={e!r}")
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=resolve_final_review_model(),
         max_tokens=FINAL_REVIEW_MAX_TOKENS,
         timeout=FINAL_REVIEW_TIMEOUT_SEC,
-        system=_build_system_prompt(notation_block),
+        system=_build_system_prompt(notation_block, profile_block),
         messages=[
             {
                 "role": "user",
@@ -248,10 +273,18 @@ def run_final_review(
     if mode == "off" or not text.strip():
         return text, report
 
+    meeting_profile: dict[str, Any] = {}
+    try:
+        from meeting_profile import load_meeting_profile
+
+        meeting_profile = load_meeting_profile(job_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_profile_load_failed={e!r}")
+
     out_text = text
     for round_no in range(1, FINAL_REVIEW_MAX_ROUNDS + 1):
         try:
-            findings = _call_reviewer(out_text)
+            findings = _call_reviewer(out_text, meeting_profile)
         except Exception as e:  # noqa: BLE001
             print(f"final_review_failed round={round_no} error={e!r}")
             report["error"] = repr(e)
@@ -281,7 +314,7 @@ def run_final_review(
         # Audit once more after the last applied round.  Never publish on the
         # assumption that the last edit created no new issue.
         try:
-            findings = _call_reviewer(out_text)
+            findings = _call_reviewer(out_text, meeting_profile)
             _, _unused, skipped = apply_safe_fixes(out_text, findings)
             report["rounds"].append(
                 {

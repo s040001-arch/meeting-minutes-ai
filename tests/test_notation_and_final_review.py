@@ -187,6 +187,8 @@ class PromptInjectionTests(unittest.TestCase):
         self.assertIn("決定事項・残論点・Next Action と発言録を相互に照合", text)
         self.assertIn("機械抽出された人名ゆれ候補は無視してはならない", text)
         self.assertIn("山口という——川口さんか", text)
+        self.assertIn("会議プロファイルの参加者名は", text)
+        self.assertIn("両群にそれぞれ", text)
 
     def test_final_review_defaults_to_opus(self) -> None:
         from anthropic_prompt_cache import OPUS_MODEL_ID
