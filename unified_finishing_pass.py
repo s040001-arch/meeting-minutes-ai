@@ -34,6 +34,8 @@ UNIFIED_REPORT_FILENAME = "unified_finishing_report.json"
 # 見えないが、事実照合は検証段（全文1回）と gate が担う。
 AUDIT_WINDOW_TARGET_CHARS = 12_000
 AUDIT_MAX_PARALLEL = 3
+# 読者阻害の崩れの外科的修復は1ラウンドで最大この件数まで扱う。
+UNIFIED_RESOLVER_MAX_ITEMS = 60
 # 長い無段落テキストの機械的な段落再割り（LLM不使用・事実安全）
 REFLOW_PARAGRAPH_MAX_CHARS = 800
 REFLOW_TARGET_CHARS = 400
@@ -223,27 +225,37 @@ def run_unified_finishing(
         return out_text, stats, report
 
     # 2+3. トリアージと修正: 1件ずつのピンポイント置換のみ。
-    #      修正できなかった読者阻害の崩れは外科的修復へ、それでも残れば
-    #      検証段の findings として gate が質問に回す。
-    out_text, applied, skipped = apply_safe_fixes(out_text, audit_findings)
-    applied_quotes = {str(f.get("quote") or "") for f in applied}
-    unresolved = [
-        f
-        for f in audit_findings
-        if str(f.get("quote") or "") not in applied_quotes
-    ]
-    try:
-        out_text, resolved, resolver_skipped = resolve_reader_blocking_findings(
-            text=out_text,
-            findings=unresolved,
-            meeting_profile=profile,
-            force=True,
-        )
-        applied.extend(resolved)
-        skipped.extend(resolver_skipped)
-    except Exception as exc:  # noqa: BLE001
-        print(f"unified_resolver_failed={exc!r}")
-    stats["auto_applied"] = len(applied)
+    #      高確信は apply_safe_fixes、読者阻害の崩れは外科的修復
+    #      （どちらも1件ごとに事実ゲート）。直せなかったものが findings に
+    #      残り、gate が LINE 質問へ回す。
+    def fix_round(
+        text_in: str,
+        findings: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        text_out, applied, skipped = apply_safe_fixes(text_in, findings)
+        applied_quotes = {str(f.get("quote") or "") for f in applied}
+        unresolved = [
+            f
+            for f in findings
+            if str(f.get("quote") or "") not in applied_quotes
+        ]
+        try:
+            text_out, resolved, resolver_skipped = (
+                resolve_reader_blocking_findings(
+                    text=text_out,
+                    findings=unresolved,
+                    meeting_profile=profile,
+                    force=True,
+                    max_items=UNIFIED_RESOLVER_MAX_ITEMS,
+                )
+            )
+            applied.extend(resolved)
+            skipped.extend(resolver_skipped)
+        except Exception as exc:  # noqa: BLE001
+            print(f"unified_resolver_failed={exc!r}")
+        return text_out, applied, skipped
+
+    out_text, applied, skipped = fix_round(out_text, audit_findings)
     report["applied"] = applied
     report["skipped"] = skipped
     report["rounds"].append(
@@ -257,36 +269,62 @@ def run_unified_finishing(
         }
     )
 
-    # 4. 検証: 修正後の全文に独立レビューを1回。高確信のみその場で確定し、
-    #    残りは findings として gate → LINE 質問へ。
-    try:
-        verify_findings = _call_reviewer(out_text, profile)
-    except Exception as exc:  # noqa: BLE001
-        stats["failed"] = True
-        report["error"] = f"verify_failed:{exc!r}"
-        _write_report(job_dir, report)
-        return out_text, stats, report
-    out_text, verify_applied, verify_skipped = apply_safe_fixes(
-        out_text, verify_findings
-    )
-    verify_applied_quotes = {str(f.get("quote") or "") for f in verify_applied}
-    remaining = [
-        f
-        for f in verify_findings
-        if str(f.get("quote") or "") not in verify_applied_quotes
-    ]
-    report["applied"].extend(verify_applied)
+    # 4. 検証: 修正後の全文に独立レビュー。1回目の検証で見つかった問題は
+    #    もう1度だけ外科的に修正し、その場合は最終検証で確認する
+    #    （有界2ラウンド。全文書き換えの反復はしない）。
+    remaining: list[dict[str, Any]] = []
+    for verify_no in (2, 3):
+        try:
+            verify_findings = _call_reviewer(out_text, profile)
+        except Exception as exc:  # noqa: BLE001
+            stats["failed"] = True
+            report["error"] = f"verify_failed:{exc!r}"
+            _write_report(job_dir, report)
+            return out_text, stats, report
+        stats["verify_findings"] = len(verify_findings)
+        if not verify_findings:
+            remaining = []
+            report["rounds"].append(
+                {
+                    "round": verify_no,
+                    "stage": "verify",
+                    "findings": [],
+                    "applied": [],
+                    "skipped": [],
+                }
+            )
+            break
+        if verify_no == 3:
+            # 最終検証: 修正はせず、残りを質問へ。
+            remaining = verify_findings
+            report["rounds"].append(
+                {
+                    "round": verify_no,
+                    "stage": "final_verify",
+                    "findings": verify_findings,
+                    "applied": [],
+                    "skipped": [],
+                }
+            )
+            break
+        out_text, verify_applied, verify_skipped = fix_round(
+            out_text, verify_findings
+        )
+        report["applied"].extend(verify_applied)
+        report["rounds"].append(
+            {
+                "round": verify_no,
+                "stage": "verify_and_fix",
+                "findings": verify_findings,
+                "applied": verify_applied,
+                "skipped": verify_skipped,
+            }
+        )
+        if not verify_applied:
+            # 何も直せなかったなら再検証しても同じ結果になる。
+            remaining = verify_findings
+            break
     report["findings"] = remaining
-    report["rounds"].append(
-        {
-            "round": 2,
-            "stage": "verify",
-            "findings": verify_findings,
-            "applied": verify_applied,
-            "skipped": verify_skipped,
-        }
-    )
-    stats["verify_findings"] = len(verify_findings)
     stats["auto_applied"] = len(report["applied"])
     stats["queued_candidates"] = len(remaining)
     stats["output_chars"] = len(out_text)

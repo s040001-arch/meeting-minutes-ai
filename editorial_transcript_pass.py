@@ -468,6 +468,7 @@ def resolve_reader_blocking_findings(
     findings: list[dict[str, Any]],
     meeting_profile: dict[str, Any] | None = None,
     force: bool = False,
+    max_items: int | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Resolve non-factual medium garbles after the independent final review.
 
@@ -476,6 +477,7 @@ def resolve_reader_blocking_findings(
     """
     if not force and not is_editorial_transcript_enabled():
         return text, [], []
+    item_cap = max_items or EDITORIAL_FINDING_RESOLVER_MAX_ITEMS
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         return text, [], [{"reason": "anthropic_api_key_missing"}]
@@ -504,7 +506,7 @@ def resolve_reader_blocking_findings(
                 ],
             }
         )
-        if len(candidates) >= EDITORIAL_FINDING_RESOLVER_MAX_ITEMS:
+        if len(candidates) >= item_cap:
             break
     if not candidates:
         return text, [], []

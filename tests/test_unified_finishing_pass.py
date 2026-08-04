@@ -125,6 +125,48 @@ class UnifiedFinishingPassTests(unittest.TestCase):
         self.assertEqual(report["applied"], [])
         self.assertEqual(len(report["findings"]), 1)
 
+    def test_verify_round_fixes_are_confirmed_by_final_verify(self) -> None:
+        text = "冒頭の説明です。\n\n結論の説明です。"
+        verify_finding = {
+            "type": "unnatural",
+            "quote": "冒頭の説明です。",
+            "issue": "「冒頭の」が誤認識",
+            "fix": "最初の説明です。",
+            "confidence": "high",
+        }
+        stage = {"n": 0}
+
+        def fake_reviewer(window_text, meeting_profile=None):
+            stage["n"] += 1
+            if stage["n"] == 1:  # 監査（窓1つ）: 問題なし
+                return []
+            if stage["n"] == 2:  # 検証1回目: 修正可能な問題を発見
+                return [verify_finding]
+            return []  # 最終検証: 問題なし
+
+        with tempfile.TemporaryDirectory() as job_dir:
+            with patch.dict(
+                os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False
+            ):
+                with patch(
+                    "final_review_pass._call_reviewer",
+                    side_effect=fake_reviewer,
+                ), patch(
+                    "editorial_transcript_pass.resolve_reader_blocking_findings",
+                    side_effect=_no_resolver,
+                ):
+                    out, stats, report = run_unified_finishing(
+                        job_dir=job_dir,
+                        text=text,
+                        meeting_profile={},
+                    )
+        self.assertIn("最初の説明です。", out)
+        self.assertEqual(report["findings"], [])
+        self.assertEqual(len(report["applied"]), 1)
+        # 監査 + 検証1回目 + 最終検証 = 3回のレビュー呼び出し
+        self.assertEqual(stage["n"], 3)
+        self.assertFalse(stats["failed"])
+
     def test_reflow_splits_walls_without_changing_characters(self) -> None:
         sentence = "これは長い説明の文であり内容を保持したまま分割されるべきです。"
         wall = sentence * 40
