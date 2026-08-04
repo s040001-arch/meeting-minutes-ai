@@ -54,12 +54,7 @@ def _extract_schedule_tokens(text: str) -> set[str]:
 
 
 def _extract_flagged_tokens(text: str) -> list[str]:
-    tokens: list[str] = []
-    for m in _FLAGGED_TOKEN_RE.finditer(text or ""):
-        left = text[max(0, m.start() - 80) : m.start()]
-        frag = re.split(r"[\n。]", left)[-1]
-        tokens.append(f"{frag}[要確認]")
-    return tokens
+    return [match.group(0) for match in _FLAGGED_TOKEN_RE.finditer(text or "")]
 
 
 def _participant_mentions(text: str, participants: list[str]) -> set[str]:
@@ -160,9 +155,7 @@ def verify_fact_integrity(
         )
     for token in snap_before.flagged_tokens:
         if token not in after:
-            core = token.split("。")[-1]
-            if core not in after:
-                violations.append(f"flagged_token_missing:{token[:40]}")
+            violations.append(f"flagged_token_missing:{token[:40]}")
 
     _compare_token_sets(
         violations,
