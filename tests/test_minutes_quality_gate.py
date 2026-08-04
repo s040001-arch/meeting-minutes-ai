@@ -155,6 +155,51 @@ class MinutesQualityGateTests(unittest.TestCase):
         self.assertEqual(points[0]["source"], "final_review")
         self.assertEqual(points[0]["status"], "open")
 
+    def test_low_reader_blocking_garble_blocks_and_is_queued(self) -> None:
+        # 読者の理解を妨げる崩れは、確信度lowでも「残したまま公開」しない。
+        # 自動修復できなければ質問として送る。
+        finding = {
+            "type": "fragment",
+            "confidence": "low",
+            "quote": "見学者タイトルを回ってる",
+            "issue": "意味不明な崩れ断片",
+            "fix": "",
+        }
+        report = evaluate_minutes_quality(
+            text="前文。見学者タイトルを回ってる。後文。",
+            readable_stats=self._stats(findings=[finding]),
+        )
+        self.assertIn(
+            "final_review_unresolved",
+            {x["code"] for x in report["blockers"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text="前文。見学者タイトルを回ってる。後文。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+        self.assertEqual(count, 1)
+
+    def test_low_minor_wording_does_not_block(self) -> None:
+        # 意味が通じる軽微な違和感（low）は公開を妨げない。
+        finding = {
+            "type": "unnatural",
+            "confidence": "low",
+            "quote": "食べさせたらやってくれる",
+            "issue": "口語表現の表記が前後と不統一の軽微な違和感",
+            "fix": "",
+        }
+        report = evaluate_minutes_quality(
+            text="前文。食べさせたらやってくれる。後文。",
+            readable_stats=self._stats(findings=[finding]),
+        )
+        self.assertEqual(report["status"], "pass")
+        self.assertIn(
+            "final_review_low",
+            {x["code"] for x in report["warnings"]},
+        )
+
     def test_stale_pre_readable_unknown_is_closed_when_queueing(self) -> None:
         finding = {
             "confidence": "medium",

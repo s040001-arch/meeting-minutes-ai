@@ -21,6 +21,25 @@ EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
 EDITORIAL_REPAIR_MAX_PARALLEL = 3
 EDITORIAL_FINDING_RESOLVER_MAX_ITEMS = 20
+# Issue phrasings that mean the span blocks reader comprehension.  These are
+# handled even at low confidence: confidently fixable ones are resolved in
+# place, the rest are asked via LINE instead of being silently kept.
+_READER_BLOCKING_ISSUE_RE = re.compile(
+    r"意味不明|意味が通らない|崩れ|断片|成立していない|成立しない|文意不明"
+)
+
+
+def is_reader_blocking_finding(finding: dict[str, Any]) -> bool:
+    """True if a final-review finding blocks reader comprehension."""
+    finding_type = str(finding.get("type") or "").strip().lower()
+    if finding_type not in {"unnatural", "fragment"}:
+        return False
+    confidence = str(finding.get("confidence") or "").strip().lower()
+    if confidence in {"high", "medium"}:
+        return True
+    return bool(
+        _READER_BLOCKING_ISSUE_RE.search(str(finding.get("issue") or ""))
+    )
 _NUMBER_RE = re.compile(
     r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
     r"時|分|万円|円|%|クラス|名)|\d{2,}(?:[.,、〜～-]\d+)*)",
@@ -411,16 +430,11 @@ def resolve_reader_blocking_findings(
 
     candidates: list[dict[str, Any]] = []
     for finding in findings:
-        finding_type = str(finding.get("type") or "").strip().lower()
-        confidence = str(finding.get("confidence") or "").strip().lower()
         quote = str(finding.get("quote") or "").strip()
         issue = str(finding.get("issue") or "").strip()
-        if (
-            finding_type not in {"unnatural", "fragment"}
-            or confidence not in {"high", "medium"}
-            or not quote
-            or quote not in text
-        ):
+        if not quote or quote not in text:
+            continue
+        if not is_reader_blocking_finding(finding):
             continue
         if any(
             marker in issue
@@ -445,11 +459,14 @@ def resolve_reader_blocking_findings(
 
     system = (
         "あなたは議事録の最終整文で残った、読者の理解を妨げる崩れだけを修復します。"
+        "最優先は、後で読む人がストレスなく理解できることです。逐語の忠実さより優先します。"
         "各項目のquoteを置換する自然なreplacementをJSON配列で返してください。"
-        "正確な原語が不明でも、前後から確実に言える範囲へ一般化し、意味不明な断片を残さない。"
-        "主張・理由・事実は残し、人名・数値・固有名詞を変更・削除・追加しない。"
-        "推測で新しい具体情報を作らない。修復不能ならreplacementを空文字にする。"
-        '出力形式: [{"index":0,"replacement":"..."}] のみ。'
+        "\n- 前後の文脈から確実に言える場合のみ置換する。一般化してよいが、"
+        "推測で新しい具体情報を作らない。"
+        "\n- 主張・理由・事実は残し、人名・数値・固有名詞を変更・削除・追加しない。"
+        "\n- 本当に判断できない場合は replacement を空文字にする。"
+        "その項目は自動処理せず、内容を知る担当者へ質問として送られる。"
+        '\n出力形式: [{"index":0,"replacement":"..."}] のみ。'
     )
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
@@ -487,6 +504,8 @@ def resolve_reader_blocking_findings(
         quote = candidate["quote"]
         replacement = by_index.get(candidate["index"], "")
         if not replacement or replacement == quote or quote not in out:
+            # Unresolved garble is escalated to a LINE question by the
+            # quality gate; it is never silently kept or deleted.
             skipped.append({**candidate, "reason": "empty_or_not_present"})
             continue
         before_numbers, before_names = _protected_multiset(quote)

@@ -250,6 +250,94 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertEqual(len(applied), 1)
         self.assertEqual(skipped, [])
 
+    def test_low_confidence_reader_blocking_garble_is_resolved(self) -> None:
+        text = "重要な話の途中で、あんなにも回ってるって何とありました。続きです。"
+        finding = {
+            "type": "unnatural",
+            "quote": "あんなにも回ってるって何",
+            "issue": "意味不明な崩れ断片",
+            "fix": "",
+            "confidence": "low",
+        }
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(
+                        [
+                            {
+                                "index": 0,
+                                "replacement": "案内業務が回っている理由",
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                result, applied, skipped = resolve_reader_blocking_findings(
+                    text=text,
+                    findings=[finding],
+                )
+        self.assertIn("案内業務が回っている理由", result)
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(skipped, [])
+
+    def test_unresolvable_garble_is_left_for_question_not_deleted(self) -> None:
+        # モデルが確信を持てない場合は本文を変えず、質問経路に委ねる。
+        text = "前文。見学者タイトルを回ってるような使い方。後文。"
+        finding = {
+            "type": "fragment",
+            "quote": "見学者タイトルを回ってる",
+            "issue": "意味不明な崩れ断片",
+            "fix": "",
+            "confidence": "medium",
+        }
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(
+                        [{"index": 0, "replacement": ""}],
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                result, applied, skipped = resolve_reader_blocking_findings(
+                    text=text,
+                    findings=[finding],
+                )
+        self.assertEqual(result, text)
+        self.assertEqual(applied, [])
+        self.assertEqual(len(skipped), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

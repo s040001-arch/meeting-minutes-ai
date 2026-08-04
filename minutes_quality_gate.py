@@ -23,6 +23,24 @@ class MinutesQualityGateError(RuntimeError):
     """Raised when an enforce-mode transcript is not publishable."""
 
 
+def _needs_user_attention(finding: dict[str, Any]) -> bool:
+    """True if an unresolved finding must block publication and be asked.
+
+    High/medium findings always qualify.  Low-confidence findings qualify when
+    they block reader comprehension: the user's priority is that published
+    minutes never contain incomprehensible fragments, and anything the
+    pipeline cannot fix confidently is asked via LINE instead of kept.
+    """
+    if str(finding.get("confidence") or "").lower() in {"high", "medium"}:
+        return True
+    try:
+        from editorial_transcript_pass import is_reader_blocking_finding
+
+        return is_reader_blocking_finding(finding)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _queue_unresolved_final_findings(
     *,
     job_dir: str,
@@ -37,8 +55,7 @@ def _queue_unresolved_final_findings(
     findings = [
         f
         for f in (final_report.get("findings") or [])
-        if isinstance(f, dict)
-        and str(f.get("confidence") or "").lower() in {"high", "medium"}
+        if isinstance(f, dict) and _needs_user_attention(f)
     ]
     if not findings:
         return 0
@@ -185,18 +202,14 @@ def evaluate_minutes_quality(
     findings = [
         f for f in (final_report.get("findings") or []) if isinstance(f, dict)
     ]
-    unresolved_high_medium = [
-        f
-        for f in findings
-        if str(f.get("confidence") or "").lower() in {"high", "medium"}
-    ]
-    if unresolved_high_medium:
+    unresolved_blocking = [f for f in findings if _needs_user_attention(f)]
+    if unresolved_blocking:
         blockers.append(
             {
                 "code": "final_review_unresolved",
-                "message": "最終レビューのhigh/medium問題が未解決",
-                "count": len(unresolved_high_medium),
-                "examples": unresolved_high_medium[:10],
+                "message": "最終レビューの理解阻害・要確認問題が未解決",
+                "count": len(unresolved_blocking),
+                "examples": unresolved_blocking[:10],
             }
         )
 
@@ -210,13 +223,16 @@ def evaluate_minutes_quality(
         )
 
     low_count = sum(
-        1 for f in findings if str(f.get("confidence") or "").lower() == "low"
+        1
+        for f in findings
+        if str(f.get("confidence") or "").lower() == "low"
+        and not _needs_user_attention(f)
     )
     if low_count:
         warnings.append(
             {
                 "code": "final_review_low",
-                "message": "low確信の違和感が残っている",
+                "message": "low確信の軽微な違和感が残っている（公開は妨げない）",
                 "count": low_count,
             }
         )
