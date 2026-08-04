@@ -150,6 +150,19 @@ def evaluate_minutes_quality(
                     )[:20],
                 }
             )
+        editorial_fallback = list(
+            editorial_stats.get("fallback_chunk_idx") or []
+        )
+        if editorial_fallback:
+            warnings.append(
+                {
+                    "code": "editorial_partial_fallback",
+                    "message": "全文完成稿の一部は入力整文を維持し、最終レビューへ回した",
+                    "chunk_indices": editorial_fallback,
+                }
+            )
+    else:
+        editorial_fallback = []
 
     if final_report.get("error"):
         blockers.append(
@@ -289,6 +302,7 @@ def evaluate_minutes_quality(
                 isinstance(editorial_stats, dict)
                 and editorial_stats.get("failed")
             ),
+            "editorial_fallback_chunks": len(editorial_fallback),
             "final_review_findings": len(findings),
             "final_review_applied": len(final_report.get("applied") or []),
             "verify_tag_count": verify_tag_count,

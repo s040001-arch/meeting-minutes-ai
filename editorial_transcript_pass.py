@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import concurrent.futures
 import os
 import re
 from typing import Any
@@ -17,6 +18,9 @@ EDITORIAL_TRANSCRIPT_MODEL = OPUS_MODEL_ID
 EDITORIAL_MAX_TOKENS = 32000
 EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
+EDITORIAL_CHUNK_TARGET_CHARS = 3500
+EDITORIAL_RETRY_CHUNK_TARGET_CHARS = 900
+EDITORIAL_MAX_PARALLEL = 3
 EDITORIAL_MIN_OUTPUT_RATIO = 0.65
 EDITORIAL_MAX_OUTPUT_RATIO = 1.15
 
@@ -159,6 +163,77 @@ def _extract_response_text(response: Any) -> str:
     ).strip()
 
 
+def _split_chunks(text: str, target_chars: int) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+    units: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) <= target_chars:
+            units.append(paragraph)
+            continue
+        sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[。！？!?])", paragraph)
+            if item.strip()
+        ]
+        if len(sentences) <= 1:
+            units.extend(
+                paragraph[index : index + target_chars]
+                for index in range(0, len(paragraph), target_chars)
+            )
+            continue
+        group: list[str] = []
+        group_chars = 0
+        for sentence in sentences:
+            if group and group_chars + len(sentence) > target_chars:
+                units.append("".join(group))
+                group = []
+                group_chars = 0
+            group.append(sentence)
+            group_chars += len(sentence)
+        if group:
+            units.append("".join(group))
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for unit in units:
+        extra = len(unit) + (2 if current else 0)
+        if current and current_chars + extra > target_chars:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_chars = 0
+        current.append(unit)
+        current_chars += len(unit) + (2 if len(current) > 1 else 0)
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def _validate_editorial_candidate(
+    before: str,
+    candidate: str,
+    mapping: dict[str, str],
+    meeting_profile: dict[str, Any] | None,
+) -> tuple[str, list[str]]:
+    unlocked, errors = _unlock_text(candidate, mapping)
+    ratio = len(unlocked) / max(1, len(before))
+    if not (EDITORIAL_MIN_OUTPUT_RATIO <= ratio <= EDITORIAL_MAX_OUTPUT_RATIO):
+        errors.append(f"output_ratio:{ratio:.3f}")
+    before_numbers, before_names = _protected_multiset(before)
+    after_numbers, after_names = _protected_multiset(unlocked)
+    if before_numbers != after_numbers:
+        errors.append("numeric_tokens_changed")
+    if before_names != after_names:
+        errors.append("honorific_names_changed")
+    integrity = verify_fact_integrity(
+        before,
+        unlocked,
+        meeting_profile=meeting_profile,
+    )
+    errors.extend(f"fact_integrity:{item}" for item in integrity.violations)
+    return unlocked, errors
+
+
 def editorialize_transcript(
     text: str,
     meeting_profile: dict[str, Any] | None = None,
@@ -172,6 +247,10 @@ def editorialize_transcript(
         "input_chars": len(text),
         "output_chars": len(text),
         "validation_errors": [],
+        "total_chunks": 0,
+        "applied_chunks": 0,
+        "fallback_chunk_idx": [],
+        "split_recovered": 0,
     }
     if not stats["enabled"]:
         return text, stats
@@ -187,49 +266,87 @@ def editorialize_transcript(
         return text, stats
 
     stats["attempted"] = True
-    locked, mapping = _lock_spans(text, meeting_profile)
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
-        response = client.messages.create(
-            model=stats["model"],
-            max_tokens=EDITORIAL_MAX_TOKENS,
-            system=_build_system_prompt(meeting_profile),
-            messages=[
-                {
-                    "role": "user",
-                    "content": "以下の発言録を完成稿にしてください。\n\n" + locked,
-                }
-            ],
+    client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
+    system = _build_system_prompt(meeting_profile)
+    chunks = _split_chunks(text, EDITORIAL_CHUNK_TARGET_CHARS)
+    stats["total_chunks"] = len(chunks)
+
+    def edit_chunk(chunk: str) -> tuple[str | None, list[str]]:
+        locked, mapping = _lock_spans(chunk, meeting_profile)
+        try:
+            response = client.messages.create(
+                model=stats["model"],
+                max_tokens=EDITORIAL_MAX_TOKENS,
+                system=system,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "以下の発言録部分を完成稿にしてください。\n\n"
+                        + locked,
+                    }
+                ],
+            )
+            raw = _extract_response_text(response)
+        except Exception as exc:  # noqa: BLE001
+            return None, [f"request_failed:{exc!r}"]
+        candidate, errors = _validate_editorial_candidate(
+            chunk,
+            raw,
+            mapping,
+            meeting_profile,
         )
-        raw = _extract_response_text(response)
-    except Exception as exc:  # noqa: BLE001
-        stats["failed"] = True
-        stats["validation_errors"] = [f"request_failed:{exc!r}"]
-        return text, stats
+        return (candidate if not errors else None), errors
 
-    candidate, errors = _unlock_text(raw, mapping)
-    ratio = len(candidate) / max(1, len(text))
-    if not (EDITORIAL_MIN_OUTPUT_RATIO <= ratio <= EDITORIAL_MAX_OUTPUT_RATIO):
-        errors.append(f"output_ratio:{ratio:.3f}")
-    before_numbers, before_names = _protected_multiset(text)
-    after_numbers, after_names = _protected_multiset(candidate)
-    if before_numbers != after_numbers:
-        errors.append("numeric_tokens_changed")
-    if before_names != after_names:
-        errors.append("honorific_names_changed")
-    integrity = verify_fact_integrity(
-        text,
-        candidate,
-        meeting_profile=meeting_profile,
-    )
-    errors.extend(f"fact_integrity:{item}" for item in integrity.violations)
-    stats["validation_errors"] = errors
+    def process_chunk(index: int, chunk: str) -> tuple[int, str, bool, bool, list[str]]:
+        candidate, errors = edit_chunk(chunk)
+        if candidate is not None:
+            return index, candidate, candidate.strip() != chunk.strip(), False, []
+        subchunks = _split_chunks(chunk, EDITORIAL_RETRY_CHUNK_TARGET_CHARS)
+        if len(subchunks) > 1:
+            recovered: list[str] = []
+            recovered_errors: list[str] = []
+            for subchunk in subchunks:
+                subcandidate, suberrors = edit_chunk(subchunk)
+                if subcandidate is None:
+                    recovered.append(subchunk)
+                    recovered_errors.extend(suberrors)
+                else:
+                    recovered.append(subcandidate)
+            combined = "\n\n".join(recovered)
+            changed = combined.strip() != chunk.strip()
+            return index, combined, changed, True, recovered_errors
+        return index, chunk, False, False, errors
+
+    results: dict[int, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=EDITORIAL_MAX_PARALLEL
+    ) as executor:
+        futures = [
+            executor.submit(process_chunk, index, chunk)
+            for index, chunk in enumerate(chunks)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            index, candidate, changed, split_used, errors = future.result()
+            results[index] = candidate
+            if changed:
+                stats["applied_chunks"] += 1
+            if split_used:
+                stats["split_recovered"] += 1
+            if errors:
+                stats["fallback_chunk_idx"].append(index)
+                stats["validation_errors"].extend(
+                    f"chunk_{index}:{error}" for error in errors
+                )
+
+    stats["fallback_chunk_idx"].sort()
+    candidate = "\n\n".join(results[index] for index in range(len(chunks)))
     stats["output_chars"] = len(candidate)
-    if errors:
+    stats["applied"] = candidate.strip() != text.strip()
+    # A partial subchunk fallback is allowed through to the independent final
+    # reviewer. Total failure is fail-closed.
+    if stats["applied_chunks"] == 0:
         stats["failed"] = True
         return text, stats
-
-    stats["applied"] = candidate.strip() != text.strip()
     return candidate.strip() + "\n", stats
 
 

@@ -90,7 +90,7 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertTrue(stats["failed"])
         self.assertTrue(
             any(
-                error.startswith("placeholder_count:")
+                "placeholder_count:" in error
                 for error in stats["validation_errors"]
             )
         )
