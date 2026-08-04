@@ -52,6 +52,18 @@ def _queue_unresolved_final_findings(
                 existing = [x for x in loaded if isinstance(x, dict)]
         except (OSError, json.JSONDecodeError):
             existing = []
+    terminal_statuses = {"answered", "done", "closed", "resolved"}
+    for item in existing:
+        if str(item.get("status") or "").strip().lower() in terminal_statuses:
+            continue
+        surfaces = [
+            str(item.get(key) or "").strip()
+            for key in ("anomaly_word", "text", "span_text")
+        ]
+        surfaces = [surface for surface in surfaces if surface]
+        if surfaces and not any(surface in text for surface in surfaces):
+            item["status"] = "resolved"
+            item["resolved_via"] = "final_readable_text"
     by_id = {
         str(x.get("anomaly_id") or ""): x
         for x in existing

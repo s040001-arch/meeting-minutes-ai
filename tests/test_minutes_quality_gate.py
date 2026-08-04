@@ -137,6 +137,32 @@ class MinutesQualityGateTests(unittest.TestCase):
         self.assertEqual(points[0]["source"], "final_review")
         self.assertEqual(points[0]["status"], "open")
 
+    def test_stale_pre_readable_unknown_is_closed_when_queueing(self) -> None:
+        finding = {
+            "confidence": "medium",
+            "quote": "新しい不明箇所",
+            "issue": "確認が必要",
+            "fix": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "unknown_points.json").write_text(
+                json.dumps(
+                    [{"status": "open", "text": "既に整文で消えた長い断片"}],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text="本文。新しい不明箇所。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+            points = json.loads(
+                (Path(tmp) / "unknown_points.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(points[0]["status"], "resolved")
+        self.assertEqual(points[0]["resolved_via"], "final_readable_text")
+
 
 if __name__ == "__main__":
     unittest.main()
