@@ -19,6 +19,11 @@ EDITORIAL_TRANSCRIPT_MODEL = OPUS_MODEL_ID
 EDITORIAL_MAX_TOKENS = 32000
 EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
+# Paragraphs are edited in small batches so quality does not depend on
+# position: a single long generation degrades toward the end and can even
+# truncate, leaving the latter half of the meeting unpolished.
+EDITORIAL_BATCH_TARGET_CHARS = 5000
+EDITORIAL_BATCH_MAX_PARALLEL = 3
 EDITORIAL_REPAIR_MAX_PARALLEL = 3
 EDITORIAL_FINDING_RESOLVER_MAX_ITEMS = 20
 # Issue phrasings that mean the span blocks reader comprehension.  These are
@@ -243,34 +248,67 @@ def editorialize_transcript(
     stats["total_paragraphs"] = len(before_paragraphs)
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
+    except Exception as exc:  # noqa: BLE001
+        stats["failed"] = True
+        stats["validation_errors"] = [f"request_failed:{exc!r}"]
+        return text, stats
+    system = _build_system_prompt(meeting_profile)
+
+    # Batch paragraphs so no request produces a long generation.  Quality
+    # must not depend on where in the meeting a paragraph appears.
+    batches: list[list[int]] = []
+    batch: list[int] = []
+    batch_chars = 0
+    for index, paragraph in enumerate(before_paragraphs):
+        if batch and batch_chars + len(paragraph) > EDITORIAL_BATCH_TARGET_CHARS:
+            batches.append(batch)
+            batch = []
+            batch_chars = 0
+        batch.append(index)
+        batch_chars += len(paragraph)
+    if batch:
+        batches.append(batch)
+    stats["total_batches"] = len(batches)
+
+    def edit_batch(indices: list[int]) -> dict[int, str]:
+        payload = [
+            {"index": index, "text": before_paragraphs[index]}
+            for index in indices
+        ]
         response = client.messages.create(
             model=stats["model"],
             max_tokens=EDITORIAL_MAX_TOKENS,
-            system=_build_system_prompt(meeting_profile),
+            system=system,
             messages=[
                 {
                     "role": "user",
                     "content": (
                         "以下の発言録段落配列を完成稿にしてください。\n\n"
-                        + json.dumps(
-                            [
-                                {"index": index, "text": paragraph}
-                                for index, paragraph in enumerate(
-                                    before_paragraphs
-                                )
-                            ],
-                            ensure_ascii=False,
-                        )
+                        + json.dumps(payload, ensure_ascii=False)
                     ),
                 }
             ],
         )
-        raw = _extract_response_text(response)
-        after_by_index = _parse_paragraph_array(raw)
-    except Exception as exc:  # noqa: BLE001
-        stats["failed"] = True
-        stats["validation_errors"] = [f"request_failed:{exc!r}"]
-        return text, stats
+        return _parse_paragraph_array(_extract_response_text(response))
+
+    after_by_index: dict[int, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=EDITORIAL_BATCH_MAX_PARALLEL
+    ) as executor:
+        future_to_batch = {
+            executor.submit(edit_batch, indices): position
+            for position, indices in enumerate(batches)
+        }
+        for future in concurrent.futures.as_completed(future_to_batch):
+            position = future_to_batch[future]
+            try:
+                after_by_index.update(future.result())
+            except Exception as exc:  # noqa: BLE001
+                # A failed batch falls back paragraph by paragraph below;
+                # the rest of the transcript is still polished.
+                stats["validation_errors"].append(
+                    f"batch_{position}_failed:{exc!r}"
+                )
 
     selected: list[str] = list(before_paragraphs)
     repair_needed: dict[int, tuple[str, str, list[str]]] = {}

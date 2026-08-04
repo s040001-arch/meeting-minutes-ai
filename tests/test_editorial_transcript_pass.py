@@ -204,6 +204,116 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertEqual(stats["repaired_paragraphs"], [0])
         self.assertEqual(stats["fallback_chunk_idx"], [])
 
+    def test_long_transcript_is_edited_in_position_independent_batches(
+        self,
+    ) -> None:
+        # 後半の段落も前半と同じ小さなバッチで処理され、位置により
+        # 品質が変わらないこと（1回の長い生成に依存しないこと）を固定する。
+        paragraphs = [
+            f"第{i}議題の説明です。えー、あの、補足します。" + "内容です。" * 10
+            for i in range(6)
+        ]
+        source = "\n\n".join(paragraphs)
+
+        def fake_create(**kwargs):
+            payload = json.loads(
+                kwargs["messages"][0]["content"].split("\n\n", 1)[1]
+            )
+            edited = [
+                {
+                    "index": item["index"],
+                    "text": item["text"].replace("えー、あの、", ""),
+                }
+                for item in payload
+            ]
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps(edited, ensure_ascii=False),
+                    )
+                ]
+            )
+
+        client = MagicMock()
+        client.messages.create.side_effect = fake_create
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                with patch(
+                    "editorial_transcript_pass.EDITORIAL_BATCH_TARGET_CHARS",
+                    120,
+                ):
+                    result, stats = editorialize_transcript(source)
+        self.assertGreater(client.messages.create.call_count, 1)
+        self.assertGreater(stats["total_batches"], 1)
+        self.assertFalse(stats["failed"])
+        self.assertEqual(stats["applied_paragraphs"], 6)
+        self.assertNotIn("えー、あの、", result)
+        self.assertIn("第5議題", result)
+
+    def test_failed_batch_degrades_only_its_own_paragraphs(self) -> None:
+        paragraphs = [
+            "前半の議題です。えー、あの、補足します。" + "内容です。" * 10,
+            "後半の議題です。えー、あの、補足します。" + "内容です。" * 10,
+        ]
+        source = "\n\n".join(paragraphs)
+
+        def fake_create(**kwargs):
+            payload = json.loads(
+                kwargs["messages"][0]["content"].split("\n\n", 1)[1]
+            )
+            if payload[0]["index"] == 0:
+                raise RuntimeError("boom")
+            edited = [
+                {
+                    "index": item["index"],
+                    "text": item["text"].replace("えー、あの、", ""),
+                }
+                for item in payload
+            ]
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps(edited, ensure_ascii=False),
+                    )
+                ]
+            )
+
+        client = MagicMock()
+        client.messages.create.side_effect = fake_create
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                with patch(
+                    "editorial_transcript_pass.EDITORIAL_BATCH_TARGET_CHARS",
+                    120,
+                ):
+                    result, stats = editorialize_transcript(source)
+        self.assertFalse(stats["failed"])
+        self.assertEqual(stats["fallback_chunk_idx"], [0])
+        self.assertIn("前半の議題です。えー、あの、", result)
+        self.assertNotIn("後半の議題です。えー、あの、", result)
+
     def test_reordered_sentences_do_not_swap_protected_numbers(self) -> None:
         from editorial_transcript_pass import _NUMBER_RE, _restore_ordered_tokens
 
