@@ -5,25 +5,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from editorial_transcript_pass import (
-    _lock_spans,
-    editorialize_transcript,
-)
+from editorial_transcript_pass import editorialize_transcript
 
 
 class EditorialTranscriptPassTests(unittest.TestCase):
-    def test_locks_numbers_names_and_verify_fragments(self) -> None:
-        source = "土井様は88kgから7ヶ月で減量。竹山さん[要確認]へ連絡。"
-        locked, mapping = _lock_spans(
-            source,
-            {"participants": ["土井様", "竹山さん"]},
-        )
-        self.assertNotIn("88kg", locked)
-        self.assertNotIn("土井様", locked)
-        self.assertTrue(any(value == "88kg" for value in mapping.values()))
-        self.assertTrue(any("竹山さん[要確認]" in value for value in mapping.values()))
-
-    def test_applies_reader_facing_rewrite_when_locked_facts_survive(self) -> None:
+    def test_applies_reader_facing_rewrite_when_protected_facts_survive(self) -> None:
         source = (
             "土井様が88kgの話をしました。"
             "はい、あの、意味のない崩れです。重要な説明です。"
@@ -90,7 +76,8 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertTrue(stats["failed"])
         self.assertTrue(
             any(
-                "placeholder_count:" in error
+                "numeric_tokens_changed" in error
+                or "honorific_names_changed" in error
                 for error in stats["validation_errors"]
             )
         )
