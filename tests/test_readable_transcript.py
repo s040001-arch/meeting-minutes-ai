@@ -39,6 +39,15 @@ class SplitTests(unittest.TestCase):
         heading = next(p for k, p in segments if k == "heading")
         self.assertTrue(heading.startswith("### ▼"))
 
+    def test_long_single_paragraph_splits_at_sentences(self) -> None:
+        from readable_transcript import _split_long_body
+
+        body = "これは長い発言です。" * 300
+        chunks = _split_long_body(body, target_chars=800)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), body)
+        self.assertTrue(all(len(chunk) <= 900 for chunk in chunks))
+
 
 class ValidationTests(unittest.TestCase):
     def test_rejects_extra_flagged_token(self) -> None:

@@ -21,7 +21,7 @@ READABLE_MAX_TOKENS = 8192
 READABLE_TIMEOUT_SEC = 180
 READABLE_CHUNK_TARGET_CHARS = 3500
 READABLE_CHUNK_MIN_CHARS = 800
-READABLE_SPLIT_RETRY_TARGET_CHARS = 1600
+READABLE_SPLIT_RETRY_TARGET_CHARS = 800
 READABLE_MAX_PARALLEL = 4
 READABLE_MIN_OUTPUT_RATIO = 0.25
 # 検証失敗チャンクの再試行温度（0 の再試行は決定論的で無意味なため少し上げる）
@@ -157,12 +157,44 @@ def _split_long_body(body: str, target_chars: int = READABLE_CHUNK_TARGET_CHARS)
     paragraphs = [p.strip() for p in _PARAGRAPH_SEP.split(body) if p.strip()]
     if not paragraphs:
         return [body] if body.strip() else []
+    units: list[str] = []
+    for para in paragraphs:
+        if len(para) <= target_chars:
+            units.append(para)
+            continue
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[。！？!?])", para)
+            if s.strip()
+        ]
+        if len(sentences) <= 1:
+            # Last-resort hard split for ASR output without punctuation.
+            units.extend(
+                para[i : i + target_chars]
+                for i in range(0, len(para), target_chars)
+            )
+        else:
+            sentence_group: list[str] = []
+            sentence_len = 0
+            for sentence in sentences:
+                if sentence_group and sentence_len + len(sentence) > target_chars:
+                    units.append("".join(sentence_group))
+                    sentence_group = []
+                    sentence_len = 0
+                sentence_group.append(sentence)
+                sentence_len += len(sentence)
+            if sentence_group:
+                units.append("".join(sentence_group))
     chunks: list[list[str]] = []
     current: list[str] = []
     current_len = 0
-    for para in paragraphs:
-        current.append(para)
-        current_len += len(para)
+    for unit in units:
+        if current and current_len + len(unit) > target_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+        current.append(unit)
+        current_len += len(unit)
         if current_len >= target_chars:
             chunks.append(current)
             current = []
