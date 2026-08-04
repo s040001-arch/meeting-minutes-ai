@@ -15,6 +15,7 @@ from recognition_batch import (
 )
 from run_question_cycle_once import (
     _build_coherence_single_question_payload,
+    _build_final_review_question_payload,
     _mark_unknown_point_asked,
 )
 from recorrect_from_line_answer import _mark_batch_items_answered_in_unknowns
@@ -155,6 +156,35 @@ class CoherenceBatchWhenPausedTests(unittest.TestCase):
             payload["selected_unknown"]["anomaly_id"], "ta_001"
         )
         self.assertNotIn("batch_items", payload["selected_unknown"])
+
+
+class FinalReviewQuestionTests(unittest.TestCase):
+    def test_quality_gate_question_bypasses_value_selection(self) -> None:
+        point = {
+            "type": "final_review",
+            "source": "final_review",
+            "text": "AIがモデルたちが質問してくれて",
+            "estimated_correction": "AIが質問してくれて",
+            "context_position_in_transcript": 12,
+            "status": "open",
+        }
+        with patch("run_question_cycle_once.write_line_pending_context") as writer:
+            payload = _build_final_review_question_payload(
+                job_id="job_x",
+                final_pending=[point],
+                pending_meta={"pending_unknown_points_count": 1},
+                doc_url="",
+            )
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["question_status"], "generated")
+        self.assertEqual(payload["question_format"], "yes_no")
+        self.assertIn("AIが質問してくれて", payload["question_text"])
+        self.assertEqual(
+            payload["selection_audit"]["selection_mode"],
+            "final_quality_gate_fifo",
+        )
+        writer.assert_called_once()
 
 
 class MarkBatchAskedAndAnsweredTests(unittest.TestCase):

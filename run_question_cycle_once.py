@@ -440,6 +440,70 @@ def _maybe_build_coherence_done_payload(
     }
 
 
+def _build_final_review_question_payload(
+    *,
+    job_id: str,
+    final_pending: list[dict],
+    pending_meta: dict,
+    doc_url: str,
+) -> dict | None:
+    """Ask strict quality-gate findings directly, bypassing value re-ranking."""
+    candidates = [
+        item
+        for item in final_pending
+        if str(item.get("source") or "") == "final_review"
+        and str(item.get("text") or item.get("anomaly_word") or "").strip()
+    ]
+    if not candidates:
+        return None
+    selected = min(
+        candidates,
+        key=lambda item: int(item.get("context_position_in_transcript") or 10**9),
+    )
+    quote = str(selected.get("text") or selected.get("anomaly_word") or "").strip()
+    fix = str(selected.get("estimated_correction") or "").strip()
+    selected = dict(selected)
+    if fix:
+        selected["hypothesis"] = fix
+        question_format = "yes_no"
+        question_text = (
+            f"『{quote}』は『{fix}』で合っていますか？"
+            "正しければ「はい」、違う場合は正しい表現、不要なら「削除」と返信してください。"
+        )
+    else:
+        question_format = "free_text"
+        question_text = (
+            f"『{quote}』の正しい表現を教えてください。"
+            "不要なら「削除」、原文で正しければ「そのまま」と返信してください。"
+        )
+    question_id = str(uuid.uuid4())
+    audit = {
+        "selection_mode": "final_quality_gate_fifo",
+        "question_format": question_format,
+        "proposal_impact": 10,
+        **pending_meta,
+    }
+    payload = {
+        "job_id": job_id,
+        "question_id": question_id,
+        "question_status": "generated",
+        "question_format": question_format,
+        "message": "",
+        "selected_unknown": selected,
+        "doc_url": doc_url,
+        "selection_audit": audit,
+        "question_text": question_text,
+    }
+    write_line_pending_context(
+        job_id=job_id,
+        question_id=question_id,
+        question_text=question_text,
+        selected_unknown=selected,
+        selection_audit=audit,
+    )
+    return payload
+
+
 COHERENCE_SNIPPET_RADIUS = 175
 COHERENCE_SNIPPET_MAX = 380
 COHERENCE_PHASE_COMPLETE_MARKER = "coherence_phase_complete_sent.marker"
@@ -1148,6 +1212,14 @@ def main() -> None:
         )
         if coherence_payload is not None:
             result_payload = coherence_payload
+
+    if result_payload is None and not coherence_pending and regular_pending:
+        result_payload = _build_final_review_question_payload(
+            job_id=args.job_id,
+            final_pending=regular_pending,
+            pending_meta=pending_meta,
+            doc_url=doc_url,
+        )
 
     if result_payload is None and not coherence_pending and regular_pending:
         coherence_done = _maybe_build_coherence_done_payload(

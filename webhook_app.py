@@ -329,7 +329,6 @@ def _extract_line_message_actions_with_claude(text: str, pending_context: dict |
         resp = client.messages.create(
             model=LINE_EXTRACTOR_MODEL,
             max_tokens=800,
-            temperature=0,
             system=cached_system(system_prompt),
             messages=[
                 {
