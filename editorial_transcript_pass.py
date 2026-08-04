@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 import os
 import re
 from typing import Any
@@ -100,6 +101,8 @@ def _build_system_prompt(
         "発言録本文だけを出力する。"
         "\n- 入力の段落数・段落順は必ず維持する。段落の結合・分割・並べ替えは禁止。"
         "各入力段落に対して、対応する出力段落を一つだけ返す。"
+        "\n\n【出力形式】入力と同じ要素数・順序のJSON文字列配列のみ。"
+        "説明、キー付きオブジェクト、Markdownコードフェンスは禁止。"
     )
     variable = "\n\n".join(
         block for block in (profile_block, world_block) if block.strip()
@@ -113,6 +116,23 @@ def _extract_response_text(response: Any) -> str:
         for block in response.content
         if getattr(block, "type", "") == "text"
     ).strip()
+
+
+def _parse_paragraph_array(raw: str) -> list[str]:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    parsed = json.loads(text)
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) for item in parsed
+    ):
+        raise ValueError("editorial response is not a string array")
+    return [item.strip() for item in parsed]
 
 
 def _split_paragraphs(text: str) -> list[str]:
@@ -179,6 +199,8 @@ def editorialize_transcript(
         return text, stats
 
     stats["attempted"] = True
+    before_paragraphs = _split_paragraphs(text)
+    stats["total_paragraphs"] = len(before_paragraphs)
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
         response = client.messages.create(
@@ -188,19 +210,20 @@ def editorialize_transcript(
             messages=[
                 {
                     "role": "user",
-                    "content": "以下の発言録を完成稿にしてください。\n\n" + text,
+                    "content": (
+                        "以下の発言録段落配列を完成稿にしてください。\n\n"
+                        + json.dumps(before_paragraphs, ensure_ascii=False)
+                    ),
                 }
             ],
         )
         raw = _extract_response_text(response)
+        after_paragraphs = _parse_paragraph_array(raw)
     except Exception as exc:  # noqa: BLE001
         stats["failed"] = True
         stats["validation_errors"] = [f"request_failed:{exc!r}"]
         return text, stats
 
-    before_paragraphs = _split_paragraphs(text)
-    after_paragraphs = _split_paragraphs(raw)
-    stats["total_paragraphs"] = len(before_paragraphs)
     if len(after_paragraphs) != len(before_paragraphs):
         stats["failed"] = True
         stats["validation_errors"] = [

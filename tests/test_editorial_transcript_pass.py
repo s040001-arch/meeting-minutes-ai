@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -18,12 +19,20 @@ class EditorialTranscriptPassTests(unittest.TestCase):
 
         def fake_create(**kwargs):
             user_text = kwargs["messages"][0]["content"]
-            locked = user_text.split("\n\n", 1)[1]
-            edited = locked.replace(
-                "はい、あの、意味のない崩れです。", ""
-            )
+            paragraphs = json.loads(user_text.split("\n\n", 1)[1])
+            edited = [
+                paragraph.replace(
+                    "はい、あの、意味のない崩れです。", ""
+                )
+                for paragraph in paragraphs
+            ]
             return SimpleNamespace(
-                content=[SimpleNamespace(type="text", text=edited)]
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps(edited, ensure_ascii=False),
+                    )
+                ]
             )
 
         client = MagicMock()
@@ -54,7 +63,12 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         source = "土井様が88kgの話をしました。"
         client = MagicMock()
         client.messages.create.return_value = SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="話をしました。")]
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(["話をしました。"], ensure_ascii=False),
+                )
+            ]
         )
         with patch.dict(
             os.environ,
@@ -92,9 +106,14 @@ class EditorialTranscriptPassTests(unittest.TestCase):
             content=[
                 SimpleNamespace(
                     type="text",
-                    text=source.replace("田中様", "土井様").replace(
-                        "この後も重要な背景と理由を詳しく説明しました。",
-                        "続いて、背景と理由を詳しく説明しました。",
+                    text=json.dumps(
+                        [
+                            source.replace("田中様", "土井様").replace(
+                                "この後も重要な背景と理由を詳しく説明しました。",
+                                "続いて、背景と理由を詳しく説明しました。",
+                            )
+                        ],
+                        ensure_ascii=False,
                     ),
                 )
             ]
