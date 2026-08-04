@@ -137,6 +137,54 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertEqual(stats["fallback_chunk_idx"], [])
         self.assertEqual(stats["restored_token_paragraphs"], [0])
 
+    def test_repairs_paragraph_when_protected_name_was_removed(self) -> None:
+        source = (
+            "田中様がAI活用について説明しました。"
+            "この説明には重要な背景と理由があります。"
+        )
+
+        def fake_create(**kwargs):
+            if "段落配列" in kwargs["messages"][0]["content"]:
+                return SimpleNamespace(
+                    content=[
+                        SimpleNamespace(
+                            type="text",
+                            text=json.dumps(
+                                ["AI活用の背景と理由が説明されました。"],
+                                ensure_ascii=False,
+                            ),
+                        )
+                    ]
+                )
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text="田中様から、AI活用の重要な背景と理由が説明されました。",
+                    )
+                ]
+            )
+
+        client = MagicMock()
+        client.messages.create.side_effect = fake_create
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                result, stats = editorialize_transcript(source)
+        self.assertIn("田中様", result)
+        self.assertTrue(stats["applied"])
+        self.assertEqual(stats["repaired_paragraphs"], [0])
+        self.assertEqual(stats["fallback_chunk_idx"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

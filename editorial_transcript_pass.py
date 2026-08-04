@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import concurrent.futures
 import json
 import os
 import re
@@ -18,6 +19,7 @@ EDITORIAL_TRANSCRIPT_MODEL = OPUS_MODEL_ID
 EDITORIAL_MAX_TOKENS = 32000
 EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
+EDITORIAL_REPAIR_MAX_PARALLEL = 3
 _NUMBER_RE = re.compile(
     r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
     r"時|分|万円|円|%|クラス|名)|\d{2,}(?:[.,、〜～-]\d+)*)",
@@ -184,6 +186,7 @@ def editorialize_transcript(
         "applied_paragraphs": 0,
         "fallback_chunk_idx": [],
         "restored_token_paragraphs": [],
+        "repaired_paragraphs": [],
     }
     if not stats["enabled"]:
         return text, stats
@@ -231,7 +234,8 @@ def editorialize_transcript(
         ]
         return text, stats
 
-    selected: list[str] = []
+    selected: list[str] = list(before_paragraphs)
+    repair_needed: dict[int, tuple[str, str, list[str]]] = {}
     for index, (before, after) in enumerate(
         zip(before_paragraphs, after_paragraphs, strict=True)
     ):
@@ -253,15 +257,92 @@ def editorialize_transcript(
             meeting_profile,
         )
         if errors:
-            selected.append(before)
-            stats["fallback_chunk_idx"].append(index)
-            stats["validation_errors"].extend(
-                f"paragraph_{index}:{error}" for error in errors
-            )
+            repair_needed[index] = (before, repaired, errors)
             continue
-        selected.append(repaired)
+        selected[index] = repaired
         if repaired.strip() != before.strip():
             stats["applied_paragraphs"] += 1
+
+    repair_system = (
+        "あなたは議事録の1段落だけを事実安全に修復する編集者です。"
+        "原文の人名・数値・固有略称を一つも削除・変更せず、編集案の読みやすさを維持して、"
+        "音声認識の崩れ・重複・フィラーを除いた自然な1段落を返してください。"
+        "新しい事実、人名、数値は追加しない。出力は段落本文のみ。"
+    )
+
+    def repair_paragraph(
+        index: int,
+        before: str,
+        draft: str,
+    ) -> tuple[int, str | None, list[str]]:
+        protected = {
+            "numbers": _NUMBER_RE.findall(before),
+            "names": _HONORIFIC_NAME_RE.findall(before),
+            "domain_tokens": _DOMAIN_TOKEN_RE.findall(before),
+        }
+        try:
+            response = client.messages.create(
+                model=stats["model"],
+                max_tokens=4000,
+                system=repair_system,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "original": before,
+                                "edited_draft": draft,
+                                "must_preserve_exactly": protected,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ],
+            )
+            candidate = _extract_response_text(response)
+        except Exception as exc:  # noqa: BLE001
+            return index, None, [f"repair_request_failed:{exc!r}"]
+        candidate, _ = _restore_ordered_tokens(before, candidate, _NUMBER_RE)
+        candidate, _ = _restore_ordered_tokens(
+            before,
+            candidate,
+            _HONORIFIC_NAME_RE,
+        )
+        errors = _validate_editorial_paragraph(
+            before,
+            candidate,
+            meeting_profile,
+        )
+        return index, (candidate if not errors else None), errors
+
+    if repair_needed:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=EDITORIAL_REPAIR_MAX_PARALLEL
+        ) as executor:
+            futures = [
+                executor.submit(repair_paragraph, index, before, draft)
+                for index, (before, draft, _errors) in repair_needed.items()
+            ]
+            repaired_results = {
+                result[0]: result
+                for result in (
+                    future.result()
+                    for future in concurrent.futures.as_completed(futures)
+                )
+            }
+        for index, (before, _draft, initial_errors) in repair_needed.items():
+            _idx, repaired, repair_errors = repaired_results[index]
+            if repaired is None:
+                stats["fallback_chunk_idx"].append(index)
+                stats["validation_errors"].extend(
+                    f"paragraph_{index}:{error}"
+                    for error in (initial_errors + repair_errors)
+                )
+                continue
+            selected[index] = repaired
+            stats["repaired_paragraphs"].append(index)
+            if repaired.strip() != before.strip():
+                stats["applied_paragraphs"] += 1
 
     candidate = "\n\n".join(selected)
     stats["output_chars"] = len(candidate)
