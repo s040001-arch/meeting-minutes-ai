@@ -82,6 +82,42 @@ class EditorialTranscriptPassTests(unittest.TestCase):
             )
         )
 
+    def test_restores_changed_name_in_corresponding_paragraph(self) -> None:
+        source = (
+            "田中様がAI活用について説明しました。"
+            "この後も重要な背景と理由を詳しく説明しました。"
+        )
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=source.replace("田中様", "土井様").replace(
+                        "この後も重要な背景と理由を詳しく説明しました。",
+                        "続いて、背景と理由を詳しく説明しました。",
+                    ),
+                )
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                result, stats = editorialize_transcript(source)
+        self.assertIn("田中様", result)
+        self.assertNotIn("土井様", result)
+        self.assertTrue(stats["applied"])
+        self.assertEqual(stats["fallback_chunk_idx"], [])
+        self.assertEqual(stats["restored_token_paragraphs"], [0])
+
 
 if __name__ == "__main__":
     unittest.main()

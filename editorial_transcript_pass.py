@@ -50,6 +50,26 @@ def _protected_multiset(text: str) -> tuple[Counter[str], Counter[str]]:
     return Counter(_NUMBER_RE.findall(text)), Counter(_HONORIFIC_NAME_RE.findall(text))
 
 
+def _restore_ordered_tokens(
+    source: str,
+    candidate: str,
+    pattern: re.Pattern[str],
+) -> tuple[str, bool]:
+    source_tokens = pattern.findall(source)
+    matches = list(pattern.finditer(candidate))
+    if len(source_tokens) != len(matches):
+        return candidate, False
+    replacements = [
+        (match.start(), match.end(), source_tokens[index])
+        for index, match in enumerate(matches)
+        if match.group(0) != source_tokens[index]
+    ]
+    out = candidate
+    for start, end, token in reversed(replacements):
+        out = out[:start] + token + out[end:]
+    return out, bool(replacements)
+
+
 def _build_system_prompt(
     meeting_profile: dict[str, Any] | None,
 ) -> str | list:
@@ -143,6 +163,7 @@ def editorialize_transcript(
         "total_paragraphs": 0,
         "applied_paragraphs": 0,
         "fallback_chunk_idx": [],
+        "restored_token_paragraphs": [],
     }
     if not stats["enabled"]:
         return text, stats
@@ -191,9 +212,21 @@ def editorialize_transcript(
     for index, (before, after) in enumerate(
         zip(before_paragraphs, after_paragraphs, strict=True)
     ):
-        errors = _validate_editorial_paragraph(
+        repaired, restored_numbers = _restore_ordered_tokens(
             before,
             after,
+            _NUMBER_RE,
+        )
+        repaired, restored_names = _restore_ordered_tokens(
+            before,
+            repaired,
+            _HONORIFIC_NAME_RE,
+        )
+        if restored_numbers or restored_names:
+            stats["restored_token_paragraphs"].append(index)
+        errors = _validate_editorial_paragraph(
+            before,
+            repaired,
             meeting_profile,
         )
         if errors:
@@ -203,8 +236,8 @@ def editorialize_transcript(
                 f"paragraph_{index}:{error}" for error in errors
             )
             continue
-        selected.append(after)
-        if after.strip() != before.strip():
+        selected.append(repaired)
+        if repaired.strip() != before.strip():
             stats["applied_paragraphs"] += 1
 
     candidate = "\n\n".join(selected)
