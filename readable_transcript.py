@@ -245,13 +245,19 @@ def _edit_one_chunk(
     temperature: float = 0,
 ) -> str:
     shielded, mapping = _shield_flagged_tokens(chunk_text)
+    request: dict[str, Any] = {
+        "model": READABLE_MODEL,
+        "max_tokens": READABLE_MAX_TOKENS,
+        "timeout": READABLE_TIMEOUT_SEC,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": shielded}],
+    }
+    # Sonnet 5 rejects the legacy sampling parameter with HTTP 400.
+    # Keep it only for older snapshots used by an explicit override/test.
+    if not READABLE_MODEL.startswith("claude-sonnet-5"):
+        request["temperature"] = temperature
     resp = client.messages.create(
-        model=READABLE_MODEL,
-        max_tokens=READABLE_MAX_TOKENS,
-        temperature=temperature,
-        timeout=READABLE_TIMEOUT_SEC,
-        system=system_prompt,
-        messages=[{"role": "user", "content": shielded}],
+        **request,
     )
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:

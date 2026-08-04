@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from generate_minutes_transcript import build_minutes_text
 from readable_transcript import (
@@ -87,6 +87,21 @@ class PolishTests(unittest.TestCase):
         self.assertIn("75万円", out)
         self.assertIn("85万円", out)
         self.assertNotIn("ござい。", out)
+
+    def test_sonnet5_request_omits_deprecated_temperature(self) -> None:
+        from readable_transcript import _edit_one_chunk
+
+        client = MagicMock()
+        block = MagicMock(type="text", text="本文です。")
+        client.messages.create.return_value = MagicMock(content=[block])
+        self.assertEqual(
+            _edit_one_chunk(client, "本文です。", "system", temperature=0.4),
+            "本文です。",
+        )
+        self.assertNotIn(
+            "temperature",
+            client.messages.create.call_args.kwargs,
+        )
 
 
 class GenerateFileTests(unittest.TestCase):
