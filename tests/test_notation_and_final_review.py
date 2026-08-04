@@ -190,6 +190,7 @@ class PromptInjectionTests(unittest.TestCase):
         self.assertIn("会議プロファイルの参加者名は", text)
         self.assertIn("両群にそれぞれ", text)
         self.assertIn("組織・役割が異なるなら表記ゆれとして報告しない", text)
+        self.assertIn("例: PLS", text)
 
     def test_final_review_defaults_to_opus(self) -> None:
         from anthropic_prompt_cache import OPUS_MODEL_ID

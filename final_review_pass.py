@@ -63,6 +63,7 @@ def resolve_final_review_model() -> str:
 def _build_system_prompt(
     notation_block: str,
     meeting_profile_block: str = "",
+    world_knowledge_block: str = "",
 ) -> str | list:
     static_prompt = (
         "あなたは完成済みの議事録（要約セクションと発言録・整文）の最終レビュアーです。"
@@ -105,6 +106,10 @@ def _build_system_prompt(
         "\n- 同じ部署の説明内でも、部長になる人物と現担当者など複数人物が"
         "併存し得る。発言が質問・復唱・役割確認として成立するなら、"
         "姓が異なるだけで同一人物と決めつけず報告しない。"
+        "\n- 会議プロファイルおよび世界知識に定義済みの略称・組織・サービス"
+        "（例: PLS）は正しい表記として扱い、推測で展開・変更しない。"
+        "\n- 親会社・グループ名・子会社名・部署名は併存し得るため、"
+        "表記が違うだけで同一組織のゆれと決めつけない。"
         "\n- 会議プロファイルの参加者名はファイル名等から得た強い根拠である。"
         "近接文脈で同じ役職・人物を指し、一方の姓だけが参加者一覧にあり、"
         "別人を示す根拠がなければ、参加者一覧の姓を正として high の fix を出す。"
@@ -140,7 +145,13 @@ def _build_system_prompt(
         f"\n\n問題がなければ空配列 [] を返す。最大{FINAL_REVIEW_MAX_FINDINGS}件。"
     )
     variable_blocks = "\n\n".join(
-        x for x in (meeting_profile_block, notation_block) if x.strip()
+        x
+        for x in (
+            meeting_profile_block,
+            world_knowledge_block,
+            notation_block,
+        )
+        if x.strip()
     )
     return cached_system(static_prompt, variable_blocks)
 
@@ -184,18 +195,32 @@ def _call_reviewer(
     except Exception as e:  # noqa: BLE001
         print(f"final_review_notation_block_failed={e!r}")
     profile_block = ""
+    world_knowledge_block = ""
     try:
         from meeting_profile import format_meeting_profile_for_prompt
 
         profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
     except Exception as e:  # noqa: BLE001
         print(f"final_review_profile_block_failed={e!r}")
+    try:
+        from world_knowledge_store import get_runtime_knowledge_block
+
+        world_knowledge_block = get_runtime_knowledge_block(
+            meeting_profile=meeting_profile or {},
+            purpose="detection",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"final_review_world_knowledge_failed={e!r}")
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=resolve_final_review_model(),
         max_tokens=FINAL_REVIEW_MAX_TOKENS,
         timeout=FINAL_REVIEW_TIMEOUT_SEC,
-        system=_build_system_prompt(notation_block, profile_block),
+        system=_build_system_prompt(
+            notation_block,
+            profile_block,
+            world_knowledge_block,
+        ),
         messages=[
             {
                 "role": "user",
