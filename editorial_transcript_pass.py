@@ -20,6 +20,7 @@ EDITORIAL_MAX_TOKENS = 32000
 EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
 EDITORIAL_REPAIR_MAX_PARALLEL = 3
+EDITORIAL_FINDING_RESOLVER_MAX_ITEMS = 20
 _NUMBER_RE = re.compile(
     r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
     r"時|分|万円|円|%|クラス|名)|\d{2,}(?:[.,、〜～-]\d+)*)",
@@ -375,3 +376,132 @@ def generate_editorial_transcript(
         f'"output_chars":{stats["output_chars"]}}}'
     )
     return editorial, stats, path
+
+
+def resolve_reader_blocking_findings(
+    *,
+    text: str,
+    findings: list[dict[str, Any]],
+    meeting_profile: dict[str, Any] | None = None,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve non-factual medium garbles after the independent final review."""
+    if not is_editorial_transcript_enabled():
+        return text, [], []
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return text, [], [{"reason": "anthropic_api_key_missing"}]
+
+    candidates: list[dict[str, Any]] = []
+    for finding in findings:
+        finding_type = str(finding.get("type") or "").strip().lower()
+        confidence = str(finding.get("confidence") or "").strip().lower()
+        quote = str(finding.get("quote") or "").strip()
+        issue = str(finding.get("issue") or "").strip()
+        if (
+            finding_type not in {"unnatural", "fragment"}
+            or confidence not in {"high", "medium"}
+            or not quote
+            or quote not in text
+        ):
+            continue
+        if any(
+            marker in issue
+            for marker in ("人名", "数値", "表記ゆれ", "固有名詞", "同一人物")
+        ):
+            continue
+        position = text.find(quote)
+        candidates.append(
+            {
+                "index": len(candidates),
+                "quote": quote,
+                "issue": issue,
+                "context": text[
+                    max(0, position - 220) : position + len(quote) + 220
+                ],
+            }
+        )
+        if len(candidates) >= EDITORIAL_FINDING_RESOLVER_MAX_ITEMS:
+            break
+    if not candidates:
+        return text, [], []
+
+    system = (
+        "あなたは議事録の最終整文で残った、読者の理解を妨げる崩れだけを修復します。"
+        "各項目のquoteを置換する自然なreplacementをJSON配列で返してください。"
+        "正確な原語が不明でも、前後から確実に言える範囲へ一般化し、意味不明な断片を残さない。"
+        "主張・理由・事実は残し、人名・数値・固有名詞を変更・削除・追加しない。"
+        "推測で新しい具体情報を作らない。修復不能ならreplacementを空文字にする。"
+        '出力形式: [{"index":0,"replacement":"..."}] のみ。'
+    )
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
+        response = client.messages.create(
+            model=resolve_editorial_model(),
+            max_tokens=8000,
+            system=system,
+            messages=[
+                {
+                    "role": "user",
+                    "content": json.dumps(candidates, ensure_ascii=False),
+                }
+            ],
+        )
+        raw = _extract_response_text(response)
+        parsed = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        return text, [], [{"reason": f"resolver_request_failed:{exc!r}"}]
+    if not isinstance(parsed, list):
+        return text, [], [{"reason": "resolver_output_not_list"}]
+
+    by_index: dict[int, str] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        by_index[index] = str(item.get("replacement") or "").strip()
+    out = text
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        quote = candidate["quote"]
+        replacement = by_index.get(candidate["index"], "")
+        if not replacement or replacement == quote or quote not in out:
+            skipped.append({**candidate, "reason": "empty_or_not_present"})
+            continue
+        before_numbers, before_names = _protected_multiset(quote)
+        after_numbers, after_names = _protected_multiset(replacement)
+        if before_numbers != after_numbers or before_names != after_names:
+            skipped.append({**candidate, "reason": "protected_tokens_changed"})
+            continue
+        if not (0.2 <= len(replacement) / max(1, len(quote)) <= 2.5):
+            skipped.append({**candidate, "reason": "replacement_ratio"})
+            continue
+        proposed = out.replace(quote, replacement, 1)
+        integrity = verify_fact_integrity(
+            out,
+            proposed,
+            meeting_profile=meeting_profile,
+        )
+        if not integrity.ok:
+            skipped.append(
+                {
+                    **candidate,
+                    "reason": "fact_integrity",
+                    "violations": integrity.violations,
+                }
+            )
+            continue
+        out = proposed
+        applied.append(
+            {
+                "type": "editorial_resolver",
+                "quote": quote,
+                "issue": candidate["issue"],
+                "fix": replacement,
+                "confidence": "high",
+            }
+        )
+    return out, applied, skipped

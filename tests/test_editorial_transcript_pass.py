@@ -6,7 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from editorial_transcript_pass import editorialize_transcript
+from editorial_transcript_pass import (
+    editorialize_transcript,
+    resolve_reader_blocking_findings,
+)
 
 
 class EditorialTranscriptPassTests(unittest.TestCase):
@@ -184,6 +187,52 @@ class EditorialTranscriptPassTests(unittest.TestCase):
         self.assertTrue(stats["applied"])
         self.assertEqual(stats["repaired_paragraphs"], [0])
         self.assertEqual(stats["fallback_chunk_idx"], [])
+
+    def test_resolves_non_factual_reader_blocking_garble(self) -> None:
+        text = "店舗指導のテープやここに読むと、現場データと統合できます。"
+        finding = {
+            "type": "fragment",
+            "quote": "店舗指導のテープやここに読むと",
+            "issue": "意味不明な崩れ断片",
+            "fix": "",
+            "confidence": "medium",
+        }
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(
+                        [
+                            {
+                                "index": 0,
+                                "replacement": "店舗指導のノウハウを読み込ませると",
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "EDITORIAL_TRANSCRIPT_ENABLED": "1",
+                "ANTHROPIC_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            with patch(
+                "editorial_transcript_pass.anthropic.Anthropic",
+                return_value=client,
+            ):
+                result, applied, skipped = resolve_reader_blocking_findings(
+                    text=text,
+                    findings=[finding],
+                )
+        self.assertIn("店舗指導のノウハウ", result)
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(skipped, [])
 
 
 if __name__ == "__main__":

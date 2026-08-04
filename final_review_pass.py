@@ -338,6 +338,22 @@ def run_final_review(
         candidate = out_text
         if mode == "apply":
             candidate, applied, skipped = apply_safe_fixes(out_text, findings)
+            try:
+                from editorial_transcript_pass import (
+                    resolve_reader_blocking_findings,
+                )
+
+                candidate, resolved, resolver_skipped = (
+                    resolve_reader_blocking_findings(
+                        text=candidate,
+                        findings=findings,
+                        meeting_profile=meeting_profile,
+                    )
+                )
+                applied.extend(resolved)
+                skipped.extend(resolver_skipped)
+            except Exception as e:  # noqa: BLE001
+                print(f"final_review_editorial_resolver_failed={e!r}")
         report["rounds"].append(
             {
                 "round": round_no,
