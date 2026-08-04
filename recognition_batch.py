@@ -1036,9 +1036,21 @@ def _finalize_batch_item_action(
     estimated_correction がある項目でユーザーが OK と答えた場合は候補を採用する。
     """
     cand = str(item.get("estimated_correction") or "").strip()
+    surface_raw = _normalize_answer_surface(token).strip()
+    compact_raw = surface_raw.replace(" ", "")
+    ok_suffix = re.fullmatch(r"(.+?)(?:OK|ＯＫ|ok|okay)", compact_raw)
+    if ok_suffix:
+        approved = ok_suffix.group(1).strip()
+        word = str(item.get("word") or "").strip()
+        if cand and approved == cand.replace(" ", ""):
+            if str(item.get("question_kind") or "") == "span_hypothesis":
+                cand = sanitize_hypothesis_fillers(cand)
+            return "correct", cand
+        if word and approved == word.replace(" ", ""):
+            return "keep", ""
     if action != "keep" or not cand:
         return action, correction
-    surface = _normalize_answer_surface(token).lower().replace(" ", "")
+    surface = surface_raw.lower().replace(" ", "")
     if surface in {"ok", "okay"}:
         if str(item.get("question_kind") or "") == "span_hypothesis":
             cand = sanitize_hypothesis_fillers(cand)

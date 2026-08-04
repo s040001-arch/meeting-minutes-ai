@@ -396,6 +396,31 @@ class BatchAnswerParseTests(unittest.TestCase):
         self.assertEqual(action, "delete")
         self.assertEqual(corr, "")
 
+    def test_candidate_followed_by_ok_does_not_insert_ok_literal(self) -> None:
+        from recognition_batch import parse_batch_answer
+
+        items = [
+            {
+                "anomaly_id": "a1",
+                "word": "違反",
+                "estimated_correction": "離反",
+            },
+            {
+                "anomaly_id": "a2",
+                "word": "KPI3",
+                "estimated_correction": "KPIツリー",
+            },
+        ]
+        parsed = parse_batch_answer(
+            answer_text="1.離反OK\n2.KPIツリーOK",
+            items=items,
+            api_key=None,
+        )
+        self.assertEqual(parsed[0]["correction"], "離反")
+        self.assertEqual(parsed[1]["correction"], "KPIツリー")
+        self.assertNotIn("OK", parsed[0]["correction"])
+        self.assertNotIn("OK", parsed[1]["correction"])
+
 
 class SmartDeleteTests(unittest.TestCase):
     """delete のスマート削除: 断片のみ最小除去 + 削除のみ検証。"""
