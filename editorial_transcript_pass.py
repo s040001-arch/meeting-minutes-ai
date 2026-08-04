@@ -467,9 +467,14 @@ def resolve_reader_blocking_findings(
     text: str,
     findings: list[dict[str, Any]],
     meeting_profile: dict[str, Any] | None = None,
+    force: bool = False,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve non-factual medium garbles after the independent final review."""
-    if not is_editorial_transcript_enabled():
+    """Resolve non-factual medium garbles after the independent final review.
+
+    force=True は統合仕上げパス用で、EDITORIAL_TRANSCRIPT_ENABLED に
+    依存せず修復を実行する。
+    """
+    if not force and not is_editorial_transcript_enabled():
         return text, [], []
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:

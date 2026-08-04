@@ -445,6 +445,39 @@ def generate_readable_transcript_with_stats(
     meeting_profile: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], str]:
     """Write readable transcript file; return (text, stats, output_path)."""
+    # 統合仕上げパス（UNIFIED_FINISHING_ENABLED=1）:
+    # 全文書き換え（整文チャンク・完成稿・レビュー反復）を行わず、
+    # 監査→ピンポイント修正→検証1回で仕上げる。従来パスは既定のまま。
+    try:
+        from unified_finishing_pass import (
+            is_unified_finishing_enabled,
+            run_unified_finishing,
+        )
+
+        if is_unified_finishing_enabled():
+            final_text, unified_stats, review_report = run_unified_finishing(
+                job_dir=job_dir,
+                text=source_text,
+                meeting_profile=meeting_profile,
+            )
+            stats = {
+                "total_chunks": 0,
+                "failed_chunk_idx": [],
+                "retried_ok": 0,
+                "split_recovered": 0,
+                "unified_finishing": unified_stats,
+                "final_review": review_report,
+            }
+            out_path = readable_transcript_path(job_dir)
+            os.makedirs(job_dir, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(final_text)
+            return final_text, stats, out_path
+    except Exception as e:  # noqa: BLE001
+        # 統合パスの予期しない失敗は従来パスへフォールバック（従来側の
+        # 品質ゲートがそのまま効く）。
+        print(f"unified_finishing_fallback_to_legacy={e!r}")
+
     polished, stats = polish_transcript_text_with_stats(source_text, meeting_profile)
 
     # 読者向け全文完成稿パス。数値・人名等はプレースホルダで固定し、
