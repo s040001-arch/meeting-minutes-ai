@@ -167,6 +167,80 @@ class UnifiedFinishingPassTests(unittest.TestCase):
         self.assertEqual(stage["n"], 3)
         self.assertFalse(stats["failed"])
 
+    def test_dense_garble_paragraph_is_repaired_as_a_unit(self) -> None:
+        garble1 = "あんまり見と一緒でフレームアップめっちゃいます。"
+        garble2 = "もう一言少なくなって、今現場アップ。"
+        paragraph = (
+            "山田さんが今期の計画について詳しく説明しました。"
+            + garble1
+            + garble2
+            + "続いて質疑応答があり、次回までの宿題を確認して次の議題に移りました。"
+        )
+        repaired = (
+            "山田さんが今期の計画について詳しく説明しました。"
+            "続いて質疑応答があり、次回までの宿題を確認して次の議題に移りました。"
+        )
+        findings = [
+            {
+                "type": "fragment",
+                "quote": garble1,
+                "issue": "意味不明な崩れ断片",
+                "fix": "",
+                "confidence": "medium",
+            },
+            {
+                "type": "fragment",
+                "quote": garble2,
+                "issue": "文として成立していない",
+                "fix": "",
+                "confidence": "medium",
+            },
+        ]
+        stage = {"n": 0}
+
+        def fake_reviewer(window_text, meeting_profile=None):
+            stage["n"] += 1
+            if stage["n"] == 1:
+                return findings
+            return []
+
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=repaired)]
+        )
+        with tempfile.TemporaryDirectory() as job_dir:
+            with patch.dict(
+                os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False
+            ):
+                with patch(
+                    "final_review_pass._call_reviewer",
+                    side_effect=fake_reviewer,
+                ), patch(
+                    "editorial_transcript_pass.resolve_reader_blocking_findings",
+                    side_effect=_no_resolver,
+                ), patch(
+                    "unified_finishing_pass.anthropic.Anthropic",
+                    return_value=client,
+                ):
+                    out, stats, report = run_unified_finishing(
+                        job_dir=job_dir,
+                        text=paragraph,
+                        meeting_profile={},
+                    )
+        self.assertNotIn("フレームアップめっちゃいます", out)
+        self.assertNotIn("今現場アップ", out)
+        self.assertIn("山田さん", out)
+        self.assertEqual(report["findings"], [])
+        self.assertTrue(
+            any(
+                f.get("type") == "dense_paragraph_repair"
+                for f in report["applied"]
+            )
+        )
+
     def test_reflow_splits_walls_without_changing_characters(self) -> None:
         sentence = "これは長い説明の文であり内容を保持したまま分割されるべきです。"
         wall = sentence * 40

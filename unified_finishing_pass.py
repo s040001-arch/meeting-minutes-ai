@@ -29,6 +29,8 @@ import re
 import time
 from typing import Any
 
+import anthropic
+
 UNIFIED_REPORT_FILENAME = "unified_finishing_report.json"
 # 監査窓は検出品質が文書内の位置に依存しないための分割。窓ごとに全文脈は
 # 見えないが、事実照合は検証段（全文1回）と gate が担う。
@@ -36,6 +38,11 @@ AUDIT_WINDOW_TARGET_CHARS = 12_000
 AUDIT_MAX_PARALLEL = 3
 # 読者阻害の崩れの外科的修復は1ラウンドで最大この件数まで扱う。
 UNIFIED_RESOLVER_MAX_ITEMS = 60
+# 未解決の読者阻害がこの件数以上集中する段落は、段落単位で修復する。
+# スパン置換では直せない「段落まるごと崩れ」への限定的なフォールバック。
+DENSE_PARAGRAPH_MIN_FINDINGS = 2
+DENSE_REPAIR_MAX_PARALLEL = 3
+DENSE_REPAIR_TIMEOUT_SEC = 600
 # 長い無段落テキストの機械的な段落再割り（LLM不使用・事実安全）
 REFLOW_PARAGRAPH_MAX_CHARS = 800
 REFLOW_TARGET_CHARS = 400
@@ -143,6 +150,132 @@ def _audit_windows(
                 seen_quotes.add(quote)
             findings.append(finding)
     return findings, errors, len(windows)
+
+
+def _repair_dense_paragraphs(
+    text: str,
+    unresolved_findings: list[dict[str, Any]],
+    meeting_profile: dict[str, Any] | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Rewrite only paragraphs where reader-blocking garbles cluster.
+
+    スパン置換で直せない密集した崩れ段落だけを、事実検証付きで段落単位に
+    修復する。検証に落ちた段落は原文のまま残り、その問題は検証段の
+    findings として質問に回る。
+    """
+    from editorial_transcript_pass import (
+        _extract_response_text,
+        _validate_editorial_paragraph,
+        is_reader_blocking_finding,
+        resolve_editorial_model,
+    )
+
+    paragraphs = _split_paragraphs(text)
+    per_paragraph: dict[int, list[dict[str, Any]]] = {}
+    for finding in unresolved_findings:
+        if not is_reader_blocking_finding(finding):
+            continue
+        quote = str(finding.get("quote") or "").strip()
+        if not quote:
+            continue
+        for index, paragraph in enumerate(paragraphs):
+            if quote in paragraph:
+                per_paragraph.setdefault(index, []).append(finding)
+                break
+    targets = {
+        index: items
+        for index, items in per_paragraph.items()
+        if len(items) >= DENSE_PARAGRAPH_MIN_FINDINGS
+    }
+    if not targets:
+        return text, []
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return text, []
+
+    client = anthropic.Anthropic(api_key=api_key, timeout=DENSE_REPAIR_TIMEOUT_SEC)
+    model = resolve_editorial_model()
+    system = (
+        "あなたは議事録の1段落だけを、読者が理解できる形に修復する編集者です。"
+        "最優先は、後で読む人がストレスなく理解できることです。"
+        "\n- 指摘された崩れ・意味不明箇所を、前後の文脈から確実に言える内容へ直す。"
+        "\n- 正確に復元できない低価値の崩れ片は削除する。内容上必要だが細部だけ"
+        "不明なら、確実に言える範囲へ一般化する。"
+        "\n- 人名・数値・固有名詞は一つも変更・削除・追加しない。"
+        "新しい事実・推測の固有名詞を作らない。"
+        "\n- 出力は修復後の段落本文のみ。注釈・前置き・要約は禁止。"
+    )
+
+    def repair_one(
+        index: int,
+        paragraph: str,
+        issues: list[dict[str, Any]],
+    ) -> tuple[int, str | None]:
+        payload = {
+            "paragraph": paragraph,
+            "issues": [
+                {
+                    "quote": str(f.get("quote") or "")[:120],
+                    "issue": str(f.get("issue") or "")[:200],
+                }
+                for f in issues
+            ],
+        }
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=4000,
+                system=system,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    }
+                ],
+            )
+            candidate = _extract_response_text(response)
+        except Exception as exc:  # noqa: BLE001
+            print(f"dense_repair_request_failed index={index} error={exc!r}")
+            return index, None
+        if not candidate.strip():
+            return index, None
+        errors = _validate_editorial_paragraph(
+            paragraph,
+            candidate,
+            meeting_profile,
+        )
+        if errors:
+            print(f"dense_repair_rejected index={index} errors={errors}")
+            return index, None
+        return index, candidate
+
+    applied: list[dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=DENSE_REPAIR_MAX_PARALLEL
+    ) as executor:
+        futures = [
+            executor.submit(repair_one, index, paragraphs[index], items)
+            for index, items in targets.items()
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            index, candidate = future.result()
+            if candidate is None:
+                continue
+            paragraphs[index] = candidate
+            applied.append(
+                {
+                    "type": "dense_paragraph_repair",
+                    "quote": "\n".join(
+                        str(f.get("quote") or "") for f in targets[index]
+                    )[:200],
+                    "fix": candidate[:200],
+                    "confidence": "high",
+                    "paragraph_index": index,
+                }
+            )
+    if not applied:
+        return text, []
+    return "\n\n".join(paragraphs) + "\n", applied
 
 
 def run_unified_finishing(
@@ -253,6 +386,23 @@ def run_unified_finishing(
             skipped.extend(resolver_skipped)
         except Exception as exc:  # noqa: BLE001
             print(f"unified_resolver_failed={exc!r}")
+        # 崩れが集中して残った段落は段落単位で修復（事実検証付き）。
+        applied_quotes = {str(f.get("quote") or "") for f in applied}
+        still_unresolved = [
+            f
+            for f in findings
+            if str(f.get("quote") or "")
+            and str(f.get("quote") or "") not in applied_quotes
+        ]
+        try:
+            text_out, dense_applied = _repair_dense_paragraphs(
+                text_out,
+                still_unresolved,
+                profile,
+            )
+            applied.extend(dense_applied)
+        except Exception as exc:  # noqa: BLE001
+            print(f"unified_dense_repair_failed={exc!r}")
         return text_out, applied, skipped
 
     out_text, applied, skipped = fix_round(out_text, audit_findings)
