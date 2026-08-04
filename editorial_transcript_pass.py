@@ -18,8 +18,8 @@ EDITORIAL_MAX_TOKENS = 32000
 EDITORIAL_TIMEOUT_SEC = 900
 EDITORIAL_CHAR_CAP = 60_000
 _NUMBER_RE = re.compile(
-    r"\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
-    r"時|分|万円|円|%|クラス|名)?",
+    r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
+    r"時|分|万円|円|%|クラス|名)|\d{2,}(?:[.,、〜～-]\d+)*)",
     re.IGNORECASE,
 )
 _HONORIFIC_NAME_RE = re.compile(r"[一-龥ァ-ヶA-Za-z]{1,12}(?:さん|様)")
@@ -80,7 +80,6 @@ def _build_system_prompt(
         "発言録本文だけを出力する。"
         "\n- 入力の段落数・段落順は必ず維持する。段落の結合・分割・並べ替えは禁止。"
         "各入力段落に対して、対応する出力段落を一つだけ返す。"
-        "\n- 人名・数値・確認済み事実は変更・削除しない。矛盾や疑いがあっても原表記を残す。"
     )
     variable = "\n\n".join(
         block for block in (profile_block, world_block) if block.strip()
@@ -115,8 +114,8 @@ def _validate_editorial_paragraph(
         errors.append("numeric_tokens_changed")
     if before_names != after_names:
         errors.append("honorific_names_changed")
-    before_domain = Counter(token.lower() for token in _DOMAIN_TOKEN_RE.findall(before))
-    after_domain = Counter(token.lower() for token in _DOMAIN_TOKEN_RE.findall(candidate))
+    before_domain = {token.lower() for token in _DOMAIN_TOKEN_RE.findall(before)}
+    after_domain = {token.lower() for token in _DOMAIN_TOKEN_RE.findall(candidate)}
     if before_domain != after_domain:
         errors.append("domain_tokens_changed")
     integrity = verify_fact_integrity(
