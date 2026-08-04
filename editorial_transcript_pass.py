@@ -469,6 +469,7 @@ def resolve_reader_blocking_findings(
     meeting_profile: dict[str, Any] | None = None,
     force: bool = False,
     max_items: int | None = None,
+    extra_knowledge: str = "",
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Resolve non-factual medium garbles after the independent final review.
 
@@ -522,6 +523,10 @@ def resolve_reader_blocking_findings(
         "その項目は自動処理せず、内容を知る担当者へ質問として送られる。"
         '\n出力形式: [{"index":0,"replacement":"..."}] のみ。'
     )
+    if extra_knowledge.strip():
+        # 担当者が確定した回答は最優先の事実。序盤の回答で後半の同種の
+        # 崩れが推測可能になる（カスケード解決）。
+        system = system + "\n\n" + extra_knowledge.strip()
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=EDITORIAL_TIMEOUT_SEC)
         response = client.messages.create(

@@ -152,10 +152,51 @@ def _audit_windows(
     return findings, errors, len(windows)
 
 
+ANSWERED_KNOWLEDGE_MAX_ITEMS = 40
+
+
+def _answered_knowledge_block(job_dir: str) -> str:
+    """確定済みのLINE回答を修復プロンプト用の知識ブロックにする。
+
+    序盤の質問への回答（正しい社名・教材名・数値など）は、後半に残る
+    同種の崩れを推測可能にする。担当者の回答は最優先の事実として渡す。
+    """
+    path = os.path.join(job_dir, "unknown_points.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, list):
+        return ""
+    lines: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in {"answered", "resolved", "done", "closed"}:
+            continue
+        answer = str(item.get("answer") or "").strip()
+        topic = str(
+            item.get("text") or item.get("anomaly_word") or ""
+        ).strip()
+        if not answer or not topic:
+            continue
+        lines.append(f"- 確認事項: {topic[:100]} → 回答: {answer[:160]}")
+        if len(lines) >= ANSWERED_KNOWLEDGE_MAX_ITEMS:
+            break
+    if not lines:
+        return ""
+    return "【担当者が確定済みの回答（最優先の事実として尊重する）】\n" + "\n".join(
+        lines
+    )
+
+
 def _repair_dense_paragraphs(
     text: str,
     unresolved_findings: list[dict[str, Any]],
     meeting_profile: dict[str, Any] | None,
+    extra_knowledge: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     """Rewrite only paragraphs where reader-blocking garbles cluster.
 
@@ -205,6 +246,8 @@ def _repair_dense_paragraphs(
         "新しい事実・推測の固有名詞を作らない。"
         "\n- 出力は修復後の段落本文のみ。注釈・前置き・要約は禁止。"
     )
+    if extra_knowledge.strip():
+        system = system + "\n\n" + extra_knowledge.strip()
 
     def repair_one(
         index: int,
@@ -337,6 +380,10 @@ def run_unified_finishing(
             profile = {}
 
     out_text = reflow_long_paragraphs(text.strip()) + "\n"
+    # 確定済み回答のカスケード: 回答が反映されるたびに再実行されるこのパスで、
+    # 序盤の回答知識を使って後半の残存崩れを解決できるようにする。
+    answered_knowledge = _answered_knowledge_block(job_dir)
+    stats["answered_knowledge_items"] = answered_knowledge.count("\n- ")
 
     # 1. 監査: 検出専用・窓分割並列。修正はまだ行わない。
     try:
@@ -380,6 +427,7 @@ def run_unified_finishing(
                     meeting_profile=profile,
                     force=True,
                     max_items=UNIFIED_RESOLVER_MAX_ITEMS,
+                    extra_knowledge=answered_knowledge,
                 )
             )
             applied.extend(resolved)
@@ -399,6 +447,7 @@ def run_unified_finishing(
                 text_out,
                 still_unresolved,
                 profile,
+                extra_knowledge=answered_knowledge,
             )
             applied.extend(dense_applied)
         except Exception as exc:  # noqa: BLE001

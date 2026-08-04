@@ -13,7 +13,15 @@ from unified_finishing_pass import (
 )
 
 
-def _no_resolver(*, text, findings, meeting_profile=None, force=False):
+def _no_resolver(
+    *,
+    text,
+    findings,
+    meeting_profile=None,
+    force=False,
+    max_items=None,
+    extra_knowledge="",
+):
     return text, [], []
 
 
@@ -240,6 +248,68 @@ class UnifiedFinishingPassTests(unittest.TestCase):
                 for f in report["applied"]
             )
         )
+
+    def test_answered_line_knowledge_is_passed_to_resolver(self) -> None:
+        """序盤の確定回答が後半の崩れ解決の文脈として渡される（カスケード）。"""
+        text = "ユーデーの教材の話です。\n\n以上です。"
+        finding = {
+            "type": "unnatural",
+            "quote": "ユーデーの教材の話です。",
+            "issue": "『ユーデー』が意味不明",
+            "fix": "",
+            "confidence": "medium",
+        }
+        captured = {}
+
+        def capturing_resolver(
+            *,
+            text,
+            findings,
+            meeting_profile=None,
+            force=False,
+            max_items=None,
+            extra_knowledge="",
+        ):
+            captured["knowledge"] = extra_knowledge
+            return text, [], []
+
+        def fake_reviewer(window_text, meeting_profile=None):
+            return [finding] if "ユーデー" in window_text else []
+
+        with tempfile.TemporaryDirectory() as job_dir:
+            with open(
+                os.path.join(job_dir, "unknown_points.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(
+                    [
+                        {
+                            "text": "eラーニングの教材名の確認",
+                            "status": "answered",
+                            "answer": "教材名は「Udemy（ユーデミー）」で確定",
+                        }
+                    ],
+                    handle,
+                    ensure_ascii=False,
+                )
+            with patch.dict(
+                os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False
+            ):
+                with patch(
+                    "final_review_pass._call_reviewer",
+                    side_effect=fake_reviewer,
+                ), patch(
+                    "editorial_transcript_pass.resolve_reader_blocking_findings",
+                    side_effect=capturing_resolver,
+                ):
+                    _out, stats, _report = run_unified_finishing(
+                        job_dir=job_dir,
+                        text=text,
+                        meeting_profile={},
+                    )
+        self.assertIn("Udemy", captured["knowledge"])
+        self.assertEqual(stats["answered_knowledge_items"], 1)
 
     def test_reflow_splits_walls_without_changing_characters(self) -> None:
         sentence = "これは長い説明の文であり内容を保持したまま分割されるべきです。"
