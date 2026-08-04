@@ -172,6 +172,25 @@ class ChunkRetryTests(unittest.TestCase):
         # 生テキスト採用（内容は保持される）
         self.assertIn("75万円", out)
 
+    def test_long_failed_chunk_is_recovered_by_smaller_splits(self) -> None:
+        from readable_transcript import polish_transcript_text_with_stats
+
+        paragraph = "これは一般語の説明です。" * 70
+        source = "\n\n".join([paragraph, paragraph, paragraph])
+
+        def length_sensitive(_client, chunk, _system, **_kw):
+            return "" if len(chunk) > 1800 else chunk
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+            with patch(
+                "readable_transcript._edit_one_chunk",
+                side_effect=length_sensitive,
+            ):
+                out, stats = polish_transcript_text_with_stats(source)
+        self.assertEqual(stats["failed_chunk_idx"], [])
+        self.assertEqual(stats["split_recovered"], 1)
+        self.assertIn("一般語の説明", out)
+
 
 if __name__ == "__main__":
     unittest.main()

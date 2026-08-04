@@ -67,6 +67,92 @@ class NotationScannerTests(unittest.TestCase):
         self.assertEqual(build_notation_block_for_text(""), "")
 
 
+class PersonNameVariantScannerTests(unittest.TestCase):
+    """山口/川口 型（非同音の姓の聞き取り揺れ）の回帰テスト（2026-07 THR案件）。"""
+
+    def test_detects_yamaguchi_kawaguchi_mix(self) -> None:
+        from notation_consistency import scan_person_name_variants
+
+        text = (
+            "お名前お伺いしてもいいですか？どなたが今いらっしゃったんですか？"
+            "山口という——川口さんか、山口さん、僕は面識はないかな。"
+        )
+        groups = scan_person_name_variants(text)
+        surfaces = _surfaces(groups)
+        self.assertIn("山口", surfaces)
+        self.assertIn("川口", surfaces)
+
+    def test_detects_variants_with_title_suffix(self) -> None:
+        from notation_consistency import scan_person_name_variants
+
+        text = "山口部長が出向で来られました。川口部長は面識がないですね。"
+        groups = scan_person_name_variants(text)
+        surfaces = _surfaces(groups)
+        self.assertIn("山口", surfaces)
+        self.assertIn("川口", surfaces)
+
+    def test_single_name_yields_no_groups(self) -> None:
+        from notation_consistency import scan_person_name_variants
+
+        text = "山口さんが担当です。山口部長にも共有します。加藤様も同席です。"
+        self.assertEqual(scan_person_name_variants(text), [])
+
+    def test_unrelated_names_are_not_grouped(self) -> None:
+        from notation_consistency import scan_person_name_variants
+
+        # 2字違い（相原/加藤）は揺れ候補にしない
+        text = "相原さんと加藤さんが参加します。"
+        self.assertEqual(scan_person_name_variants(text), [])
+
+    def test_block_contains_names_and_instruction(self) -> None:
+        from notation_consistency import (
+            format_person_name_block,
+            scan_person_name_variants,
+        )
+
+        text = "山口という方が来られて。川口さんかもしれないです。"
+        block = format_person_name_block(scan_person_name_variants(text))
+        self.assertIn("人名ゆれ候補", block)
+        self.assertIn("山口", block)
+        self.assertIn("川口", block)
+        self.assertIn("自動修正せず", block)
+
+    def test_combined_block_builder_includes_person_names(self) -> None:
+        text = (
+            "山口という方が今期出向で来られました。川口さんか、面識はないですが。"
+            "7年次の研修です。8年時も対象です。"
+        )
+        block = build_notation_block_for_text(text)
+        self.assertIn("人名ゆれ候補", block)
+        self.assertIn("山口", block)
+        self.assertIn("表記ゆれ候補", block)
+
+
+class MinutesPromptNameGuardTests(unittest.TestCase):
+    def test_minutes_prompt_forbids_parenthetical_name_invention(self) -> None:
+        from generate_minutes_other_sections import _build_minutes_system_prompt
+
+        prompt = _build_minutes_system_prompt()
+        self.assertIn("人名・固有名詞の扱い", prompt)
+        self.assertIn("括弧併記", prompt)
+        self.assertIn("[要確認]", prompt)
+
+    def test_coherence_prompt_mentions_adjacent_name_variants(self) -> None:
+        from coherence_review import _build_system_prompt
+
+        prompt = _build_system_prompt(None)
+        text = (
+            "".join(
+                str(b.get("text") or "") if isinstance(b, dict) else str(b)
+                for b in prompt
+            )
+            if isinstance(prompt, list)
+            else str(prompt)
+        )
+        self.assertIn("聞き取り揺れ", text)
+        self.assertIn("川口さんか", text)
+
+
 class PromptInjectionTests(unittest.TestCase):
     @staticmethod
     def _flatten(prompt) -> str:
@@ -92,6 +178,22 @@ class PromptInjectionTests(unittest.TestCase):
         text = self._flatten(_build_system_prompt(None, notation_block=block))
         self.assertIn("表記ゆれ候補", text)
         self.assertIn("車内", text)
+
+    def test_final_review_prompt_requires_full_minutes_cross_check(self) -> None:
+        from final_review_pass import _build_system_prompt
+
+        text = self._flatten(_build_system_prompt(""))
+        self.assertIn("要約セクションと発言録", text)
+        self.assertIn("決定事項・残論点・Next Action と発言録を相互に照合", text)
+        self.assertIn("機械抽出された人名ゆれ候補は無視してはならない", text)
+        self.assertIn("山口という——川口さんか", text)
+
+    def test_final_review_defaults_to_opus(self) -> None:
+        from anthropic_prompt_cache import OPUS_MODEL_ID
+        from final_review_pass import resolve_final_review_model
+
+        with patch.dict(os.environ, {"FINAL_REVIEW_MODEL": ""}):
+            self.assertEqual(resolve_final_review_model(), OPUS_MODEL_ID)
 
 
 class FinalReviewApplyTests(unittest.TestCase):
@@ -226,6 +328,33 @@ class FinalReviewApplyTests(unittest.TestCase):
             self.assertFalse(
                 os.path.isfile(os.path.join(tmp, "final_review_report.json"))
             )
+
+    def test_apply_mode_rechecks_after_applied_fix(self) -> None:
+        from final_review_pass import run_final_review
+
+        first = [
+            {
+                "type": "notation",
+                "quote": "8年時を対象とした",
+                "issue": "表記不統一",
+                "fix": "8年次を対象とした",
+                "confidence": "high",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"FINAL_REVIEW_MODE": "apply"}):
+                with patch(
+                    "final_review_pass._call_reviewer",
+                    side_effect=[first, []],
+                ) as reviewer:
+                    out, report = run_final_review(
+                        job_dir=tmp,
+                        text="8年時を対象とした研修です。",
+                    )
+        self.assertIn("8年次", out)
+        self.assertEqual(reviewer.call_count, 2)
+        self.assertEqual(report["findings"], [])
+        self.assertEqual(len(report["rounds"]), 2)
 
 
 class ReadablePromptBackchannelRuleTests(unittest.TestCase):

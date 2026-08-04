@@ -2,6 +2,7 @@ import argparse
 import os
 
 from meeting_profile import load_meeting_profile, resolve_display_title
+from minutes_quality_gate import run_minutes_quality_gate
 from readable_transcript import resolve_minutes_transcript_text_with_stats
 from transcript_paths import resolve_transcript_path_for_minutes
 from transcript_section_summarizer import add_section_headings
@@ -124,6 +125,13 @@ def main() -> None:
             job_id=args.job_id,
             input_root=args.input_root,
             stats=readable_stats,
+        )
+
+    if readable_used:
+        run_minutes_quality_gate(
+            job_dir=job_dir,
+            text=transcript_text,
+            readable_stats=readable_stats,
         )
 
     # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。

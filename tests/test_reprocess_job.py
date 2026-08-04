@@ -110,6 +110,13 @@ class RunStepTests(unittest.TestCase):
         result = run_step(["cmd"], "step_test")
         self.assertEqual(result["foo"], "bar")
         self.assertEqual(result["baz"], "qux")
+        self.assertEqual(mock_run.call_args.kwargs["errors"], "replace")
+
+    @patch("reprocess_job.subprocess.run")
+    def test_tolerates_missing_captured_streams(self, mock_run) -> None:
+        """子プロセス側のデコード障害等で stdout/stderr が None でも落ちない。"""
+        mock_run.return_value = MagicMock(returncode=0, stdout=None, stderr=None)
+        self.assertEqual(run_step(["cmd"], "step_test"), {})
 
     @patch("reprocess_job.subprocess.run")
     def test_raises_on_nonzero_exit(self, mock_run) -> None:

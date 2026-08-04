@@ -21,6 +21,19 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def resolve_google_service_account_path() -> str:
+    """Return a usable service-account file path for local and PaaS runs.
+
+    Railway stores the JSON body in GOOGLE_SERVICE_ACCOUNT_JSON.  Bootstrap
+    materializes that body at the repository default path; consumers must not
+    mistake the inline JSON itself for a filesystem path.
+    """
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if raw and not raw.startswith("{"):
+        return raw
+    return os.path.join(_repo_root(), "credentials_service_account.json")
+
+
 def write_google_oauth_files_from_env() -> list[str]:
     """環境変数から認証ファイルを生成。作成・スキップしたパスを返す。"""
     root = _repo_root()
@@ -29,6 +42,10 @@ def write_google_oauth_files_from_env() -> list[str]:
     def write_if_env(path: str, env_name: str) -> None:
         raw = os.getenv(env_name, "").strip()
         if not raw:
+            return
+        # A path-valued local setting already points at a file; never overwrite
+        # the generated credential file with the path string itself.
+        if env_name == "GOOGLE_SERVICE_ACCOUNT_JSON" and not raw.startswith("{"):
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

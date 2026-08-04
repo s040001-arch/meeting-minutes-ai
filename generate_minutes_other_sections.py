@@ -13,7 +13,7 @@ from meeting_profile import load_meeting_profile, resolve_display_title
 from repo_env import load_dotenv_local
 
 
-_MINUTES_MODEL = "claude-sonnet-4-6"
+_MINUTES_MODEL = "claude-sonnet-5"
 _MINUTES_TIMEOUT_SEC = 900
 _MINUTES_RETRY_BACKOFF_SEC = (5.0, 10.0)
 MINUTES_SECTIONS_RAW_FILENAME = "minutes_sections_raw.json"
@@ -71,6 +71,13 @@ def _build_minutes_system_prompt() -> str:
         "\n- 相原が会議後に取るべきアクションを推測して書かない。"
         "発言者が会議内で述べた意向・約束・宿題のみを next_actions に書く。"
         "\n\n出力は必ずJSONオブジェクトのみとし、説明文・コードフェンスは禁止です。"
+        "\n\n【人名・固有名詞の扱い（重要）】"
+        "\n- 発言録内で同一人物の名前が複数の表記で揺れている場合"
+        "（例: 『山口』と『川口』が混在）、括弧併記（『山口（川口）』等）で"
+        "独自の表記を創作してはいけない。発言録で優勢な表記を1つ選んで使い、"
+        "揺れ自体が論点なら発言録の表現のまま記載する。"
+        "\n- `[要確認]` タグ付きの語句を要約に使う場合は、タグごとそのまま残す"
+        "（タグを外して確定情報のように書かない）。"
         "\n\n【参加者リストについて（重要）】"
         "\n- 参加者リストはファイル名から事前に確定済みです。あなたは participants を生成・変更してはいけません。"
         "\n- 発言の有無で参加者を絞り込まないでください。"

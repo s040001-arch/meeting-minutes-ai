@@ -16,11 +16,12 @@ from anthropic_prompt_cache import cached_system
 from meeting_profile import format_meeting_profile_for_prompt
 
 READABLE_TRANSCRIPT_FILENAME = "merged_transcript_readable.txt"
-READABLE_MODEL = "claude-sonnet-4-6"
+READABLE_MODEL = "claude-sonnet-5"
 READABLE_MAX_TOKENS = 8192
 READABLE_TIMEOUT_SEC = 180
 READABLE_CHUNK_TARGET_CHARS = 3500
 READABLE_CHUNK_MIN_CHARS = 800
+READABLE_SPLIT_RETRY_TARGET_CHARS = 1600
 READABLE_MAX_PARALLEL = 4
 READABLE_MIN_OUTPUT_RATIO = 0.25
 # 検証失敗チャンクの再試行温度（0 の再試行は決定論的で無意味なため少し上げる）
@@ -96,12 +97,19 @@ def _build_system_prompt(meeting_profile: dict[str, Any] | None) -> str | list:
         "\n  例: 『実施をしない方向、はいに考えています』→『実施をしない方向に考えています』"
         "\n- ただし相槌の除去で話し手の語順・語彙は変えないこと（接合のみ）。"
         "\n- 質問への回答としての『はい』『いいえ』（同意・返答の実質を持つもの）は残す。"
+        "\n\n【文脈から修正してよい誤認識】"
+        "\n- 前後の説明だけで正解が一意に決まる一般語・助詞・単位の誤変換は修正する。"
+        "\n  例: KPIツリーが200〜300個の行で構成される文脈の『200秒』→『200行』、"
+        "薬効の文脈の『聞く薬』→『効く薬』、役割分担の『3位いっぱい』→『三位一体』。"
+        "\n- 同じ文書内に正しい表記が反復されている場合は、その表記に統一する。"
+        "\n- 文脈上意味を成さない断片は、直後の明確な言い直しと同義なら削除・接合してよい。"
+        "\n- 正解が複数あり得る固有名詞・数値・事実は推測修正しない。"
         "\n\n【絶対に触らない／変えないもの】"
         "\n- 決定・事実・数値・固有名詞・論点・理由・立場・アクション"
         "\n- 意味やニュアンスが変わる箇所（迷ったら残す）"
         "\n- `[要確認]` タグ付き語句（文字列ごとそのまま残す）"
         "\n- `[補足: ...]` アノテーション（reader pass が挿入した補足注釈。文字列ごとそのまま残す）"
-        "\n- 未フラグの語の推測修正（例: 「義理をか」→「桐生」等は禁止）"
+        "\n- 文脈だけでは一意に確定できない未フラグ語の推測修正"
         "\n\n【編集方針】"
         "\n- 実質発話は言い換えない。接着剤的な無内容部分だけ削る/整える"
         "\n- 段落・改行の流れは維持（過度な要約や箇条書き化はしない）"
@@ -193,7 +201,11 @@ def _strip_code_fence(raw: str) -> str:
     return text
 
 
-def _validate_chunk_output(original: str, edited: str) -> bool:
+def _validate_chunk_output(
+    original: str,
+    edited: str,
+    meeting_profile: dict[str, Any] | None = None,
+) -> bool:
     edited = edited.strip()
     original = original.strip()
     if not edited:
@@ -210,6 +222,18 @@ def _validate_chunk_output(original: str, edited: str) -> bool:
         core = token.split("。")[-1]
         if core not in edited:
             return False
+    try:
+        from fact_integrity_gate import verify_fact_integrity
+
+        if not verify_fact_integrity(
+            original,
+            edited,
+            meeting_profile=meeting_profile,
+        ).ok:
+            return False
+    except Exception as e:  # noqa: BLE001
+        print(f"readable_fact_validation_failed error={e!r}")
+        return False
     return True
 
 
@@ -249,7 +273,12 @@ def polish_transcript_text_with_stats(
     stats = {"total_chunks": int, "failed_chunk_idx": [int, ...], "retried_ok": int}
     failed_chunk_idx はリトライ後も検証に失敗し生テキストを採用したチャンク。
     """
-    stats: dict[str, Any] = {"total_chunks": 0, "failed_chunk_idx": [], "retried_ok": 0}
+    stats: dict[str, Any] = {
+        "total_chunks": 0,
+        "failed_chunk_idx": [],
+        "retried_ok": 0,
+        "split_recovered": 0,
+    }
     source = text.strip()
     if not source:
         return text, stats
@@ -278,35 +307,55 @@ def polish_transcript_text_with_stats(
         except Exception as e:
             print(f"readable_chunk_failed idx={idx} error={e!r}")
             return None
-        if not _validate_chunk_output(chunk, edited):
+        if not _validate_chunk_output(chunk, edited, meeting_profile):
             print(f"readable_chunk_validation_failed idx={idx}")
             return None
         return edited.strip()
 
-    def _process(idx: int) -> tuple[int, str, bool, bool]:
-        """Return (idx, body, failed, retried_ok)."""
+    def _process(idx: int) -> tuple[int, str, bool, bool, bool]:
+        """Return (idx, body, failed, retried_ok, split_recovered)."""
         _, chunk = segments[idx]
         edited = _attempt(idx, chunk, temperature=0)
         if edited is not None:
-            return idx, edited, False, False
+            return idx, edited, False, False, False
         # 1回だけリトライ。temperature=0 の再試行は決定論的で同じ検証失敗に
         # 陥るため、わずかに温度を上げてサンプリングを変え、検証を通る別解を狙う。
         print(f"readable_chunk_retry idx={idx} temperature={READABLE_RETRY_TEMPERATURE}")
         edited = _attempt(idx, chunk, temperature=READABLE_RETRY_TEMPERATURE)
         if edited is not None:
-            return idx, edited, False, True
+            return idx, edited, False, True, False
+        subchunks = _split_long_body(
+            chunk,
+            target_chars=READABLE_SPLIT_RETRY_TARGET_CHARS,
+        )
+        if len(subchunks) > 1:
+            recovered: list[str] = []
+            for subchunk in subchunks:
+                subedited = _attempt(
+                    idx,
+                    subchunk,
+                    temperature=READABLE_RETRY_TEMPERATURE,
+                )
+                if subedited is None:
+                    recovered = []
+                    break
+                recovered.append(subedited)
+            if recovered:
+                return idx, "\n\n".join(recovered), False, False, True
         print(f"readable_chunk_retry_failed idx={idx} fallback=original")
-        return idx, chunk, True, False
+        return idx, chunk, True, False, False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=READABLE_MAX_PARALLEL) as executor:
         futures = [executor.submit(_process, idx) for idx in body_indices]
         for future in concurrent.futures.as_completed(futures):
-            idx, body, failed, retried_ok = future.result()
+            idx, body, failed, retried_ok, split_recovered = future.result()
             edited_bodies[idx] = body
             if failed:
                 stats["failed_chunk_idx"].append(idx)
             if retried_ok:
                 stats["retried_ok"] += 1
+            if split_recovered:
+                stats["split_recovered"] += 1
     stats["failed_chunk_idx"].sort()
 
     parts: list[str] = []
@@ -321,7 +370,8 @@ def polish_transcript_text_with_stats(
         f'{{"input_chars":{len(source)},"output_chars":{len(result)},'
         f'"segments":{len(body_indices)},'
         f'"failed_chunks":{len(stats["failed_chunk_idx"])},'
-        f'"retried_ok":{stats["retried_ok"]}}}'
+        f'"retried_ok":{stats["retried_ok"]},'
+        f'"split_recovered":{stats["split_recovered"]}}}'
     )
     return result.strip() + "\n", stats
 
@@ -368,11 +418,7 @@ def generate_readable_transcript_with_stats(
             polished, review_report = run_final_review(
                 job_dir=job_dir, text=polished
             )
-            stats["final_review"] = {
-                "mode": review_report.get("mode"),
-                "findings": len(review_report.get("findings") or []),
-                "applied": len(review_report.get("applied") or []),
-            }
+            stats["final_review"] = review_report
     except Exception as e:  # noqa: BLE001
         print(f"final_review_pass_skipped={e!r}")
 
@@ -412,6 +458,7 @@ def resolve_minutes_transcript_text_with_stats(
         "total_chunks": 0,
         "failed_chunk_idx": [],
         "retried_ok": 0,
+        "split_recovered": 0,
     }
     if not is_readable_transcript_enabled():
         return source_text, source_path, False, empty_stats

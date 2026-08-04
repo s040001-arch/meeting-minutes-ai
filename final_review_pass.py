@@ -18,28 +18,32 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import anthropic
 
-from anthropic_prompt_cache import cached_system
+from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 
 FINAL_REVIEW_REPORT_FILENAME = "final_review_report.json"
-DEFAULT_FINAL_REVIEW_MODEL = "claude-sonnet-4-6"
-FINAL_REVIEW_MAX_TOKENS = 8192
+DEFAULT_FINAL_REVIEW_MODEL = OPUS_MODEL_ID
+FINAL_REVIEW_MAX_TOKENS = 16000
 FINAL_REVIEW_TIMEOUT_SEC = 300
 FINAL_REVIEW_CHAR_CAP = 60_000
+FINAL_REVIEW_MAX_FINDINGS = 60
+FINAL_REVIEW_MAX_ROUNDS = 3
 
 # apply モードの安全条件
 APPLY_MIN_QUOTE_LEN = 4
-APPLY_MAX_FIXES = 20
+APPLY_MAX_FIXES = 50
 APPLY_LEN_RATIO_MIN = 0.3
 APPLY_LEN_RATIO_MAX = 3.0
 # fix が quote に無い内容文字（漢字・かな等）を何種類まで持ち込めるか。
 # 同音異義の1字置換（時→次、刺→差）は通し、語の推測追加（「解決研修は」等）は弾く。
-APPLY_MAX_NEW_CONTENT_CHARS = 2
+APPLY_MAX_NEW_CONTENT_CHARS = 16
 
 _PUNCT_CHARS = set("、。！？!?・…「」『』（）()[]{}〈〉 \u3000\n\t,.")
+_NUMBER_TOKEN_RE = re.compile(r"\d+(?:[.,、]\d+)*")
 
 
 def resolve_final_review_mode() -> str:
@@ -58,9 +62,14 @@ def resolve_final_review_model() -> str:
 
 def _build_system_prompt(notation_block: str) -> str | list:
     static_prompt = (
-        "あなたは完成済みの議事録（発言録・整文）の最終レビュアーです。"
+        "あなたは完成済みの議事録（要約セクションと発言録・整文）の最終レビュアーです。"
         "唯一の任務は、残存する品質問題を全文一読で発見して報告することです。"
         "本文の書き直しはしません。発見のみを JSON 配列で返してください。"
+        "\n\n【全文照合（必須）】"
+        "\n- 参加者・議題・決定事項・残論点・Next Action と発言録を相互に照合する。"
+        "\n- 要約側が発言録の曖昧な語を勝手に確定、別表記を括弧併記、"
+        "または発言録にない情報へ言い換えていれば必ず検出する。"
+        "\n- 発言録内でも、同じ人物・制度・研修を指す前後の発言を照合する。"
         "\n\n【検出対象（4種のみ）】"
         "\n1. notation: 同一概念の表記不統一・同音異義の誤選択"
         "（例: 同じ文書内に『7年次』と『8年時』が混在 → 少数派が誤りの疑い。"
@@ -74,9 +83,19 @@ def _build_system_prompt(notation_block: str) -> str | list:
         "（例: 稟議文脈の『決済』、『傘を刺そう』等の表記誤り）"
         "\n\n【検出してはいけないもの】"
         "\n- 口語らしさ・話し言葉のくだけた表現（整文は逐語性を残す方針）"
-        "\n- 固有名詞・数値・事実（正誤を判断する材料がなければ触れない）"
+        "\n- 固有名詞・数値・事実（正誤を判断する材料がなければ触れない）。"
+        "ただし、末尾の機械抽出候補、同一文書内の多数表記、質問への回答と復唱、"
+        "要約と発言録の不一致は判断材料なので、固有名詞でも必ず検討する"
         "\n- `[要確認]` タグ済みの箇所（既に人の確認待ち）"
         "\n- `▼` 見出し行"
+        "\n\n【人名ゆれの扱い（重要）】"
+        "\n- 機械抽出された人名ゆれ候補は無視してはならない。"
+        "近接する質問への回答と復唱が同一人物を指し、片方だけ別姓なら、"
+        "前後の文脈と文書内の他の表記から正しい姓を判断する。"
+        "\n- 例: 『どなたですか？山口という——川口さんか、山口さん』かつ"
+        "見出し・要約も『山口部長』なら、挟まった『川口』は聞き取り揺れ。"
+        "quote 全体を自然な応答に直した fix を high で提示する。"
+        "\n- 正しい姓を一意に決められない場合は medium、fix は空文字とする。"
         "\n\n【出力スキーマ】JSON 配列のみ。説明・前置き・コードフェンス禁止。"
         "\n各要素:"
         '\n{"type":"notation|fragment|backchannel|unnatural",'
@@ -85,10 +104,13 @@ def _build_system_prompt(notation_block: str) -> str | list:
         '"fix":"quote 全体の修正後文字列（確信がなければ空文字）",'
         '"confidence":"high|medium|low"}'
         "\n\n【確信度】"
-        "\n- high: 文脈から修正が一意に定まる（fix 必須）"
+        "\n- high: 文脈から修正が一意に定まる（fix 必須）。一般語・助詞・単位・"
+        "慣用句の明白な音声誤認識は、必ず quote 全体の自然な fix を提示する"
+        "\n  例: 『200秒か300秒のKPIツリー』→『200行か300行のKPIツリー』、"
+        "『聞く薬を開発』→『効く薬を開発』、『3位いっぱい』→『三位一体』"
         "\n- medium: 問題は確実だが修正候補に迷いがある"
         "\n- low: 違和感レベル"
-        "\n\n問題がなければ空配列 [] を返す。最大30件。"
+        f"\n\n問題がなければ空配列 [] を返す。最大{FINAL_REVIEW_MAX_FINDINGS}件。"
     )
     return cached_system(static_prompt, notation_block)
 
@@ -159,6 +181,12 @@ def apply_safe_fixes(text: str, findings: list[dict]) -> tuple[str, list[dict], 
         new_content_chars = {
             ch for ch in fix if ch not in _PUNCT_CHARS and ch not in quote
         }
+        finding_type = str(f.get("type") or "").lower()
+        new_char_limit = (
+            APPLY_MAX_NEW_CONTENT_CHARS
+            if finding_type in {"notation", "unnatural"}
+            else 2
+        )
         reason = ""
         if confidence != "high" or not fix or fix == quote:
             reason = "not_high_or_no_fix"
@@ -172,11 +200,23 @@ def apply_safe_fixes(text: str, findings: list[dict]) -> tuple[str, list[dict], 
             APPLY_LEN_RATIO_MIN <= len(fix) / max(len(quote), 1) <= APPLY_LEN_RATIO_MAX
         ):
             reason = "length_ratio_out_of_range"
-        elif len(new_content_chars) > APPLY_MAX_NEW_CONTENT_CHARS:
-            # 削除・同音1〜2字置換のみ許可。語の推測追加を伴う書き換えは適用しない
+        elif _NUMBER_TOKEN_RE.findall(quote) != _NUMBER_TOKEN_RE.findall(fix):
+            # 数字そのものの変更は文脈推論だけで自動適用しない。
+            reason = "numeric_tokens_changed"
+        elif len(new_content_chars) > new_char_limit:
             reason = f"too_many_new_chars={len(new_content_chars)}"
         elif len(applied) >= APPLY_MAX_FIXES:
             reason = "max_fixes_reached"
+        else:
+            candidate = out.replace(quote, fix, 1)
+            try:
+                from fact_integrity_gate import verify_fact_integrity
+
+                gate = verify_fact_integrity(out, candidate)
+                if not gate.ok:
+                    reason = f"fact_integrity:{'|'.join(gate.violations)}"
+            except Exception as e:  # noqa: BLE001
+                reason = f"fact_integrity_error:{type(e).__name__}"
         if reason:
             skipped.append({**f, "skip_reason": reason})
             continue
@@ -203,28 +243,65 @@ def run_final_review(
         "findings": [],
         "applied": [],
         "skipped": [],
+        "rounds": [],
     }
     if mode == "off" or not text.strip():
         return text, report
 
-    try:
-        findings = _call_reviewer(text)
-    except Exception as e:  # noqa: BLE001
-        print(f"final_review_failed={e!r} (non-fatal)")
-        report["error"] = repr(e)
-        _write_report(job_dir, report)
-        return text, report
-
-    report["findings"] = findings
     out_text = text
-    if mode == "apply":
-        out_text, applied, skipped = apply_safe_fixes(text, findings)
-        report["applied"] = applied
+    for round_no in range(1, FINAL_REVIEW_MAX_ROUNDS + 1):
+        try:
+            findings = _call_reviewer(out_text)
+        except Exception as e:  # noqa: BLE001
+            print(f"final_review_failed round={round_no} error={e!r}")
+            report["error"] = repr(e)
+            break
+
+        applied: list[dict] = []
+        skipped: list[dict] = []
+        candidate = out_text
+        if mode == "apply":
+            candidate, applied, skipped = apply_safe_fixes(out_text, findings)
+        report["rounds"].append(
+            {
+                "round": round_no,
+                "input_chars": len(out_text),
+                "findings": findings,
+                "applied": applied,
+                "skipped": skipped,
+            }
+        )
+        report["findings"] = findings
         report["skipped"] = skipped
+        report["applied"].extend(applied)
+        out_text = candidate
+        if mode != "apply" or not applied:
+            break
+    else:
+        # Audit once more after the last applied round.  Never publish on the
+        # assumption that the last edit created no new issue.
+        try:
+            findings = _call_reviewer(out_text)
+            _, _unused, skipped = apply_safe_fixes(out_text, findings)
+            report["rounds"].append(
+                {
+                    "round": FINAL_REVIEW_MAX_ROUNDS + 1,
+                    "audit_only": True,
+                    "input_chars": len(out_text),
+                    "findings": findings,
+                    "applied": [],
+                    "skipped": skipped,
+                }
+            )
+            report["findings"] = findings
+            report["skipped"] = skipped
+            report["round_limit_reached"] = bool(findings)
+        except Exception as e:  # noqa: BLE001
+            report["error"] = repr(e)
     _write_report(job_dir, report)
     print(
         "final_review_done "
-        f"mode={mode} findings={len(findings)} "
+        f"mode={mode} findings={len(report['findings'])} "
         f"applied={len(report['applied'])} skipped={len(report['skipped'])}"
     )
     return out_text, report

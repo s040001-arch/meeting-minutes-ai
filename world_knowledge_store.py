@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from log_safety import describe_service_account_path, format_error_for_log
+from railway_bootstrap import resolve_google_service_account_path
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -62,7 +63,7 @@ def invalidate_world_cache() -> None:
 
 
 def _service_account_json_path() -> str:
-    return os.getenv(GOOGLE_SERVICE_ACCOUNT_JSON_ENV, "").strip() or DEFAULT_SERVICE_ACCOUNT_JSON_PATH
+    return resolve_google_service_account_path()
 
 
 def _knowledge_sheet_id() -> str:

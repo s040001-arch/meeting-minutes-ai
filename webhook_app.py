@@ -11,6 +11,7 @@ from datetime import datetime
 import anthropic
 
 from anthropic_prompt_cache import cached_system
+from railway_bootstrap import resolve_google_service_account_path
 import requests
 
 from repo_env import load_dotenv_local
@@ -38,9 +39,7 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 ANSWERS_SAVE_PATH = os.path.join("data", "line_answers.json")
 SHEETS_ID = os.getenv("LINE_ANSWERS_SHEETS_ID", "").strip()
 SHEETS_TAB_NAME = os.getenv("LINE_ANSWERS_SHEETS_TAB", "answers").strip() or "answers"
-SERVICE_ACCOUNT_JSON_PATH = os.getenv(
-    "GOOGLE_SERVICE_ACCOUNT_JSON", "credentials_service_account.json"
-).strip()
+SERVICE_ACCOUNT_JSON_PATH = resolve_google_service_account_path()
 
 AUTO_AFTER_ANSWER_ENV = "AUTO_AFTER_ANSWER"
 LOCKS_DIR = os.path.join("data", "locks")
@@ -52,7 +51,7 @@ _RUN_DOCS_HUB_E2E = os.path.join(_REPO_ROOT, "run_docs_hub_e2e.py")
 _RUN_RESUME_FROM_STEP7 = os.path.join(_REPO_ROOT, "run_resume_from_step7.py")
 _RUN_ANSWER_LIGHT = os.path.join(_REPO_ROOT, "run_answer_light.py")
 CORRECTION_DICT_PATH = os.path.join("data", "correction_dict.json")
-LINE_EXTRACTOR_MODEL = "claude-sonnet-4-6"
+LINE_EXTRACTOR_MODEL = "claude-sonnet-5"
 
 state = {
     # 質問送信は行わず、回答受付だけ行う前提のため
@@ -451,8 +450,8 @@ def _apply_correction_pairs_to_transcript(
 ) -> int:
     """確定した置換ペアを現在の after_qa 本文にも即時適用する（P2）。
 
-    find_standalone_word で位置特定できた独立出現のみ置換。見つからない語は
-    スキップ（辞書追加のみで次ジョブから効く）。適用件数を返す。
+    LINEで明示的に確定した当該ジョブの修正なので、連続した日本語文中の出現も
+    置換する。適用前後の件数をジョブ内監査ログへ残す。
     """
     jid = str(job_id or "").strip()
     if not jid or not pairs:
@@ -464,7 +463,6 @@ def _apply_correction_pairs_to_transcript(
             load_after_qa_text,
             save_after_qa_text,
         )
-        from recognition_batch import _is_standalone_word_at, find_standalone_word
 
         job_dir = os.path.join("data", "transcriptions", jid)
         if not os.path.isdir(job_dir):
@@ -474,26 +472,61 @@ def _apply_correction_pairs_to_transcript(
             return 0
         text = load_after_qa_text(job_dir)
         applied = 0
+        audit_rows: list[dict[str, object]] = []
         for item in pairs:
             wrong = str(item.get("wrong") or "").strip()
             correct = str(item.get("correct") or "").strip()
             if len(wrong) < 2 or not correct or wrong == correct:
                 continue
-            if find_standalone_word(text, wrong) < 0:
+            before_count = text.count(wrong)
+            if before_count <= 0:
+                audit_rows.append(
+                    {
+                        "at": now_iso(),
+                        "wrong": wrong,
+                        "correct": correct,
+                        "before_count": 0,
+                        "applied_count": 0,
+                        "remaining_after": 0,
+                        "status": "not_present",
+                    }
+                )
                 continue
-            start = 0
-            while True:
-                idx = text.find(wrong, start)
-                if idx < 0:
-                    break
-                if _is_standalone_word_at(text, idx, len(wrong)):
-                    text = text[:idx] + correct + text[idx + len(wrong):]
-                    applied += 1
-                    start = idx + len(correct)
-                else:
-                    start = idx + 1
+            # A huge occurrence count indicates an over-broad extraction such
+            # as a common particle. Fail closed instead of global replacement.
+            if before_count > 20:
+                audit_rows.append(
+                    {
+                        "at": now_iso(),
+                        "wrong": wrong,
+                        "correct": correct,
+                        "before_count": before_count,
+                        "applied_count": 0,
+                        "remaining_after": before_count,
+                        "status": "blocked_too_many_occurrences",
+                    }
+                )
+                continue
+            text = text.replace(wrong, correct)
+            applied += before_count
+            audit_rows.append(
+                {
+                    "at": now_iso(),
+                    "wrong": wrong,
+                    "correct": correct,
+                    "before_count": before_count,
+                    "applied_count": before_count,
+                    "remaining_after": text.count(wrong),
+                    "status": "applied",
+                }
+            )
         if applied > 0:
             save_after_qa_text(job_dir, text)
+        if audit_rows:
+            audit_path = os.path.join(job_dir, "line_correction_audit.jsonl")
+            with open(audit_path, "a", encoding="utf-8") as f:
+                for row in audit_rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return applied
     except Exception as e:  # noqa: BLE001
         print(f"correction_pairs_body_apply_failed={e!r}")

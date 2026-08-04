@@ -62,14 +62,24 @@ def run_step(cmd: list[str], step: str, *, dry_run: bool = False) -> dict[str, s
         _log(f"DRY-RUN {step}: {' '.join(cmd)}")
         return {}
     _log(f"{step}: start  cmd={' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    # Windows 子プロセスが CP932 の警告等を混在させても、出力デコード失敗で
+    # 本体処理（特に Google Docs 書き込み）後にラッパーだけ落ちないようにする。
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
     if result.returncode != 0:
         raise RuntimeError(
             f"{step} failed (exit={result.returncode})\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            f"stdout: {stdout}\nstderr: {stderr}"
         )
     output: dict[str, str] = {}
-    for line in result.stdout.strip().splitlines():
+    for line in stdout.strip().splitlines():
         if "=" in line:
             k, _, v = line.partition("=")
             output[k.strip()] = v.strip()

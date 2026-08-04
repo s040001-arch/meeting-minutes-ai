@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import anthropic
 
 RECONSTRUCT_MODEL = os.environ.get("RECONSTRUCT_SPAN_MODEL", "claude-opus-4-8")
-SEMANTIC_CHECK_MODEL = os.environ.get("RECONSTRUCT_SPAN_SEMANTIC_MODEL", "claude-sonnet-4-6")
+SEMANTIC_CHECK_MODEL = os.environ.get("RECONSTRUCT_SPAN_SEMANTIC_MODEL", "claude-sonnet-5")
 DEFAULT_MAX_LENGTH_RATIO = 3.0
 
 _NUMBER_RE = re.compile(r"\d+(?:[./]\d+)?")

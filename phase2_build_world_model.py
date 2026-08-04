@@ -56,7 +56,7 @@ from world_knowledge_store import (
 
 from anthropic_prompt_cache import OPUS_MODEL_ID, cached_system
 
-SONNET_MODEL = "claude-sonnet-4-6"
+SONNET_MODEL = "claude-sonnet-5"
 OPUS_MODEL = OPUS_MODEL_ID
 SUMMARIZE_MAX_TOKENS = 4000
 SUMMARIZE_TIMEOUT_SEC = 180

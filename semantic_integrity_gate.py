@@ -15,7 +15,7 @@ import anthropic
 from edit_proposal_schema import VERDICT_AUTO_CORRECT, VERDICT_AUTO_DELETE
 from fact_integrity_gate import verify_fact_integrity
 
-DEFAULT_SEMANTIC_GATE_MODEL = "claude-sonnet-4-6"
+DEFAULT_SEMANTIC_GATE_MODEL = "claude-sonnet-5"
 SEMANTIC_GATE_MODEL = os.environ.get(
     "SEMANTIC_INTEGRITY_GATE_MODEL", DEFAULT_SEMANTIC_GATE_MODEL
 )

@@ -267,6 +267,39 @@ class AnswerLightCompletionAfterNoQuestionTests(unittest.TestCase):
             self.assertFalse(_question_cycle_generated_new_question(job))
 
 
+class ExplicitCorrectionReflectionTests(unittest.TestCase):
+    def test_embedded_japanese_occurrence_is_applied_and_audited(self) -> None:
+        from webhook_app import _apply_correction_pairs_to_transcript
+
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                job = Path("data") / "transcriptions" / "job_x"
+                job.mkdir(parents=True)
+                (job / "merged_transcript_after_qa.txt").write_text(
+                    "多分セントに依頼します。",
+                    encoding="utf-8",
+                )
+                applied = _apply_correction_pairs_to_transcript(
+                    "job_x",
+                    [{"wrong": "セント", "correct": "アクセンチュア"}],
+                )
+                text = (job / "merged_transcript_after_qa.txt").read_text(
+                    encoding="utf-8"
+                )
+                audit = json.loads(
+                    (job / "line_correction_audit.jsonl").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            finally:
+                os.chdir(previous)
+        self.assertEqual(applied, 1)
+        self.assertEqual(text, "多分アクセンチュアに依頼します。")
+        self.assertEqual(audit["remaining_after"], 0)
+
+
 class BatchAnswerParseTests(unittest.TestCase):
     """バッチ回答の番号分解（=区切り・削除指示）。"""
 

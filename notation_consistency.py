@@ -55,6 +55,20 @@ MAX_GROUPS = 8
 MAX_TOKEN_LEN = 8
 CONTEXT_RADIUS = 22
 
+# --- 人名ゆれ候補スキャン (2026-07 THR案件) ---------------------------------
+# 背景: 同一人物の姓が『山口という』『川口さんか』のように近音の別姓で混在した
+# まま最終議事録に残り、残論点に『山口（川口）部長』という併記が創作された。
+# 同音写像（読みスケルトン）では 山/川 のような非同音の聞き取り揺れを拾えない
+# ため、敬称・紹介文脈に隣接する人名らしきトークン同士を「同長・1字違い」で
+# 突き合わせる専用スキャンを設ける。判定は coherence / 編集者 LLM が文脈で行う。
+_NAME_HONORIFIC_PAT = r"さん|様|氏|君|先生|部長|課長|社長|次長|室長|本部長"
+_NAME_NAMING_PAT = r"という|っていう|と申します|と言います"
+_NAME_TOKEN_RE = re.compile(
+    rf"([一-鿿]{{2,3}})(?=(?:{_NAME_HONORIFIC_PAT}|{_NAME_NAMING_PAT}))"
+)
+
+MAX_NAME_GROUPS = 4
+
 
 def _normalize_token(token: str) -> str:
     """数字列を # に畳む（7年次/8年次 を同一表層として扱うため）。"""
@@ -120,6 +134,94 @@ def scan_notation_inconsistencies(text: str) -> list[dict]:
     return groups[:MAX_GROUPS]
 
 
+def _one_kanji_diff(a: str, b: str) -> bool:
+    """同じ長さで、ちょうど1文字だけ異なるか（山口/川口 型の判定）。"""
+    if len(a) != len(b) or a == b:
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def scan_person_name_variants(text: str) -> list[dict]:
+    """敬称・紹介文脈に隣接する人名らしきトークンから、1字違いの姓ペアを抽出する。
+
+    例: 『山口という』x1 と『川口さんか』x1 → 同一人物の聞き取り揺れ候補。
+    別人（加藤さんと佐藤さんが両方参加等）の可能性もあるため、あくまで候補。
+    正誤・同一人物か否かの判定は coherence / 編集者 LLM が文脈で行う。
+    """
+    if not text:
+        return []
+
+    stats: dict[str, dict] = {}
+    for m in _NAME_TOKEN_RE.finditer(text):
+        token = m.group(1)
+        # 3字取りの取り過ぎ対策: 先頭が助詞的でない漢字連結の一部でも、
+        # 2字姓 + 敬称の組み合わせを別途カウントするため末尾2字も登録する
+        candidates = {token}
+        if len(token) == 3:
+            candidates.add(token[-2:])
+        for name in candidates:
+            entry = stats.get(name)
+            if entry is None:
+                lo = max(0, m.start() - CONTEXT_RADIUS)
+                hi = min(len(text), m.end() + CONTEXT_RADIUS)
+                stats[name] = {
+                    "count": 1,
+                    "example": text[lo:hi].replace("\n", " "),
+                }
+            else:
+                entry["count"] += 1
+
+    names = sorted(stats)
+    groups: list[dict] = []
+    used: set[str] = set()
+    for i, a in enumerate(names):
+        if a in used:
+            continue
+        cluster = [a]
+        for b in names[i + 1:]:
+            if b not in used and _one_kanji_diff(a, b):
+                cluster.append(b)
+        if len(cluster) < 2:
+            continue
+        used.update(cluster)
+        variants = sorted(
+            (
+                {
+                    "surface": n,
+                    "count": stats[n]["count"],
+                    "example": stats[n]["example"],
+                }
+                for n in cluster
+            ),
+            key=lambda v: -v["count"],
+        )
+        groups.append({"variants": variants})
+
+    # 少数派の出現が少ない（=聞き取り揺れらしい）ものを優先
+    groups.sort(key=lambda g: (g["variants"][-1]["count"], -g["variants"][0]["count"]))
+    return groups[:MAX_NAME_GROUPS]
+
+
+def format_person_name_block(groups: list[dict]) -> str:
+    """人名ゆれ候補を LLM プロンプト注入用のブロック文字列にする。"""
+    if not groups:
+        return ""
+    lines = [
+        "\n\n【人名ゆれ候補（機械抽出・全文照合済み）】",
+        "以下は同一人物の姓が別表記で混在している可能性がある組（敬称・紹介文脈に隣接する語）。"
+        "文脈から同一人物を指すと判断できる場合は、人名の聞き取り揺れ（カテゴリF相当）として"
+        "検出し、どちらが正しいか文脈で確定できなければ自動修正せずユーザー確認対象とすること。"
+        "明らかに別人（両方が参加者・別々の文脈で登場）なら検出しないこと。",
+    ]
+    for g in groups:
+        parts = [
+            f"『{v['surface']}』x{v['count']}（例: …{v['example']}…）"
+            for v in g["variants"]
+        ]
+        lines.append("- " + " ⇔ ".join(parts))
+    return "\n".join(lines)
+
+
 def format_notation_block(groups: list[dict]) -> str:
     """検出候補を LLM プロンプト注入用のブロック文字列にする。"""
     if not groups:
@@ -142,9 +244,18 @@ def format_notation_block(groups: list[dict]) -> str:
 
 
 def build_notation_block_for_text(text: str) -> str:
-    """テキストからスキャン→プロンプトブロック生成までの一括ヘルパー。"""
+    """テキストからスキャン→プロンプトブロック生成までの一括ヘルパー。
+
+    同音表記ゆれ候補と人名ゆれ候補の両ブロックを連結して返す
+    （coherence / contextual_editor / final_review の全注入点で共通利用）。
+    """
+    parts: list[str] = []
     try:
-        return format_notation_block(scan_notation_inconsistencies(text))
+        parts.append(format_notation_block(scan_notation_inconsistencies(text)))
     except Exception as e:  # noqa: BLE001
         print(f"notation_scan_failed={e!r}")
-        return ""
+    try:
+        parts.append(format_person_name_block(scan_person_name_variants(text)))
+    except Exception as e:  # noqa: BLE001
+        print(f"person_name_scan_failed={e!r}")
+    return "".join(p for p in parts if p)
