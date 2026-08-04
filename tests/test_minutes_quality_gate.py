@@ -78,6 +78,24 @@ class MinutesQualityGateTests(unittest.TestCase):
             {x["code"] for x in report["blockers"]},
         )
 
+    def test_blocks_only_pending_unknowns_still_present_in_final_text(self) -> None:
+        pending = [{"status": "open", "text": "重複したと思いますと思います"}]
+        blocked = evaluate_minutes_quality(
+            text="重複したと思いますと思います",
+            readable_stats=self._stats(),
+            unknown_points=pending,
+        )
+        self.assertIn(
+            "pending_unknowns_remaining",
+            {x["code"] for x in blocked["blockers"]},
+        )
+        stale = evaluate_minutes_quality(
+            text="重複を解消したと思います",
+            readable_stats=self._stats(),
+            unknown_points=pending,
+        )
+        self.assertEqual(stale["status"], "pass")
+
     def test_enforce_raises_and_writes_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(

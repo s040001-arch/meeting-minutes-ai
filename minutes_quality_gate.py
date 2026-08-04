@@ -32,6 +32,7 @@ def evaluate_minutes_quality(
     text: str,
     readable_stats: dict[str, Any] | None,
     correction_audit_rows: list[dict[str, Any]] | None = None,
+    unknown_points: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stats = readable_stats or {}
     final_report = stats.get("final_review")
@@ -118,6 +119,30 @@ def evaluate_minutes_quality(
             }
         )
 
+    terminal_statuses = {"answered", "done", "closed", "resolved"}
+    active_pending: list[dict[str, Any]] = []
+    for item in unknown_points or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").strip().lower() in terminal_statuses:
+            continue
+        surfaces = [
+            str(item.get(key) or "").strip()
+            for key in ("anomaly_word", "text", "span_text")
+        ]
+        surfaces = [s for s in surfaces if s]
+        if any(surface in text for surface in surfaces):
+            active_pending.append(item)
+    if active_pending:
+        blockers.append(
+            {
+                "code": "pending_unknowns_remaining",
+                "message": "未回答の確認事項に対応する本文が残っている",
+                "count": len(active_pending),
+                "examples": active_pending[:10],
+            }
+        )
+
     latest_pair: dict[tuple[str, str], dict[str, Any]] = {}
     for row in correction_audit_rows or []:
         if not isinstance(row, dict):
@@ -156,6 +181,7 @@ def evaluate_minutes_quality(
             "final_review_findings": len(findings),
             "final_review_applied": len(final_report.get("applied") or []),
             "verify_tag_count": verify_tag_count,
+            "active_pending_unknowns": len(active_pending),
         },
     }
 
@@ -177,12 +203,22 @@ def run_minutes_quality_gate(
                 continue
             if isinstance(row, dict):
                 audit_rows.append(row)
+    unknown_points: list[dict[str, Any]] = []
+    unknowns_path = Path(job_dir) / "unknown_points.json"
+    if unknowns_path.is_file():
+        try:
+            loaded = json.loads(unknowns_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                unknown_points = [x for x in loaded if isinstance(x, dict)]
+        except (OSError, json.JSONDecodeError):
+            unknown_points = []
     report = {
         "mode": mode,
         **evaluate_minutes_quality(
             text=text,
             readable_stats=readable_stats,
             correction_audit_rows=audit_rows,
+            unknown_points=unknown_points,
         ),
     }
     path = Path(job_dir) / QUALITY_GATE_REPORT_FILENAME
