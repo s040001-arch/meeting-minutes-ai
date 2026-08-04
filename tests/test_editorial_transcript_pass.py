@@ -24,10 +24,13 @@ class EditorialTranscriptPassTests(unittest.TestCase):
             user_text = kwargs["messages"][0]["content"]
             paragraphs = json.loads(user_text.split("\n\n", 1)[1])
             edited = [
-                paragraph.replace(
-                    "はい、あの、意味のない崩れです。", ""
-                )
-                for paragraph in paragraphs
+                {
+                    "index": item["index"],
+                    "text": item["text"].replace(
+                        "はい、あの、意味のない崩れです。", ""
+                    ),
+                }
+                for item in paragraphs
             ]
             return SimpleNamespace(
                 content=[
@@ -69,7 +72,10 @@ class EditorialTranscriptPassTests(unittest.TestCase):
             content=[
                 SimpleNamespace(
                     type="text",
-                    text=json.dumps(["話をしました。"], ensure_ascii=False),
+                    text=json.dumps(
+                        [{"index": 0, "text": "話をしました。"}],
+                        ensure_ascii=False,
+                    ),
                 )
             ]
         )
@@ -111,10 +117,15 @@ class EditorialTranscriptPassTests(unittest.TestCase):
                     type="text",
                     text=json.dumps(
                         [
-                            source.replace("田中様", "土井様").replace(
-                                "この後も重要な背景と理由を詳しく説明しました。",
-                                "続いて、背景と理由を詳しく説明しました。",
-                            )
+                            {
+                                "index": 0,
+                                "text": source.replace(
+                                    "田中様", "土井様"
+                                ).replace(
+                                    "この後も重要な背景と理由を詳しく説明しました。",
+                                    "続いて、背景と理由を詳しく説明しました。",
+                                ),
+                            }
                         ],
                         ensure_ascii=False,
                     ),
@@ -153,7 +164,12 @@ class EditorialTranscriptPassTests(unittest.TestCase):
                         SimpleNamespace(
                             type="text",
                             text=json.dumps(
-                                ["AI活用の背景と理由が説明されました。"],
+                                [
+                                    {
+                                        "index": 0,
+                                        "text": "AI活用の背景と理由が説明されました。",
+                                    }
+                                ],
                                 ensure_ascii=False,
                             ),
                         )

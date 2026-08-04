@@ -104,8 +104,9 @@ def _build_system_prompt(
         "発言録本文だけを出力する。"
         "\n- 入力の段落数・段落順は必ず維持する。段落の結合・分割・並べ替えは禁止。"
         "各入力段落に対して、対応する出力段落を一つだけ返す。"
-        "\n\n【出力形式】入力と同じ要素数・順序のJSON文字列配列のみ。"
-        "説明、キー付きオブジェクト、Markdownコードフェンスは禁止。"
+        "\n\n【出力形式】入力の全indexを保持したJSON配列のみ。"
+        '各要素は {"index":0,"text":"整文後の段落"} とする。'
+        "説明、Markdownコードフェンスは禁止。"
     )
     variable = "\n\n".join(
         block for block in (profile_block, world_block) if block.strip()
@@ -121,7 +122,7 @@ def _extract_response_text(response: Any) -> str:
     ).strip()
 
 
-def _parse_paragraph_array(raw: str) -> list[str]:
+def _parse_paragraph_array(raw: str) -> dict[int, str]:
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -131,11 +132,22 @@ def _parse_paragraph_array(raw: str) -> list[str]:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     parsed = json.loads(text)
-    if not isinstance(parsed, list) or not all(
-        isinstance(item, str) for item in parsed
-    ):
-        raise ValueError("editorial response is not a string array")
-    return [item.strip() for item in parsed]
+    if not isinstance(parsed, list):
+        raise ValueError("editorial response is not an array")
+    out: dict[int, str] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        value = item.get("text")
+        if isinstance(value, str) and value.strip():
+            out[index] = value.strip()
+    if not out:
+        raise ValueError("editorial response has no indexed paragraphs")
+    return out
 
 
 def _split_paragraphs(text: str) -> list[str]:
@@ -216,30 +228,36 @@ def editorialize_transcript(
                     "role": "user",
                     "content": (
                         "以下の発言録段落配列を完成稿にしてください。\n\n"
-                        + json.dumps(before_paragraphs, ensure_ascii=False)
+                        + json.dumps(
+                            [
+                                {"index": index, "text": paragraph}
+                                for index, paragraph in enumerate(
+                                    before_paragraphs
+                                )
+                            ],
+                            ensure_ascii=False,
+                        )
                     ),
                 }
             ],
         )
         raw = _extract_response_text(response)
-        after_paragraphs = _parse_paragraph_array(raw)
+        after_by_index = _parse_paragraph_array(raw)
     except Exception as exc:  # noqa: BLE001
         stats["failed"] = True
         stats["validation_errors"] = [f"request_failed:{exc!r}"]
         return text, stats
 
-    if len(after_paragraphs) != len(before_paragraphs):
-        stats["failed"] = True
-        stats["validation_errors"] = [
-            f"paragraph_count:{len(before_paragraphs)}->{len(after_paragraphs)}"
-        ]
-        return text, stats
-
     selected: list[str] = list(before_paragraphs)
     repair_needed: dict[int, tuple[str, str, list[str]]] = {}
-    for index, (before, after) in enumerate(
-        zip(before_paragraphs, after_paragraphs, strict=True)
-    ):
+    for index, before in enumerate(before_paragraphs):
+        after = after_by_index.get(index)
+        if after is None:
+            stats["fallback_chunk_idx"].append(index)
+            stats["validation_errors"].append(
+                f"paragraph_{index}:missing_from_response"
+            )
+            continue
         repaired, restored_numbers = _restore_ordered_tokens(
             before,
             after,
