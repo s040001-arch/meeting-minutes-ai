@@ -147,7 +147,13 @@ class MinutesQualityGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "unknown_points.json").write_text(
                 json.dumps(
-                    [{"status": "open", "text": "既に整文で消えた長い断片"}],
+                    [
+                        {
+                            "status": "open",
+                            "source": "final_review",
+                            "text": "既に整文で消えた長い断片",
+                        }
+                    ],
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -162,6 +168,37 @@ class MinutesQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(points[0]["status"], "resolved")
         self.assertEqual(points[0]["resolved_via"], "final_readable_text")
+
+    def test_abstract_claude_question_is_not_closed_by_literal_search(self) -> None:
+        finding = {
+            "confidence": "medium",
+            "quote": "新しい不明箇所",
+            "issue": "確認が必要",
+            "fix": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "unknown_points.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "status": "open",
+                            "source": "claude_step9",
+                            "text": "体重推移の数値が矛盾している",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text="本文。新しい不明箇所。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+            points = json.loads(
+                (Path(tmp) / "unknown_points.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(points[0]["status"], "open")
 
 
 if __name__ == "__main__":

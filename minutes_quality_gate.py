@@ -56,10 +56,13 @@ def _queue_unresolved_final_findings(
     for item in existing:
         if str(item.get("status") or "").strip().lower() in terminal_statuses:
             continue
-        surfaces = [
-            str(item.get(key) or "").strip()
-            for key in ("anomaly_word", "text", "span_text")
-        ]
+        source = str(item.get("source") or "").strip()
+        surface_keys = (
+            ("anomaly_word", "text", "span_text")
+            if source == "final_review"
+            else ("anomaly_word", "span_text")
+        )
+        surfaces = [str(item.get(key) or "").strip() for key in surface_keys]
         surfaces = [surface for surface in surfaces if surface]
         if surfaces and not any(surface in text for surface in surfaces):
             item["status"] = "resolved"
