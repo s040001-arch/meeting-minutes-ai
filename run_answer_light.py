@@ -158,6 +158,23 @@ def _question_cycle_generated_new_question(job_dir: str | Path) -> bool:
     return str(data.get("question_status") or "").strip() == "generated"
 
 
+def _quality_gate_queued_questions(job_dir: str | Path) -> bool:
+    path = Path(job_dir) / "minutes_quality_gate.json"
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict) or data.get("status") != "blocked":
+        return False
+    metrics = data.get("metrics")
+    return (
+        isinstance(metrics, dict)
+        and int(metrics.get("final_review_questions_queued") or 0) > 0
+    )
+
+
 def main() -> int:
     load_dotenv_local()
     parser = argparse.ArgumentParser(description="Light apply after LINE answer (QUESTION_MODE)")
@@ -360,6 +377,64 @@ def main() -> int:
         )
         print("[answer_light] status=success", flush=True)
     else:
+        # A strict final quality review may discover a new ambiguity after all
+        # earlier questions were answered. Continue the existing Q&A cycle
+        # instead of reporting a generic processing error or publishing it.
+        pending_after_gate = count_pending_unknowns(job_dir)
+        if (
+            pending_after_gate > 0
+            and _quality_gate_queued_questions(job_dir)
+        ):
+            from transcript_paths import resolve_transcript_path_for_minutes
+
+            unknowns_path = os.path.join(job_dir, "unknown_points.json")
+            text_path = resolve_transcript_path_for_minutes(
+                args.job_id, None, args.input_root
+            )
+            qcycle = [
+                _py(),
+                os.path.join(_REPO_ROOT, "run_question_cycle_once.py"),
+                "--job-id",
+                args.job_id,
+                "--input-root",
+                args.input_root,
+                "--unknowns",
+                unknowns_path,
+                "--min-question-value",
+                str(args.min_question_value),
+            ]
+            if text_path:
+                qcycle.extend(["--text", text_path])
+            send_line = bool(
+                args.send_line or (should_send_line() and _line_push_env_ready())
+            )
+            if send_line:
+                qcycle.append("--send-line")
+            qrc = _run(qcycle, log_path=log_path)
+            if qrc == 0 and _question_cycle_generated_new_question(job_dir):
+                write_pause_marker(
+                    job_dir,
+                    mode=os.environ.get("QUESTION_MODE", "line"),
+                    question_artifacts=[
+                        "question_result.json",
+                        "unknown_points.json",
+                        "minutes_quality_gate.json",
+                    ],
+                    resume_hint="最終品質レビューの回答後に軽量再開",
+                )
+                update_job_progress(
+                    input_root=args.input_root,
+                    job_id=args.job_id,
+                    phase="final_quality_question_pause",
+                    status="success",
+                    detail={"pending_unknowns": pending_after_gate},
+                    overall_status="paused",
+                )
+                print(
+                    "[answer_light] quality gate queued next question; status=paused",
+                    flush=True,
+                )
+                return 0
         # resume 失敗もユーザーに分かるよう LINE で通知
         send_line = bool(args.send_line or (should_send_line() and _line_push_env_ready()))
         if send_line and _line_push_env_ready():

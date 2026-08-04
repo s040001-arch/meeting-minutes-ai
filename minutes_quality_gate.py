@@ -8,6 +8,7 @@ updated.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,76 @@ _VALID_MODES = {"off", "report", "enforce"}
 
 class MinutesQualityGateError(RuntimeError):
     """Raised when an enforce-mode transcript is not publishable."""
+
+
+def _queue_unresolved_final_findings(
+    *,
+    job_dir: str,
+    text: str,
+    readable_stats: dict[str, Any] | None,
+) -> int:
+    """Expose unresolved final-review findings to the normal Q&A cycle."""
+    stats = readable_stats or {}
+    final_report = stats.get("final_review")
+    if not isinstance(final_report, dict):
+        return 0
+    findings = [
+        f
+        for f in (final_report.get("findings") or [])
+        if isinstance(f, dict)
+        and str(f.get("confidence") or "").lower() in {"high", "medium"}
+    ]
+    if not findings:
+        return 0
+
+    path = Path(job_dir) / "unknown_points.json"
+    existing: list[dict[str, Any]] = []
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                existing = [x for x in loaded if isinstance(x, dict)]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    by_id = {
+        str(x.get("anomaly_id") or ""): x
+        for x in existing
+        if str(x.get("anomaly_id") or "")
+    }
+    queued = 0
+    for finding in findings:
+        quote = str(finding.get("quote") or "").strip()
+        if not quote or quote not in text:
+            continue
+        issue = str(finding.get("issue") or "").strip()
+        digest = hashlib.sha256(f"{quote}\0{issue}".encode("utf-8")).hexdigest()[:16]
+        anomaly_id = f"final_{digest}"
+        item = by_id.get(anomaly_id)
+        payload = {
+            "type": "final_review",
+            "source": "final_review",
+            "anomaly_id": anomaly_id,
+            "anomaly_word": quote,
+            "text": quote,
+            "span_text": quote,
+            "issue": issue,
+            "estimated_correction": str(finding.get("fix") or "").strip(),
+            "confidence": str(finding.get("confidence") or "").lower(),
+            "context_position_in_transcript": text.find(quote),
+            "status": "open",
+        }
+        if item is None:
+            existing.append(payload)
+            by_id[anomaly_id] = payload
+        else:
+            item.update(payload)
+        queued += 1
+    if queued:
+        path.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return queued
 
 
 def resolve_minutes_quality_gate_mode() -> str:
@@ -221,6 +292,13 @@ def run_minutes_quality_gate(
             unknown_points=unknown_points,
         ),
     }
+    if report["status"] == "blocked":
+        queued = _queue_unresolved_final_findings(
+            job_dir=job_dir,
+            text=text,
+            readable_stats=readable_stats,
+        )
+        report["metrics"]["final_review_questions_queued"] = queued
     path = Path(job_dir) / QUALITY_GATE_REPORT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

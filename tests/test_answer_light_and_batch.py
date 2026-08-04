@@ -266,6 +266,22 @@ class AnswerLightCompletionAfterNoQuestionTests(unittest.TestCase):
             )
             self.assertFalse(_question_cycle_generated_new_question(job))
 
+    def test_quality_gate_question_queue_detected(self) -> None:
+        from run_answer_light import _quality_gate_queued_questions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            (job / "minutes_quality_gate.json").write_text(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "metrics": {"final_review_questions_queued": 2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(_quality_gate_queued_questions(job))
+
 
 class ExplicitCorrectionReflectionTests(unittest.TestCase):
     def test_embedded_japanese_occurrence_is_applied_and_audited(self) -> None:

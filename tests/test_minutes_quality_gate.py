@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from minutes_quality_gate import (
     MinutesQualityGateError,
+    _queue_unresolved_final_findings,
     evaluate_minutes_quality,
     run_minutes_quality_gate,
 )
@@ -115,6 +116,26 @@ class MinutesQualityGateTests(unittest.TestCase):
                 )
             )
             self.assertEqual(payload["status"], "blocked")
+
+    def test_unresolved_final_finding_is_queued_for_question_cycle(self) -> None:
+        finding = {
+            "confidence": "medium",
+            "quote": "意味不明の断片です",
+            "issue": "文脈上確定できない",
+            "fix": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text="前文。意味不明の断片です。後文。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+            points = json.loads(
+                (Path(tmp) / "unknown_points.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(points[0]["source"], "final_review")
+        self.assertEqual(points[0]["status"], "open")
 
 
 if __name__ == "__main__":
