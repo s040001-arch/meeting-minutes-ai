@@ -138,6 +138,19 @@ def evaluate_minutes_quality(
             }
         )
 
+    editorial_stats = stats.get("editorial_transcript")
+    if isinstance(editorial_stats, dict) and editorial_stats.get("enabled"):
+        if editorial_stats.get("failed"):
+            blockers.append(
+                {
+                    "code": "editorial_transcript_failed",
+                    "message": "読者向け全文完成稿の生成または事実保持検証に失敗した",
+                    "errors": list(
+                        editorial_stats.get("validation_errors") or []
+                    )[:20],
+                }
+            )
+
     if final_report.get("error"):
         blockers.append(
             {
@@ -264,6 +277,18 @@ def evaluate_minutes_quality(
             "readable_total_chunks": int(stats.get("total_chunks") or 0),
             "readable_failed_chunks": len(failed_chunks),
             "readable_split_recovered": int(stats.get("split_recovered") or 0),
+            "editorial_enabled": bool(
+                isinstance(editorial_stats, dict)
+                and editorial_stats.get("enabled")
+            ),
+            "editorial_applied": bool(
+                isinstance(editorial_stats, dict)
+                and editorial_stats.get("applied")
+            ),
+            "editorial_failed": bool(
+                isinstance(editorial_stats, dict)
+                and editorial_stats.get("failed")
+            ),
             "final_review_findings": len(findings),
             "final_review_applied": len(final_report.get("applied") or []),
             "verify_tag_count": verify_tag_count,

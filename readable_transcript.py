@@ -447,6 +447,27 @@ def generate_readable_transcript_with_stats(
     """Write readable transcript file; return (text, stats, output_path)."""
     polished, stats = polish_transcript_text_with_stats(source_text, meeting_profile)
 
+    # 読者向け全文完成稿パス。数値・人名等はプレースホルダで固定し、
+    # 全文整文後にも事実差分ゲートを通す。
+    try:
+        from editorial_transcript_pass import generate_editorial_transcript
+
+        polished, editorial_stats, _ = generate_editorial_transcript(
+            job_dir=job_dir,
+            text=polished,
+            meeting_profile=meeting_profile,
+        )
+        stats["editorial_transcript"] = editorial_stats
+    except Exception as e:  # noqa: BLE001
+        print(f"editorial_transcript_pass_skipped={e!r}")
+        stats["editorial_transcript"] = {
+            "enabled": True,
+            "attempted": True,
+            "applied": False,
+            "failed": True,
+            "validation_errors": [f"unexpected_error:{e!r}"],
+        }
+
     # 最終批評パス（単一目的の全文レビュー）。off/shadow/apply は env で制御。
     # 失敗しても polished をそのまま使う（非致命）。
     try:

@@ -54,6 +54,24 @@ class MinutesQualityGateTests(unittest.TestCase):
         self.assertIn("readable_chunk_fallback", codes)
         self.assertIn("final_review_unresolved", codes)
 
+    def test_blocks_failed_editorial_transcript(self) -> None:
+        stats = self._stats()
+        stats["editorial_transcript"] = {
+            "enabled": True,
+            "attempted": True,
+            "applied": False,
+            "failed": True,
+            "validation_errors": ["numeric_tokens_changed"],
+        }
+        report = evaluate_minutes_quality(
+            text="本文",
+            readable_stats=stats,
+        )
+        self.assertIn(
+            "editorial_transcript_failed",
+            {x["code"] for x in report["blockers"]},
+        )
+
     def test_blocks_remaining_verify_tag(self) -> None:
         report = evaluate_minutes_quality(
             text="名称[要確認]です。",

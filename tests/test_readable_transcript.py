@@ -136,6 +136,60 @@ class GenerateFileTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(readable))
             self.assertEqual(os.path.basename(readable), READABLE_TRANSCRIPT_FILENAME)
 
+    def test_editorial_pass_runs_before_final_review(self) -> None:
+        from readable_transcript import generate_readable_transcript_with_stats
+
+        source = "土井様が88kgの事例を説明しました。"
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"ANTHROPIC_API_KEY": "test-key"},
+                clear=False,
+            ):
+                with patch(
+                    "readable_transcript._edit_one_chunk",
+                    side_effect=lambda _c, chunk, _s, **_kw: chunk,
+                ):
+                    with patch(
+                        "editorial_transcript_pass.generate_editorial_transcript",
+                        return_value=(
+                            "全文完成稿です。\n",
+                            {
+                                "enabled": True,
+                                "applied": True,
+                                "failed": False,
+                            },
+                            os.path.join(tmp, "merged_transcript_editorial.txt"),
+                        ),
+                    ):
+                        with patch(
+                            "final_review_pass.resolve_final_review_mode",
+                            return_value="apply",
+                        ):
+                            with patch(
+                                "final_review_pass.run_final_review",
+                                return_value=(
+                                    "最終監査済みです。\n",
+                                    {
+                                        "mode": "apply",
+                                        "findings": [],
+                                        "applied": [],
+                                    },
+                                ),
+                            ) as review:
+                                out, stats, _ = (
+                                    generate_readable_transcript_with_stats(
+                                        job_dir=tmp,
+                                        source_text=source,
+                                    )
+                                )
+        review.assert_called_once_with(
+            job_dir=tmp,
+            text="全文完成稿です。\n",
+        )
+        self.assertEqual(out, "最終監査済みです。\n")
+        self.assertTrue(stats["editorial_transcript"]["applied"])
+
 
 class MinutesTextTests(unittest.TestCase):
     def test_section_label_switches(self) -> None:
