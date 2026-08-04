@@ -82,6 +82,11 @@ def _restore_ordered_tokens(
     matches = list(pattern.finditer(candidate))
     if len(source_tokens) != len(matches):
         return candidate, False
+    # Equal multisets mean no token was altered.  Positional rewriting would
+    # corrupt legitimate sentence reordering (swapping values between
+    # clauses), so restore only actual token drift.
+    if Counter(source_tokens) == Counter(m.group(0) for m in matches):
+        return candidate, False
     replacements = [
         (match.start(), match.end(), source_tokens[index])
         for index, match in enumerate(matches)
@@ -388,7 +393,11 @@ def editorialize_transcript(
     # Paragraphs with protected-fact changes fall back independently. The
     # final reviewer audits both rewritten and fallback paragraphs.
     if stats["applied_paragraphs"] == 0:
-        stats["failed"] = True
+        # An already-clean transcript needing no edits is a success; only
+        # treat zero applied paragraphs as failure when validation errors
+        # forced fallbacks.
+        if stats["fallback_chunk_idx"] or stats["validation_errors"]:
+            stats["failed"] = True
         return text, stats
     return candidate.strip() + "\n", stats
 
