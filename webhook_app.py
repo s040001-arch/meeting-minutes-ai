@@ -924,6 +924,7 @@ def _resolve_line_context() -> dict:
         selected_unknown = ctx.get("selected_unknown")
         return {
             "source": "pipeline_context",
+            "kind": str(ctx.get("kind") or "").strip(),
             "question_id": str(ctx.get("question_id") or "unknown"),
             "question_text": str(ctx.get("question_text") or "").strip(),
             "job_id": str(ctx.get("job_id") or "").strip() or None,
@@ -941,6 +942,7 @@ def _resolve_line_context() -> dict:
         selected_unknown = pending_file.get("selected_unknown")
         return {
             "source": "local_pending_state",
+            "kind": str(pending_file.get("kind") or "").strip(),
             "question_id": question_id,
             "question_text": str(question_text or "").strip(),
             "job_id": str(pending_file.get("job_id") or "").strip() or None,
@@ -1106,6 +1108,60 @@ def _enrich_yes_no_answer_with_hypothesis(
     return raw_answer
 
 
+def _handle_prior_context_message(text: str, context: dict) -> str:
+    """事前情報依頼（prior_context_request）への返信を取り込む。
+
+    「なし」なら pending を消して通常フローへ。本文が来たら知識抽出して
+    ナレッジシートとジョブの meeting_profile に反映する。pending は残す
+    （追加の資料を続けて送れるようにする。次の質問送信時に上書きされる）。
+    """
+    from prior_context_ingest import (
+        clear_prior_context_pending,
+        ingest_prior_context,
+        is_no_context_reply,
+    )
+
+    job_id = str(context.get("job_id") or "").strip()
+
+    def _clear_pending() -> None:
+        clear_prior_context_pending()
+        r = state.get("remote_pending")
+        if isinstance(r, dict) and r.get("kind") == "prior_context_request":
+            state["remote_pending"] = {}
+
+    if is_no_context_reply(text):
+        _clear_pending()
+        if job_id:
+            _record_job_visible_log(job_id, "事前情報: なし（ユーザー回答）")
+        return "了解しました。事前情報なしで処理を進めます。"
+
+    try:
+        result = ingest_prior_context(text, job_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"prior_context_ingest_failed={e!r}")
+        return (
+            "事前情報の取り込みに失敗しました。"
+            "処理は通常どおり続行します。後ほど再送いただければ再度取り込みます。"
+        )
+    memos = int(result.get("memos_extracted") or 0)
+    if job_id:
+        _record_job_visible_log(
+            job_id,
+            f"事前情報を取り込みました memos={memos} "
+            f"sheet={result.get('sheet_added')} profile={result.get('profile_added')}",
+        )
+    if memos:
+        return (
+            f"事前情報を取り込みました（知識{memos}件を登録）。"
+            "議事録処理に反映します。追加の資料があればこのまま送ってください。"
+            "なければ「なし」と返信してください。"
+        )
+    return (
+        "事前情報を受け取りました（原文を保存しました）。"
+        "議事録処理の参考にします。追加があればこのまま送ってください。"
+    )
+
+
 def handle_user_input(text: str, user_id: str | None = None) -> str:
     """LINE メッセージから使える情報を抽出し、回答反映と辞書更新を必要に応じて両方行う。"""
     global state
@@ -1114,6 +1170,9 @@ def handle_user_input(text: str, user_id: str | None = None) -> str:
         state["answers"] = {}
 
     context = _resolve_line_context()
+    # 事前情報の依頼中は、回答抽出ではなく事前情報の取り込みとして処理する
+    if str(context.get("kind") or "") == "prior_context_request":
+        return _handle_prior_context_message(text, context)
     question_id = str(context.get("question_id") or "unknown")
     qtext_for_save = str(context.get("question_text") or "").strip()
     job_id_for_save = str(context.get("job_id") or "").strip() or None

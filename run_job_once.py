@@ -826,6 +826,16 @@ def main() -> None:
     profile_path = save_meeting_profile(job_dir, meeting_profile)
     log_line(log_path, f"meeting_profile saved path={profile_path}")
 
+    # 事前情報の依頼（2026-08-05）: メール等で共有済みの論点・固有名詞を
+    # 処理の最初に取り込めるよう、LINE で送付を依頼する。
+    try:
+        from prior_context_ingest import request_prior_context
+
+        if request_prior_context(args.job_id, display_title):
+            log_line(log_path, "prior_context_request sent via LINE")
+    except Exception as e:
+        log_line(log_path, f"prior_context_request failed: {e!r}")
+
     try:
         log_line(log_path, "input_type=txt")
         with open(args.input_audio, "r", encoding="utf-8") as f:
