@@ -386,10 +386,10 @@ def _build_fallback_system_prompt(meeting_profile: dict[str, Any] | None) -> str
 def _summarize_one_fallback(
     client: anthropic.Anthropic, section_text: str, system_prompt: str | list
 ) -> str:
+    # claude-sonnet-5 は temperature を受け付けない（deprecated）。
     resp = client.messages.create(
         model=SUMMARY_MODEL,
         max_tokens=SUMMARY_MAX_TOKENS,
-        temperature=0,
         timeout=SUMMARY_TIMEOUT_SEC,
         system=system_prompt,
         messages=[{"role": "user", "content": section_text}],

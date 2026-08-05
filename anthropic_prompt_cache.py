@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
-# Opus 4.8 snapshot (replaces claude-opus-4-7 / claude-opus-4-20250514 lineage).
-OPUS_MODEL_ID = "claude-opus-4-8"
+# Opus 5 (replaces claude-opus-4-8 lineage).
+OPUS_MODEL_ID = "claude-opus-5"
 
 
 def cached_system(static_text: str, variable_text: str = "") -> str | list[dict[str, Any]]:
