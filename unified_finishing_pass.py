@@ -407,6 +407,18 @@ def run_unified_finishing(
     # 序盤の回答知識を使って後半の残存崩れを解決できるようにする。
     answered_knowledge = _answered_knowledge_block(job_dir)
     stats["answered_knowledge_items"] = answered_knowledge.count("\n- ")
+    # 過去ジョブで確定した文脈依存の誤変換ペア（盲目置換は危険なもの）を
+    # 修復プロンプトのヒントとして注入する。適用するかは文脈を見て
+    # LLM が判断する（機械置換はしない）。
+    try:
+        from learned_corrections_store import format_context_hints_block
+
+        hints_block = format_context_hints_block()
+        if hints_block.strip():
+            answered_knowledge = (answered_knowledge + hints_block).strip()
+            stats["context_hint_pairs"] = hints_block.count("\n- ")
+    except Exception as exc:  # noqa: BLE001
+        print(f"unified_context_hints_failed={exc!r}")
 
     # 1. 監査: 検出専用・窓分割並列。修正はまだ行わない。
     try:

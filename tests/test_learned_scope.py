@@ -4,9 +4,11 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from learned_corrections_store import (
     add_learned_correction,
+    decide_scope,
     format_context_hints_block,
     load_context_hints,
     load_learned_dict,
@@ -26,6 +28,51 @@ class SuggestScopeTests(unittest.TestCase):
     def test_garble_words_are_global(self) -> None:
         for w in ["就高年収", "自施要項", "講師ング", "オブザード", "倫理決済"]:
             self.assertEqual(suggest_scope(w), "global", w)
+
+
+class DecideScopeTests(unittest.TestCase):
+    """decide_scope: 入口の実在語判定（LLM + 安全側フォールバック）。"""
+
+    def test_name_like_wrongs_are_context_without_llm(self) -> None:
+        # 「根本さん」(4文字) は旧ヒューリスティックでは global に漏れていた
+        with patch(
+            "learned_corrections_store._classify_scope_with_llm"
+        ) as llm:
+            self.assertEqual(decide_scope("根本さん", "梅本さん"), "context")
+            llm.assert_not_called()
+
+    def test_heuristic_context_skips_llm(self) -> None:
+        with patch(
+            "learned_corrections_store._classify_scope_with_llm"
+        ) as llm:
+            self.assertEqual(decide_scope("決済", "決裁"), "context")
+            llm.assert_not_called()
+
+    def test_llm_verdict_is_used(self) -> None:
+        with patch(
+            "learned_corrections_store._classify_scope_with_llm",
+            return_value="context",
+        ):
+            self.assertEqual(
+                decide_scope("本店にあります", "本当にあります"), "context"
+            )
+        with patch(
+            "learned_corrections_store._classify_scope_with_llm",
+            return_value="global",
+        ):
+            self.assertEqual(
+                decide_scope("倫理決済", "稟議決裁"), "global"
+            )
+
+    def test_llm_failure_falls_back_to_safe_context(self) -> None:
+        # 判定不能時は盲目置換より文脈ヒントが安全
+        with patch(
+            "learned_corrections_store._classify_scope_with_llm",
+            return_value=None,
+        ):
+            self.assertEqual(
+                decide_scope("小さいやつ", "G3/A3研修"), "context"
+            )
 
 
 class ScopeSeparationTests(unittest.TestCase):

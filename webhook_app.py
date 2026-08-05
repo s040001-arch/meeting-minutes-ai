@@ -402,10 +402,10 @@ def _merge_correction_pairs(
     返り値: (correction_dict added, correction_dict updated, learned context 件数)
     """
     try:
-        from learned_corrections_store import add_learned_correction, suggest_scope
+        from learned_corrections_store import add_learned_correction, decide_scope
     except ImportError:
         add_learned_correction = None
-        suggest_scope = None
+        decide_scope = None
 
     current = _load_correction_dict()
     added = 0
@@ -416,7 +416,10 @@ def _merge_correction_pairs(
         correct = str(item.get("correct") or "").strip()
         if not wrong or not correct or wrong == correct:
             continue
-        scope = suggest_scope(wrong) if suggest_scope else "global"
+        # decide_scope は実在語の可能性を LLM 判定し、判定不能時は安全側
+        # (context=文脈ヒント)に倒す。盲目置換辞書に入るのは「実在しえない
+        # 崩れ表記」と判定されたものだけ（2026-08-05 ユーザー優先事項）。
+        scope = decide_scope(wrong, correct) if decide_scope else "context"
         if scope == "context":
             if add_learned_correction:
                 r = add_learned_correction(

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from typing import Any
@@ -77,11 +78,15 @@ _KNOWN_REAL_WORD_WRONGS = {
 
 
 def suggest_scope(wrong: str) -> str:
-    """置換ペアの安全な scope を推定する。
+    """置換ペアの安全な scope をヒューリスティックで推定する。
 
     - 既知の実在語、または 3 文字以下の短い語 → "context"
       （短い語は別会議で正当に出現する可能性が高く、盲目置換は品質リスク）
     - それ以外（実在しにくい崩れ表記）→ "global"
+
+    注意: このヒューリスティックは「根本さん」（4文字の実在人名）のような
+    ケースを global と誤判定する。新規追加の入口では decide_scope()
+    （LLM判定つき）を使うこと。
     """
     w = (wrong or "").strip()
     if w in _KNOWN_REAL_WORD_WRONGS:
@@ -89,6 +94,77 @@ def suggest_scope(wrong: str) -> str:
     if len(w) <= 3:
         return "context"
     return "global"
+
+
+# 実在人名パターン（漢字1-3文字 + 敬称）は API を呼ぶまでもなく context
+_NAME_LIKE_RE = re.compile(r"^[\u4E00-\u9FFF]{1,3}(さん|様|氏|くん|ちゃん)$")
+
+_SCOPE_CLASSIFIER_MODEL = "claude-sonnet-5"
+
+
+def _classify_scope_with_llm(wrong: str, right: str) -> str | None:
+    """「wrong が実在語として他会議に正当に出現しうるか」を LLM で判定する。
+
+    返り値: "context" / "global" / None（判定不能）。
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model=_SCOPE_CLASSIFIER_MODEL,
+            max_tokens=200,
+            timeout=30,
+            system=(
+                "あなたは日本語の音声認識誤変換ペアの安全性を判定します。"
+                "与えられた「誤」の文字列が、誤変換ではなく正当な日本語"
+                "（実在の人名・地名・一般語・自然な言い回し）として、"
+                "別の会議の書き起こしに出現しうるかを判定してください。"
+                '出力はJSONのみ: {"plausible_real": true|false, "reason": "短い理由"}'
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"誤: {wrong}\n正: {right}",
+                }
+            ],
+        )
+        text = "".join(
+            b.text for b in resp.content if getattr(b, "type", "") == "text"
+        )
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        verdict = json.loads(m.group(0))
+        return "context" if bool(verdict.get("plausible_real")) else "global"
+    except Exception as e:  # noqa: BLE001
+        print(f"scope_llm_classify_failed={e!r}")
+        return None
+
+
+def decide_scope(wrong: str, right: str = "") -> str:
+    """新規置換ペアの scope を決定する（入口用）。
+
+    ユーザー方針（2026-08-05）: 文脈盲目な全ジョブ置換は品質リスクなので、
+    実在語の可能性がある語は必ず context（文脈判断つきヒント）に回す。
+
+    判定順:
+    1. ヒューリスティックで context と判定できるもの → context（API不要）
+    2. 人名パターン（漢字+敬称） → context（API不要）
+    3. LLM 判定 → その結果
+    4. LLM 判定不能 → context（安全側: 盲目置換より文脈ヒントが安全）
+    """
+    w = (wrong or "").strip()
+    if suggest_scope(w) == "context":
+        return "context"
+    if _NAME_LIKE_RE.match(w):
+        return "context"
+    llm = _classify_scope_with_llm(w, (right or "").strip())
+    if llm in ("context", "global"):
+        return llm
+    return "context"
 
 
 def _now_iso() -> str:
