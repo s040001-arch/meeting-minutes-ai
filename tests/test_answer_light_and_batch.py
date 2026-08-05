@@ -182,9 +182,68 @@ class FinalReviewQuestionTests(unittest.TestCase):
         self.assertIn("AIが質問してくれて", payload["question_text"])
         self.assertEqual(
             payload["selection_audit"]["selection_mode"],
-            "final_quality_gate_fifo",
+            "final_quality_gate_impact_single",
         )
         writer.assert_called_once()
+
+    def test_related_findings_are_bundled_into_one_impact_question(self) -> None:
+        # 「同じ答えで解決する一群」(同一人物の表記ゆれ等)は1通にまとめる。
+        # 無関係な項目は混ぜない（件数上限のバッチではない）。
+        full_text = (
+            "シュニアの田中が説明しました。続いてシニアの田中から補足。"
+            "その後シュニアの担当範囲を確認した。全く別件で予算感覚の話。"
+        )
+        points = [
+            {
+                "type": "final_review",
+                "source": "final_review",
+                "anomaly_id": "fr_001",
+                "anomaly_word": "シュニア",
+                "text": "シュニア",
+                "estimated_correction": "シニア",
+                "context_position_in_transcript": 0,
+                "status": "open",
+            },
+            {
+                "type": "final_review",
+                "source": "final_review",
+                "anomaly_id": "fr_002",
+                "anomaly_word": "シニアの田中",
+                "text": "シニアの田中",
+                "estimated_correction": "",
+                "context_position_in_transcript": 22,
+                "status": "open",
+            },
+            {
+                "type": "final_review",
+                "source": "final_review",
+                "anomaly_id": "fr_003",
+                "anomaly_word": "予算感覚",
+                "text": "予算感覚",
+                "estimated_correction": "予算感",
+                "context_position_in_transcript": 60,
+                "status": "open",
+            },
+        ]
+        with patch("run_question_cycle_once.write_line_pending_context"):
+            payload = _build_final_review_question_payload(
+                job_id="job_x",
+                final_pending=points,
+                pending_meta={"pending_unknown_points_count": 3},
+                doc_url="",
+                full_text=full_text,
+            )
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(
+            payload["selection_audit"]["selection_mode"],
+            "final_quality_gate_impact_cluster",
+        )
+        batch_items = payload["selected_unknown"]["batch_items"]
+        ids = {item["anomaly_id"] for item in batch_items}
+        self.assertEqual(ids, {"fr_001", "fr_002"})
+        # 無関係の「予算感覚」は次サイクルへ回る
+        self.assertNotIn("fr_003", ids)
 
 
 class MarkBatchAskedAndAnsweredTests(unittest.TestCase):

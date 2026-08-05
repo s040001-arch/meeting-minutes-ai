@@ -440,14 +440,71 @@ def _maybe_build_coherence_done_payload(
     }
 
 
+def _build_final_review_impact_batch_payload(
+    *,
+    job_id: str,
+    cluster_items: list[dict],
+    pending_meta: dict,
+    doc_url: str,
+    full_text: str,
+) -> dict | None:
+    """「同じ答えで解決する一群」を番号付き1通にまとめて確認する。"""
+    items = build_batch_items(
+        cluster_items, limit=len(cluster_items), full_text=full_text
+    )
+    if len(items) < 2:
+        return None
+    question_id = str(uuid.uuid4())
+    question_text = build_batch_question_text(items)
+    selected = {
+        "type": RECOGNITION_BATCH_TYPE,
+        "source": "final_review",
+        "batch_items": items,
+        "text": items[0].get("word") or "",
+        "anomaly_word": items[0].get("word") or "",
+        "anomaly_id": items[0].get("anomaly_id") or "",
+    }
+    selection_audit = {
+        "selection_mode": "final_quality_gate_impact_cluster",
+        "question_format": RECOGNITION_BATCH_FORMAT,
+        "batch_item_count": len(items),
+        "proposal_impact": 10,
+    }
+    payload = {
+        "job_id": job_id,
+        "question_id": question_id,
+        "question_status": "generated",
+        "question_format": RECOGNITION_BATCH_FORMAT,
+        "message": "",
+        "selected_unknown": selected,
+        "doc_url": doc_url,
+        "selection_audit": {**pending_meta, **selection_audit},
+        "question_text": question_text,
+    }
+    write_line_pending_context(
+        job_id=job_id,
+        question_id=question_id,
+        question_text=question_text,
+        selected_unknown=selected,
+        selection_audit=payload.get("selection_audit") or {},
+    )
+    return payload
+
+
 def _build_final_review_question_payload(
     *,
     job_id: str,
     final_pending: list[dict],
     pending_meta: dict,
     doc_url: str,
+    full_text: str = "",
 ) -> dict | None:
-    """Ask strict quality-gate findings directly, bypassing value re-ranking."""
+    """品質ゲート残存問題を「影響度最大」から聞く（2026-08-05 方針）。
+
+    質問は上限件数で刻むのではなく、影響度クラスタ（同じ答えで解決する
+    一群）単位で 1 問ずつ。回答→再処理（カスケード）→次のクラスタ、
+    の繰り返しで総質問数を最小化する。
+    """
     candidates = [
         item
         for item in final_pending
@@ -456,10 +513,21 @@ def _build_final_review_question_payload(
     ]
     if not candidates:
         return None
-    selected = min(
-        candidates,
-        key=lambda item: int(item.get("context_position_in_transcript") or 10**9),
-    )
+    from question_impact import cluster_pending_findings
+
+    clusters = cluster_pending_findings(candidates, full_text)
+    top = clusters[0]
+    if len(top["items"]) >= 2:
+        batch_payload = _build_final_review_impact_batch_payload(
+            job_id=job_id,
+            cluster_items=top["items"],
+            pending_meta=pending_meta,
+            doc_url=doc_url,
+            full_text=full_text,
+        )
+        if batch_payload is not None:
+            return batch_payload
+    selected = top["items"][0]
     quote = str(selected.get("text") or selected.get("anomaly_word") or "").strip()
     fix = str(selected.get("estimated_correction") or "").strip()
     selected = dict(selected)
@@ -478,7 +546,7 @@ def _build_final_review_question_payload(
         )
     question_id = str(uuid.uuid4())
     audit = {
-        "selection_mode": "final_quality_gate_fifo",
+        "selection_mode": "final_quality_gate_impact_single",
         "question_format": question_format,
         "proposal_impact": 10,
         **pending_meta,
@@ -1219,6 +1287,7 @@ def main() -> None:
             final_pending=regular_pending,
             pending_meta=pending_meta,
             doc_url=doc_url,
+            full_text=full_text,
         )
 
     if result_payload is None and not coherence_pending and regular_pending:
