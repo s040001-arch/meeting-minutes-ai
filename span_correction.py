@@ -89,45 +89,101 @@ def apply_span_word_replacement(
     return text[:start] + right + text[start + len(wrong) :], True
 
 
+def _is_word_level_replacement(wrong: str, replacement: str) -> bool:
+    """``replacement`` が単語 ``wrong`` の素直な置換先として妥当か。
+
+    2026-08-05 バグ対策: reconstruct 系は span_corrected に「文全体の修正版」
+    を入れることがある。それを単語位置の置換に使うと、周辺の文が二重化する
+    （楽天ジョブで「プレサナ」→修正文まるごと、が発生）。文らしきもの・
+    極端に長いものは単語置換に使わない。
+    """
+    if not replacement:
+        return False
+    if "。" in replacement or "\n" in replacement:
+        return False
+    return len(replacement) <= max(len(wrong) * 3, len(wrong) + 10)
+
+
 def apply_span_correction_from_anomaly(
     text: str,
     anomaly: dict[str, Any],
 ) -> tuple[str, dict[str, Any] | None]:
-    """Apply one auto_fixable anomaly at its span position."""
+    """Apply one auto_fixable anomaly at its span position.
+
+    優先順: (1) 単語レベル置換（wrong→妥当な単語級の修正先）、
+    (2) span_text 全体→span_corrected のスパン置換（span_corrected が
+    文全体の修正版だった場合の安全な適用方法）。どちらも成立しなければ
+    何もしない（呼び出し側で未解決として扱われる）。
+    """
     if not anomaly.get("auto_fixable"):
         return text, None
     wrong = str(anomaly.get("anomaly_word") or "").strip()
-    right = str(anomaly.get("span_corrected") or anomaly.get("estimated_correction") or "").strip()
-    if not wrong or not right or wrong == right:
-        return text, None
-    start = anomaly.get("span_start", -1)
-    try:
-        start = int(start)
-    except (TypeError, ValueError):
-        start = -1
-    if start < 0:
-        start = resolve_word_position(
-            text,
-            wrong,
-            hint_pos=int(anomaly.get("context_position_in_transcript") or -1),
-            context=str(anomaly.get("context") or ""),
+    estimated = str(anomaly.get("estimated_correction") or "").strip()
+    span_corrected = str(anomaly.get("span_corrected") or "").strip()
+    span_text = str(anomaly.get("span_text") or "").strip()
+
+    right = ""
+    if _is_word_level_replacement(wrong, span_corrected):
+        right = span_corrected
+    elif _is_word_level_replacement(wrong, estimated):
+        right = estimated
+
+    if wrong and right and right != wrong:
+        start = anomaly.get("span_start", -1)
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            start = -1
+        if start < 0:
+            start = resolve_word_position(
+                text,
+                wrong,
+                hint_pos=int(anomaly.get("context_position_in_transcript") or -1),
+                context=str(anomaly.get("context") or ""),
+            )
+        new_text, changed = apply_span_word_replacement(
+            text, start=start, wrong=wrong, right=right
         )
-    new_text, changed = apply_span_word_replacement(text, start=start, wrong=wrong, right=right)
-    if not changed:
-        return text, None
-    return new_text, {
-        "anomaly_id": anomaly.get("anomaly_id"),
-        "before": wrong,
-        "after": right,
-        "action": "correct",
-        "confidence": anomaly.get("confidence"),
-        "reason": anomaly.get("reason", ""),
-        "span_start": start,
-        "span_end": start + len(wrong),
-        "span_text": anomaly.get("span_text") or "",
-        "span_corrected": right,
-        "occurrences_replaced": 1,
-    }
+        if changed:
+            return new_text, {
+                "anomaly_id": anomaly.get("anomaly_id"),
+                "before": wrong,
+                "after": right,
+                "action": "correct",
+                "confidence": anomaly.get("confidence"),
+                "reason": anomaly.get("reason", ""),
+                "span_start": start,
+                "span_end": start + len(wrong),
+                "span_text": span_text,
+                "span_corrected": right,
+                "occurrences_replaced": 1,
+            }
+
+    # 単語置換ができない場合: span_corrected が文全体の修正版なら、
+    # 対応する span_text 全体を一意に置き換える。
+    if (
+        span_text
+        and span_corrected
+        and span_corrected != span_text
+        and text.count(span_text) == 1
+    ):
+        new_text = text.replace(span_text, span_corrected, 1)
+        start = text.find(span_text)
+        return new_text, {
+            "anomaly_id": anomaly.get("anomaly_id"),
+            "before": span_text,
+            "after": span_corrected,
+            "action": "correct",
+            "mode": "span_replace",
+            "confidence": anomaly.get("confidence"),
+            "reason": anomaly.get("reason", ""),
+            "span_start": start,
+            "span_end": start + len(span_text),
+            "span_text": span_text,
+            "span_corrected": span_corrected,
+            "occurrences_replaced": 1,
+        }
+    return text, None
 
 
 def apply_span_corrections_batch(

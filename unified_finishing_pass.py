@@ -34,7 +34,9 @@ import anthropic
 UNIFIED_REPORT_FILENAME = "unified_finishing_report.json"
 # 監査窓は検出品質が文書内の位置に依存しないための分割。窓ごとに全文脈は
 # 見えないが、事実照合は検証段（全文1回）と gate が担う。
-AUDIT_WINDOW_TARGET_CHARS = 12_000
+# 2026-08-05: 12,000→6,000。窓が大きいと崩れ密度が高いテキストで検出が
+# 飽和し、後半の見落としが増える（楽天ジョブの実測: 26件/2窓で頭打ち）。
+AUDIT_WINDOW_TARGET_CHARS = 6_000
 AUDIT_MAX_PARALLEL = 3
 # 読者阻害の崩れの外科的修復は1ラウンドで最大この件数まで扱う。
 UNIFIED_RESOLVER_MAX_ITEMS = 60
@@ -325,23 +327,38 @@ def _verify_full_text(
     text: str,
     meeting_profile: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """独立した全文検証を2回走らせ、片方でも検出された問題を採用する。
+    """独立した検証を2系統走らせ、どちらかで検出された問題を採用する。
 
-    1回の全文レビューは長文の後半などで確率的に見逃しが出る。2回の和を
-    取ることで見逃しを減らす（誤検出側は後段の事実ゲートと質問経路が守る）。
+    2026-08-05 改良: 従来は全文一括レビュー×2だったが、長文では後半で
+    検出が飽和し見逃しが出る（楽天ジョブで検証0件なのに意味不明語が多数
+    残存）。1系統目は窓分割（後半も均等な注意で走査）、2系統目は全文一括
+    （文書全体の整合を見る）とし、和を取る。誤検出側は後段の事実ゲートと
+    質問経路が守る。
     """
     from final_review_pass import _call_reviewer
 
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for _attempt in range(2):
-        for finding in _call_reviewer(text, meeting_profile):
+
+    def add_all(findings: list[dict[str, Any]]) -> None:
+        for finding in findings:
             quote = str(finding.get("quote") or "").strip()
             key = quote or json.dumps(finding, ensure_ascii=False)[:100]
             if key in seen:
                 continue
             seen.add(key)
             merged.append(finding)
+
+    window_findings, window_errors, _count = _audit_windows(
+        text, meeting_profile
+    )
+    if window_errors:
+        # 未検証の窓を残したまま「問題なし」とは言えない（fail-closed）。
+        raise RuntimeError(
+            f"verify_windows_failed:{'|'.join(window_errors)}"
+        )
+    add_all(window_findings)
+    add_all(_call_reviewer(text, meeting_profile))
     return merged
 
 
@@ -559,6 +576,44 @@ def run_unified_finishing(
             # 何も直せなかったなら再検証しても同じ結果になる。
             remaining = verify_findings
             break
+    # fix or ask（2026-08-05）: 適用をスキップされ、本文に残ったままの検出は
+    # 黙って捨てず、質問キュー行きの findings に合流させる。
+    # （楽天ジョブで20件が「medium だから」とここで消えた再発防止）
+    remaining_quotes = {str(f.get("quote") or "") for f in remaining}
+    applied_quotes_all = {str(f.get("quote") or "") for f in report["applied"]}
+    for s in report["skipped"]:
+        quote = str(s.get("quote") or "")
+        if (
+            quote
+            and quote not in remaining_quotes
+            and quote not in applied_quotes_all
+            and quote in out_text
+        ):
+            remaining.append(s)
+            remaining_quotes.add(quote)
+
+    # 確定情報の決定論的な最終強制（2026-08-05）: 回答・自動修正・自己解決で
+    # 確定した誤表記が最終テキストに残っていれば、ここで強制置換する。
+    try:
+        from confirmed_corrections import (
+            collect_confirmed_pairs,
+            enforce_confirmed_pairs,
+        )
+
+        if job_dir:
+            pairs = collect_confirmed_pairs(job_dir)
+            out_text, enforced = enforce_confirmed_pairs(out_text, pairs)
+            stats["confirmed_pairs_checked"] = len(pairs)
+            stats["confirmed_residuals_enforced"] = len(enforced)
+            if enforced:
+                report["confirmed_residuals_enforced"] = enforced
+                print(
+                    "unified_confirmed_residuals_enforced="
+                    + json.dumps(enforced, ensure_ascii=False)[:400]
+                )
+    except Exception as exc:  # noqa: BLE001
+        print(f"unified_confirmed_enforce_failed={exc!r}")
+
     report["findings"] = remaining
     stats["auto_applied"] = len(report["applied"])
     stats["queued_candidates"] = len(remaining)

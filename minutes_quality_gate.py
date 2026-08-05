@@ -131,6 +131,7 @@ def evaluate_minutes_quality(
     readable_stats: dict[str, Any] | None,
     correction_audit_rows: list[dict[str, Any]] | None = None,
     unknown_points: list[dict[str, Any]] | None = None,
+    ai_correction_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stats = readable_stats or {}
     final_report = stats.get("final_review")
@@ -139,6 +140,26 @@ def evaluate_minutes_quality(
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+
+    # AI補正（Step 4.3 全文書き直し）が丸ごとフォールバックした場合は
+    # ブロックする（2026-08-05）。楽天ジョブで Anthropic 過負荷により
+    # AI補正なしの原文が最後まで素通りし、大量の意味不明語が残った。
+    # 後段の検出はAI補正済みテキストを前提にしており、代替にならない。
+    if isinstance(ai_correction_meta, dict) and ai_correction_meta.get(
+        "used_fallback"
+    ):
+        blockers.append(
+            {
+                "code": "ai_correction_fallback",
+                "message": (
+                    "AI補正（全文書き直し）が失敗し原文のまま通過した。"
+                    "再処理が必要"
+                ),
+                "fallback_reason": str(
+                    ai_correction_meta.get("fallback_reason") or ""
+                ),
+            }
+        )
 
     failed_chunks = list(stats.get("failed_chunk_idx") or [])
     if failed_chunks:
@@ -358,16 +379,37 @@ def run_minutes_quality_gate(
     readable_stats: dict[str, Any] | None,
 ) -> dict[str, Any]:
     mode = resolve_minutes_quality_gate_mode()
+    # 確定修正ペアは LINE 監査だけでなく全ソース（バッチ回答・トリアージ・
+    # ナレッジ自己解決・自動修正）から集約する（2026-08-05）。
+    # 楽天ジョブで「山谷」等のバッチ回答由来ペアの残存を見逃した再発防止。
     audit_rows: list[dict[str, Any]] = []
-    audit_path = Path(job_dir) / "line_correction_audit.jsonl"
-    if audit_path.is_file():
-        for line in audit_path.read_text(encoding="utf-8").splitlines():
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                audit_rows.append(row)
+    try:
+        from confirmed_corrections import collect_confirmed_pairs
+
+        audit_rows = [
+            {"wrong": p["wrong"], "correct": p["right"], "source": p["source"]}
+            for p in collect_confirmed_pairs(job_dir)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        print(f"quality_gate_confirmed_pairs_failed={exc!r}")
+        audit_path = Path(job_dir) / "line_correction_audit.jsonl"
+        if audit_path.is_file():
+            for line in audit_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    audit_rows.append(row)
+    ai_correction_meta: dict[str, Any] | None = None
+    meta_path = Path(job_dir) / "correction_meta.json"
+    if meta_path.is_file():
+        try:
+            loaded_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_meta, dict):
+                ai_correction_meta = loaded_meta
+        except (OSError, json.JSONDecodeError):
+            ai_correction_meta = None
     unknown_points: list[dict[str, Any]] = []
     unknowns_path = Path(job_dir) / "unknown_points.json"
     if unknowns_path.is_file():
@@ -384,6 +426,7 @@ def run_minutes_quality_gate(
             readable_stats=readable_stats,
             correction_audit_rows=audit_rows,
             unknown_points=unknown_points,
+            ai_correction_meta=ai_correction_meta,
         ),
     }
     if report["status"] == "blocked":

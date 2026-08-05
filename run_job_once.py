@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1053,14 +1054,56 @@ def main() -> None:
         def _on_ai_stream_progress(msg: str):
             append_log_to_drive(args.job_id, msg)
 
-        ai_text = correct_full_text(
-            text=mechanical_text,
-            on_phase=_on_ai_phase,
-            meeting_profile=meeting_profile,
-            visible_log_path=visible_log_path,
-            on_stream_progress=_on_ai_stream_progress,
-            min_length_ratio=args.min_ai_length_ratio,
+        # AI補正の実行。過負荷など一時的な要因で全文フォールバックした場合は
+        # 時間を置いて再試行する（2026-08-05 ユーザー指示）。それでも失敗した
+        # 場合はそのまま先へ進むが、品質ゲートが ai_correction_fallback で
+        # ブロックし、AI補正なしの文書は公開されない。
+        _TRANSIENT_FALLBACK_KEYS = (
+            "overloaded",
+            "timeout",
+            "timed out",
+            "connection",
+            "http_error",
+            "apistatus",
+            "529",
+            "503",
         )
+        _RETRY_WAITS_SEC = (120, 300)
+        for _ai_attempt in range(len(_RETRY_WAITS_SEC) + 1):
+            ai_text = correct_full_text(
+                text=mechanical_text,
+                on_phase=_on_ai_phase,
+                meeting_profile=meeting_profile,
+                visible_log_path=visible_log_path,
+                on_stream_progress=_on_ai_stream_progress,
+                min_length_ratio=args.min_ai_length_ratio,
+            )
+            _meta_now = get_last_correct_full_text_meta()
+            _fb_reason = str(_meta_now.get("fallback_reason") or "").lower()
+            if not _meta_now.get("used_fallback"):
+                break
+            if not any(k in _fb_reason for k in _TRANSIENT_FALLBACK_KEYS):
+                # 一時要因ではない失敗は再試行しても結果が変わらない。
+                break
+            if _ai_attempt >= len(_RETRY_WAITS_SEC):
+                break
+            _wait = _RETRY_WAITS_SEC[_ai_attempt]
+            log_line(
+                log_path,
+                "step_4_3_ai_correct: transient fallback "
+                f"({_fb_reason[:120]}), retrying in {_wait}s "
+                f"(attempt {_ai_attempt + 2}/{len(_RETRY_WAITS_SEC) + 1})",
+            )
+            record_visible_progress(
+                log_path=log_path,
+                visible_log_path=visible_log_path,
+                job_id=args.job_id,
+                message=(
+                    f"AI補正が一時エラーになったため、{_wait // 60}分待って"
+                    f"再試行します（{_ai_attempt + 2}回目）"
+                ),
+            )
+            time.sleep(_wait)
 
         with open(ai_path, "w", encoding="utf-8") as f:
             f.write(ai_text)

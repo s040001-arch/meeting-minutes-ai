@@ -222,7 +222,10 @@ class FinalReviewApplyTests(unittest.TestCase):
         self.assertEqual(len(applied), 1)
         self.assertEqual(skipped, [])
 
-    def test_medium_confidence_is_not_applied(self) -> None:
+    def test_medium_confidence_with_fix_is_applied(self) -> None:
+        # 2026-08-05 ポリシー変更: medium も修正案があれば安全ガードを
+        # 通して適用する（黙って捨てない）。楽天ジョブで medium 20件が
+        # 無言スキップされ意味不明語が残存した再発防止。
         from final_review_pass import apply_safe_fixes
 
         text = "そういう示唆で仕事をしなければいけない。"
@@ -232,6 +235,42 @@ class FinalReviewApplyTests(unittest.TestCase):
                 "quote": "そういう示唆で仕事を",
                 "issue": "指示の誤変換の疑い",
                 "fix": "そういう指示で仕事を",
+                "confidence": "medium",
+            }
+        ]
+        out, applied, skipped = apply_safe_fixes(text, findings)
+        self.assertIn("そういう指示で仕事を", out)
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(skipped, [])
+
+    def test_low_confidence_is_not_applied(self) -> None:
+        from final_review_pass import apply_safe_fixes
+
+        text = "そういう示唆で仕事をしなければいけない。"
+        findings = [
+            {
+                "type": "unnatural",
+                "quote": "そういう示唆で仕事を",
+                "issue": "指示の誤変換の疑い",
+                "fix": "そういう指示で仕事を",
+                "confidence": "low",
+            }
+        ]
+        out, applied, skipped = apply_safe_fixes(text, findings)
+        self.assertEqual(out, text)
+        self.assertEqual(applied, [])
+        self.assertEqual(skipped[0]["skip_reason"], "not_high_or_no_fix")
+
+    def test_medium_without_fix_is_skipped_for_question(self) -> None:
+        from final_review_pass import apply_safe_fixes
+
+        text = "見学者タイトルを回ってるという話。"
+        findings = [
+            {
+                "type": "fragment",
+                "quote": "見学者タイトルを回ってる",
+                "issue": "意味不明な断片",
+                "fix": "",
                 "confidence": "medium",
             }
         ]

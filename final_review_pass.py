@@ -235,7 +235,14 @@ def _call_reviewer(
 
 
 def apply_safe_fixes(text: str, findings: list[dict]) -> tuple[str, list[dict], list[dict]]:
-    """high 確信・quote 一意・長さ比が穏当な修正のみ適用する。
+    """修正案があり安全ガードを通る修正を適用する。
+
+    2026-08-05 変更: 従来は confidence=high のみ適用し、medium は修正案が
+    あっても黙って捨てていた（楽天ジョブで20件がここで消え、意味不明語が
+    残存する主因の一つになった）。ポリシーは「直すか聞くか、黙って残さない」
+    なので、medium も修正案があれば同じ安全ガード（quote一意・長さ比・
+    数値不変・事実ゲート）を通して適用する。修正案がないものは呼び出し側で
+    質問キューに回す。
 
     返り値: (適用後テキスト, applied, skipped)
     """
@@ -256,7 +263,7 @@ def apply_safe_fixes(text: str, findings: list[dict]) -> tuple[str, list[dict], 
             else 2
         )
         reason = ""
-        if confidence != "high" or not fix or fix == quote:
+        if confidence not in {"high", "medium"} or not fix or fix == quote:
             reason = "not_high_or_no_fix"
         elif len(quote) < APPLY_MIN_QUOTE_LEN:
             reason = "quote_too_short"

@@ -472,6 +472,27 @@ def _handle_recognition_batch_answer(
         timeout_sec=openai_timeout_sec,
     )
     updated, applied = apply_batch_corrections(base_text, parsed, api_key=api_key)
+    # 確定修正の永続記録（2026-08-05）: 最終強制層・品質ゲートが参照する。
+    # これまでバッチ回答の適用結果はどこにも残らず、後段の検証が
+    # 「確定済みなのに残っている」誤表記を検出できなかった。
+    try:
+        from datetime import datetime, timezone
+
+        audit_path = os.path.join(job_dir, "batch_corrections_audit.jsonl")
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "question_id": question_id,
+                        "applied": applied,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError as exc:
+        print(f"batch_corrections_audit_write_failed={exc!r}")
     save_after_qa_text(job_dir, updated)
     if out_path != after_qa_path(job_dir):
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
