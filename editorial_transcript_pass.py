@@ -470,6 +470,7 @@ def resolve_reader_blocking_findings(
     force: bool = False,
     max_items: int | None = None,
     extra_knowledge: str = "",
+    include_all: bool = False,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Resolve non-factual medium garbles after the independent final review.
 
@@ -489,7 +490,9 @@ def resolve_reader_blocking_findings(
         issue = str(finding.get("issue") or "").strip()
         if not quote or quote not in text:
             continue
-        if not is_reader_blocking_finding(finding):
+        # include_all: 低確信の軽微な違和感も「読みやすく修正 or 質問」の
+        # 同じ流れへ乗せる（記録だけで放置しない）。
+        if not include_all and not is_reader_blocking_finding(finding):
             continue
         if any(
             marker in issue

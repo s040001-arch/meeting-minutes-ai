@@ -26,19 +26,14 @@ class MinutesQualityGateError(RuntimeError):
 def _needs_user_attention(finding: dict[str, Any]) -> bool:
     """True if an unresolved finding must block publication and be asked.
 
-    High/medium findings always qualify.  Low-confidence findings qualify when
-    they block reader comprehension: the user's priority is that published
-    minutes never contain incomprehensible fragments, and anything the
-    pipeline cannot fix confidently is asked via LINE instead of kept.
+    ユーザー方針（2026-08-05確定）: 検出した違和感は「読みやすく修正する」か
+    「質問する」の二択で、確信度が低いからといって記録だけで放置しない。
+    修正段（外科的修復・段落修復）を通っても直せなかった残存問題は、
+    確信度によらずすべて質問へ回す。質問できる surface（quote）が無い
+    findings だけは質問化できないため対象外。
     """
-    if str(finding.get("confidence") or "").lower() in {"high", "medium"}:
-        return True
-    try:
-        from editorial_transcript_pass import is_reader_blocking_finding
-
-        return is_reader_blocking_finding(finding)
-    except Exception:  # noqa: BLE001
-        return False
+    quote = str(finding.get("quote") or "").strip()
+    return bool(quote)
 
 
 def _queue_unresolved_final_findings(

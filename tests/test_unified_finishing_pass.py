@@ -21,6 +21,7 @@ def _no_resolver(
     force=False,
     max_items=None,
     extra_knowledge="",
+    include_all=False,
 ):
     return text, [], []
 
@@ -148,9 +149,10 @@ class UnifiedFinishingPassTests(unittest.TestCase):
             stage["n"] += 1
             if stage["n"] == 1:  # 監査（窓1つ）: 問題なし
                 return []
-            if stage["n"] == 2:  # 検証1回目: 修正可能な問題を発見
+            # 検証1回目（独立2回のうち片方だけ発見でも拾う）
+            if stage["n"] == 2:
                 return [verify_finding]
-            return []  # 最終検証: 問題なし
+            return []  # 検証1回目の2度目・最終検証: 問題なし
 
         with tempfile.TemporaryDirectory() as job_dir:
             with patch.dict(
@@ -171,8 +173,8 @@ class UnifiedFinishingPassTests(unittest.TestCase):
         self.assertIn("最初の説明です。", out)
         self.assertEqual(report["findings"], [])
         self.assertEqual(len(report["applied"]), 1)
-        # 監査 + 検証1回目 + 最終検証 = 3回のレビュー呼び出し
-        self.assertEqual(stage["n"], 3)
+        # 監査1 + 検証1回目(独立2回) + 最終検証(独立2回) = 5回のレビュー呼び出し
+        self.assertEqual(stage["n"], 5)
         self.assertFalse(stats["failed"])
 
     def test_dense_garble_paragraph_is_repaired_as_a_unit(self) -> None:
@@ -269,8 +271,10 @@ class UnifiedFinishingPassTests(unittest.TestCase):
             force=False,
             max_items=None,
             extra_knowledge="",
+            include_all=False,
         ):
             captured["knowledge"] = extra_knowledge
+            captured["include_all"] = include_all
             return text, [], []
 
         def fake_reviewer(window_text, meeting_profile=None):
@@ -309,6 +313,8 @@ class UnifiedFinishingPassTests(unittest.TestCase):
                         meeting_profile={},
                     )
         self.assertIn("Udemy", captured["knowledge"])
+        # 低確信の違和感も「修正 or 質問」の同じ流れへ（記録だけで放置しない）
+        self.assertTrue(captured["include_all"])
         self.assertEqual(stats["answered_knowledge_items"], 1)
 
     def test_reflow_splits_walls_without_changing_characters(self) -> None:

@@ -181,8 +181,9 @@ class MinutesQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(count, 1)
 
-    def test_low_minor_wording_does_not_block(self) -> None:
-        # 意味が通じる軽微な違和感（low）は公開を妨げない。
+    def test_low_minor_wording_also_blocks_and_is_queued(self) -> None:
+        # ユーザー方針（2026-08-05）: 低確信でも「記録だけで放置」しない。
+        # 修正段で直せなかった残存問題は確信度によらず質問へ回す。
         finding = {
             "type": "unnatural",
             "confidence": "low",
@@ -194,11 +195,17 @@ class MinutesQualityGateTests(unittest.TestCase):
             text="前文。食べさせたらやってくれる。後文。",
             readable_stats=self._stats(findings=[finding]),
         )
-        self.assertEqual(report["status"], "pass")
         self.assertIn(
-            "final_review_low",
-            {x["code"] for x in report["warnings"]},
+            "final_review_unresolved",
+            {x["code"] for x in report["blockers"]},
         )
+        with tempfile.TemporaryDirectory() as tmp:
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text="前文。食べさせたらやってくれる。後文。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+        self.assertEqual(count, 1)
 
     def test_stale_pre_readable_unknown_is_closed_when_queueing(self) -> None:
         finding = {

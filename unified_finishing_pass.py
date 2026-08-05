@@ -321,6 +321,30 @@ def _repair_dense_paragraphs(
     return "\n\n".join(paragraphs) + "\n", applied
 
 
+def _verify_full_text(
+    text: str,
+    meeting_profile: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """独立した全文検証を2回走らせ、片方でも検出された問題を採用する。
+
+    1回の全文レビューは長文の後半などで確率的に見逃しが出る。2回の和を
+    取ることで見逃しを減らす（誤検出側は後段の事実ゲートと質問経路が守る）。
+    """
+    from final_review_pass import _call_reviewer
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _attempt in range(2):
+        for finding in _call_reviewer(text, meeting_profile):
+            quote = str(finding.get("quote") or "").strip()
+            key = quote or json.dumps(finding, ensure_ascii=False)[:100]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(finding)
+    return merged
+
+
 def run_unified_finishing(
     *,
     job_dir: str,
@@ -329,7 +353,6 @@ def run_unified_finishing(
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """Return (final_text, stats, final_review_compatible_report)."""
     from final_review_pass import (
-        _call_reviewer,
         apply_safe_fixes,
         resolve_final_review_model,
         _write_report,
@@ -428,6 +451,7 @@ def run_unified_finishing(
                     force=True,
                     max_items=UNIFIED_RESOLVER_MAX_ITEMS,
                     extra_knowledge=answered_knowledge,
+                    include_all=True,
                 )
             )
             applied.extend(resolved)
@@ -474,7 +498,7 @@ def run_unified_finishing(
     remaining: list[dict[str, Any]] = []
     for verify_no in (2, 3):
         try:
-            verify_findings = _call_reviewer(out_text, profile)
+            verify_findings = _verify_full_text(out_text, profile)
         except Exception as exc:  # noqa: BLE001
             stats["failed"] = True
             report["error"] = f"verify_failed:{exc!r}"
