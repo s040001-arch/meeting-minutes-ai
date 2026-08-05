@@ -440,6 +440,29 @@ def apply_mechanical_corrections(
         from log_safety import format_error_for_log
 
         print(f"learned_corrections_apply_failed={format_error_for_log(e)}")
+    # 参加者名の早期正規化（2026-08-05）: ファイル名由来の参加者リストと
+    # 突き合わせ、人名の誤変換（山谷さん→山屋さん 等）を冒頭で直す。
+    # 参加者が誰か分からないまま全文チェックで気づくのは非効率なため。
+    try:
+        if job_dir:
+            from meeting_profile import load_meeting_profile
+            from participant_name_normalizer import (
+                normalize_participant_names,
+            )
+
+            profile = load_meeting_profile(job_dir)
+            s, name_applied = normalize_participant_names(
+                s, profile, job_dir=job_dir
+            )
+            if name_applied:
+                print(
+                    "participant_names_normalized="
+                    + json.dumps(name_applied, ensure_ascii=False)
+                )
+    except Exception as e:  # noqa: BLE001
+        from log_safety import format_error_for_log
+
+        print(f"participant_normalizer_failed={format_error_for_log(e)}")
     s = apply_pixel_recognizer_fixes(s)
     s = cleanup_common_noise(s)
     # Filler rules first (need line/sentence-start visibility)
