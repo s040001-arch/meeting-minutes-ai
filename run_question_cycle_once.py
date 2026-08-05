@@ -743,9 +743,50 @@ def _build_coherence_batch_question_payload(
     pending_meta: dict,
     doc_url: str,
     full_text: str = "",
+    job_dir: str = "",
+    text_path: str = "",
 ) -> dict | None:
-    """QUESTION_MODE pause 時: 未回答 coherence を番号付き1通に束ねる。"""
+    """QUESTION_MODE pause 時: 未回答 coherence を番号付き1通に束ねる。
+
+    2026-08-05 影響トリアージ: 文脈からほぼ一意な意味保存的訂正は
+    自動適用し、意味を変えうる仮説・削除判断・数値・人名だけを質問する。
+    """
     items = build_batch_items(coherence_pending, full_text=full_text)
+    if not items:
+        return None
+    if job_dir and text_path:
+        try:
+            from recognition_batch import (
+                auto_apply_triaged_items,
+                triage_batch_items_for_auto_apply,
+            )
+
+            profile = None
+            try:
+                from meeting_profile import load_meeting_profile
+
+                profile = load_meeting_profile(job_dir)
+            except Exception:  # noqa: BLE001
+                profile = None
+            auto_items, ask_items, audit = triage_batch_items_for_auto_apply(
+                items, meeting_profile=profile
+            )
+            if auto_items:
+                applied = auto_apply_triaged_items(
+                    job_dir=job_dir,
+                    transcript_path=text_path,
+                    auto_items=auto_items,
+                    audit_records=audit,
+                )
+                print(
+                    f"batch_triage auto_applied={applied} "
+                    f"ask={len(ask_items)} of {len(items)}"
+                )
+                pending_meta["batch_triage_auto_applied"] = applied
+            items = ask_items
+        except Exception as exc:  # noqa: BLE001
+            # トリアージ失敗時は従来どおり全件質問（安全側）
+            print(f"batch_triage_failed={exc!r}")
     if not items:
         return None
     question_id = str(uuid.uuid4())
@@ -792,6 +833,8 @@ def _build_coherence_single_question_payload(
     pending_meta: dict,
     doc_url: str,
     full_text: str = "",
+    job_dir: str = "",
+    text_path: str = "",
 ) -> dict | None:
     """coherence 副キューから確認質問を作る。
 
@@ -811,6 +854,8 @@ def _build_coherence_single_question_payload(
             pending_meta=pending_meta,
             doc_url=doc_url,
             full_text=full_text,
+            job_dir=job_dir,
+            text_path=text_path,
         )
         if batch_payload is not None:
             return batch_payload
@@ -1277,6 +1322,8 @@ def main() -> None:
             pending_meta=pending_meta,
             doc_url=doc_url,
             full_text=full_text,
+            job_dir=job_dir,
+            text_path=context_text_path or "",
         )
         if coherence_payload is not None:
             result_payload = coherence_payload
@@ -1399,6 +1446,8 @@ def main() -> None:
                     pending_meta=pending_meta,
                     doc_url=doc_url,
                     full_text=full_text,
+                    job_dir=job_dir,
+                    text_path=context_text_path or "",
                 )
                 if fallthrough is not None:
                     result_payload = fallthrough
@@ -1459,6 +1508,8 @@ def main() -> None:
                     pending_meta=pending_meta,
                     doc_url=doc_url,
                     full_text=full_text,
+                    job_dir=job_dir,
+                    text_path=context_text_path or "",
                 )
                 if fallthrough is not None:
                     result_payload = fallthrough

@@ -10,8 +10,11 @@ from unittest.mock import patch
 
 from recognition_batch import (
     RECOGNITION_BATCH_FORMAT,
+    _deterministic_ask_reason,
+    auto_apply_triaged_items,
     build_batch_items,
     build_batch_question_text,
+    triage_batch_items_for_auto_apply,
 )
 from run_question_cycle_once import (
     _build_coherence_single_question_payload,
@@ -19,6 +22,118 @@ from run_question_cycle_once import (
     _mark_unknown_point_asked,
 )
 from recorrect_from_line_answer import _mark_batch_items_answered_in_unknowns
+
+
+class ImpactTriageTests(unittest.TestCase):
+    """影響トリアージ: 意味保存的訂正は自動適用、意味を変えうるものだけ質問。"""
+
+    def _item(self, word: str, candidate: str, **kw) -> dict:
+        return {
+            "anomaly_id": kw.get("anomaly_id", f"ta_{word}"),
+            "word": word,
+            "estimated_correction": candidate,
+            "display": kw.get("display", f"…{word}…"),
+            **kw,
+        }
+
+    def test_deterministic_guards_route_to_ask(self) -> None:
+        # 削除判断・数値・人名・候補なし・長い仮説は LLM を呼ばず質問行き
+        self.assertEqual(
+            _deterministic_ask_reason(self._item("要計画", "")), "no_candidate"
+        )
+        self.assertEqual(
+            _deterministic_ask_reason(self._item("この一文", "削除")),
+            "delete_or_span_hypothesis",
+        )
+        self.assertEqual(
+            _deterministic_ask_reason(self._item("成績10%", "粗利20%")),
+            "numeric",
+        )
+        self.assertEqual(
+            _deterministic_ask_reason(self._item("山谷さん", "山屋さん")),
+            "person_name",
+        )
+        self.assertEqual(
+            _deterministic_ask_reason(
+                self._item("そんな性格があるんです", "そういう人もいるんですよね")
+            ),
+            "long_span_hypothesis",
+        )
+        # 短い同音異義の訂正は LLM 判定に進める
+        self.assertIsNone(_deterministic_ask_reason(self._item("移動", "異動")))
+
+    def test_llm_failure_falls_back_to_ask_all(self) -> None:
+        items = [self._item("移動", "異動"), self._item("習字", "週次")]
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            auto, ask, audit = triage_batch_items_for_auto_apply(items)
+        self.assertEqual(auto, [])
+        self.assertEqual(len(ask), 2)
+
+    def test_llm_verdicts_split_auto_and_ask(self) -> None:
+        items = [self._item("移動", "異動"), self._item("要計画", "要議論")]
+
+        class _Blk:
+            type = "text"
+            text = (
+                '[{"index":1,"verdict":"auto","reason":"同音異義"},'
+                '{"index":2,"verdict":"ask","reason":"意味が変わりうる"}]'
+            )
+
+        class _Resp:
+            content = [_Blk()]
+
+        client = unittest.mock.MagicMock()
+        client.messages.create.return_value = _Resp()
+        with patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False
+        ), patch("anthropic.Anthropic", return_value=client):
+            auto, ask, audit = triage_batch_items_for_auto_apply(items)
+        self.assertEqual([i["word"] for i in auto], ["移動"])
+        self.assertEqual([i["word"] for i in ask], ["要計画"])
+
+    def test_auto_apply_updates_text_and_unknowns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            text_path = os.path.join(tmp, "merged_transcript_after_qa.txt")
+            with open(text_path, "w", encoding="utf-8") as f:
+                f.write("もうあの移動[要確認]させますと。")
+            with open(
+                os.path.join(tmp, "unknown_points.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    [
+                        {
+                            "anomaly_id": "ta_002",
+                            "anomaly_word": "移動",
+                            "status": "asked",
+                        }
+                    ],
+                    f,
+                    ensure_ascii=False,
+                )
+            applied = auto_apply_triaged_items(
+                job_dir=tmp,
+                transcript_path=text_path,
+                auto_items=[
+                    {
+                        "anomaly_id": "ta_002",
+                        "word": "移動",
+                        "estimated_correction": "異動",
+                    }
+                ],
+            )
+            self.assertEqual(applied, 1)
+            with open(text_path, encoding="utf-8") as f:
+                self.assertIn("異動させます", f.read())
+            with open(
+                os.path.join(tmp, "unknown_points.json"), encoding="utf-8"
+            ) as f:
+                points = json.load(f)
+            self.assertEqual(points[0]["status"], "answered")
+            self.assertIn("自動適用", points[0]["answer"])
+            # カスケード知識に乗る形式（answered + answer 記載）である
+            self.assertTrue(
+                os.path.isfile(os.path.join(tmp, "auto_triage_audit.jsonl"))
+            )
 
 
 class CoherenceBatchWhenPausedTests(unittest.TestCase):

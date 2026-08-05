@@ -622,6 +622,240 @@ def build_batch_items(
     return items
 
 
+# ---------------------------------------------------------------------------
+# 影響トリアージ（2026-08-05 ユーザー決定）:
+# 質問数は確信度ではなく「間違えたときの被害」で仕分ける。
+# - 文脈からほぼ一意に定まる意味保存的な訂正（移動→異動 等）→ 自動適用
+# - 発言の意味・事実を変えうる仮説復元、削除判断、数値・人名 → 質問
+# ---------------------------------------------------------------------------
+
+_TRIAGE_MODEL = "claude-sonnet-5"
+_DIGIT_RE = re.compile(r"[0-9０-９]")
+_HONORIFIC_NAME_TRIAGE_RE = re.compile(
+    r"[\u4E00-\u9FFF\u30A0-\u30FF]{1,4}(さん|様|氏|くん|ちゃん)"
+)
+
+
+def _deterministic_ask_reason(item: dict) -> str | None:
+    """LLM を呼ぶまでもなく「質問すべき」と判るケースの理由を返す。"""
+    word = str(item.get("word") or "").strip()
+    candidate = str(item.get("estimated_correction") or "").strip()
+    if not candidate:
+        return "no_candidate"
+    if candidate == "削除" or str(item.get("question_kind") or "") == "span_hypothesis":
+        return "delete_or_span_hypothesis"
+    if _DIGIT_RE.search(word) or _DIGIT_RE.search(candidate):
+        return "numeric"
+    if _HONORIFIC_NAME_TRIAGE_RE.search(word) or _HONORIFIC_NAME_TRIAGE_RE.search(
+        candidate
+    ):
+        return "person_name"
+    # 長い語は「語の言い換え」ではなく発言の復元仮説である可能性が高い
+    if len(word) >= 12 or len(candidate) >= 12:
+        return "long_span_hypothesis"
+    return None
+
+
+def triage_batch_items_for_auto_apply(
+    items: list[dict],
+    *,
+    meeting_profile: dict | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """バッチ項目を (自動適用, 質問) に仕分ける。
+
+    返り値: (auto_items, ask_items, audit_records)。
+    LLM 判定が失敗した場合は全件質問（安全側・従来動作）。
+    """
+    ask_items: list[dict] = []
+    eligible: list[dict] = []
+    audit: list[dict] = []
+    for item in items:
+        reason = _deterministic_ask_reason(item)
+        if reason:
+            ask_items.append(item)
+            audit.append(
+                {
+                    "word": item.get("word"),
+                    "candidate": item.get("estimated_correction"),
+                    "verdict": "ask",
+                    "reason": reason,
+                }
+            )
+        else:
+            eligible.append(item)
+    if not eligible:
+        return [], ask_items, audit
+
+    verdicts: dict[int, dict] = {}
+    try:
+        import os
+
+        import anthropic
+
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError("no_api_key")
+        client = anthropic.Anthropic()
+        lines = []
+        for i, item in enumerate(eligible, 1):
+            ctx = str(item.get("display") or item.get("context") or "")[:200]
+            lines.append(
+                f"{i}. 語:「{item.get('word')}」 候補:「{item.get('estimated_correction')}」"
+                f" 文脈: {ctx}"
+            )
+        profile_hint = ""
+        if meeting_profile:
+            title = str(meeting_profile.get("meeting_title") or "").strip()
+            if title:
+                profile_hint = f"\n会議: {title}"
+        resp = client.messages.create(
+            model=_TRIAGE_MODEL,
+            max_tokens=1500,
+            timeout=60,
+            system=(
+                "あなたは議事録の音声認識訂正候補を仕分けます。"
+                "各項目について、候補への置換が「文脈からほぼ一意に定まる"
+                "意味保存的な訂正」（例: 移動→異動、習字→週次、戦績表→成績表 の"
+                "ような同音・類音の誤変換で、文脈上ほかの解釈が考えにくいもの）"
+                "なら auto、そうでないもの（発言の意味・内容が変わりうる推測、"
+                "文の復元仮説、複数の解釈がありうるもの）は ask としてください。"
+                "迷ったら必ず ask。"
+                '出力はJSON配列のみ: [{"index":1,"verdict":"auto|ask","reason":"短く"}]'
+            ),
+            messages=[{"role": "user", "content": "\n".join(lines) + profile_hint}],
+        )
+        text = "".join(
+            b.text for b in resp.content if getattr(b, "type", "") == "text"
+        )
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            for row in json.loads(m.group(0)):
+                idx = int(row.get("index") or 0)
+                if 1 <= idx <= len(eligible):
+                    verdicts[idx] = row
+    except Exception as exc:  # noqa: BLE001
+        print(f"batch_triage_llm_failed={exc!r}")
+        verdicts = {}
+
+    auto_items: list[dict] = []
+    for i, item in enumerate(eligible, 1):
+        row = verdicts.get(i) or {}
+        verdict = str(row.get("verdict") or "ask").strip().lower()
+        record = {
+            "word": item.get("word"),
+            "candidate": item.get("estimated_correction"),
+            "verdict": "auto" if verdict == "auto" else "ask",
+            "reason": str(row.get("reason") or "llm_unavailable_or_ask")[:80],
+        }
+        audit.append(record)
+        if verdict == "auto":
+            auto_items.append(item)
+        else:
+            ask_items.append(item)
+    return auto_items, ask_items, audit
+
+
+def auto_apply_triaged_items(
+    *,
+    job_dir: str,
+    transcript_path: str,
+    auto_items: list[dict],
+    audit_records: list[dict] | None = None,
+) -> int:
+    """意味保存的と判定された訂正を本文へ適用し、unknown_points を確定させる。
+
+    回答済み扱い（answer に自動適用と明記）にすることで、カスケード知識にも
+    乗り、次サイクルで再質問されない。返り値: 適用件数。
+    """
+    import os
+    from datetime import datetime, timezone
+
+    if not auto_items or not os.path.isfile(transcript_path):
+        return 0
+    with open(transcript_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    parsed = [
+        {
+            "index": i,
+            "word": str(item.get("word") or ""),
+            "action": "correct",
+            "correction": str(item.get("estimated_correction") or ""),
+            "anomaly_id": str(item.get("anomaly_id") or ""),
+        }
+        for i, item in enumerate(auto_items, 1)
+    ]
+    new_text, applied = apply_batch_corrections(text, parsed)
+    if not applied:
+        return 0
+    with open(transcript_path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+
+    applied_ids = {str(a.get("anomaly_id") or "") for a in applied}
+    applied_words = {
+        str(a.get("word") or a.get("before") or "") for a in applied
+    }
+    now_iso = datetime.now(timezone.utc).isoformat()
+    unknowns_path = os.path.join(job_dir, "unknown_points.json")
+    if os.path.isfile(unknowns_path):
+        try:
+            with open(unknowns_path, "r", encoding="utf-8") as f:
+                points = json.load(f)
+            changed = False
+            for p in points:
+                if not isinstance(p, dict):
+                    continue
+                pid = str(p.get("anomaly_id") or "")
+                pword = str(p.get("anomaly_word") or "")
+                if (pid and pid in applied_ids) or (
+                    pword and pword in applied_words
+                ):
+                    corr = next(
+                        (
+                            str(a.get("after") or "")
+                            for a in applied
+                            if str(a.get("anomaly_id") or "") == pid
+                            or str(a.get("word") or a.get("before") or "")
+                            == pword
+                        ),
+                        "",
+                    )
+                    p["status"] = "answered"
+                    p["answer"] = (
+                        f"自動適用（意味保存的訂正）: {pword}→{corr}"
+                    )
+                    p["answered_by_question_id"] = "auto_triage"
+                    p["answered_at"] = now_iso
+                    changed = True
+            if changed:
+                with open(unknowns_path, "w", encoding="utf-8") as f:
+                    json.dump(points, f, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"auto_triage_unknowns_update_failed={exc!r}")
+
+    try:
+        audit_path = os.path.join(job_dir, "auto_triage_audit.jsonl")
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "at": now_iso,
+                        "applied": [
+                            {
+                                "word": a.get("word") or a.get("before"),
+                                "after": a.get("after"),
+                            }
+                            for a in applied
+                        ],
+                        "triage": audit_records or [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError as exc:
+        print(f"auto_triage_audit_write_failed={exc!r}")
+    return len(applied)
+
+
 def build_batch_question_text(items: list[dict]) -> str:
     """番号付きの一括確認メッセージ本文を組み立てる。
 
