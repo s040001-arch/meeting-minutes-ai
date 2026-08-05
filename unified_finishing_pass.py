@@ -531,14 +531,22 @@ def run_unified_finishing(
 
     _write_report(job_dir, report)
     try:
+        payload = json.dumps(
+            {"stats": stats, "report": report},
+            ensure_ascii=False,
+            indent=2,
+        )
         path = os.path.join(job_dir, UNIFIED_REPORT_FILENAME)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump(
-                {"stats": stats, "report": report},
-                handle,
-                ensure_ascii=False,
-                indent=2,
-            )
+            handle.write(payload)
+        # 再実行で上書きされると「何が検出されどのゲートで却下されたか」の
+        # 証跡が消える。実行ごとのアーカイブを必ず残す。
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        archive = os.path.join(
+            job_dir, f"unified_finishing_report.{stamp}.json"
+        )
+        with open(archive, "w", encoding="utf-8") as handle:
+            handle.write(payload)
     except OSError as exc:
         print(f"unified_report_write_failed={exc!r}")
     print(
