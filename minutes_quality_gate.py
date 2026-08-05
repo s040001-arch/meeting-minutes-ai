@@ -243,7 +243,18 @@ def evaluate_minutes_quality(
         )
 
     terminal_statuses = {"answered", "done", "closed", "resolved"}
+    # 公開をブロックすべきは「本文の崩れ・表記」に関する未回答のみ。
+    # 検出段の「主語が曖昧」「数値が不明確」等は発言そのものの曖昧さで、
+    # 質問選択器が価値判断でスキップしうる。これをブロッカーに数えると
+    # 「質問しないのにゲートが塞ぐ」デッドロックになる（2026-08-05 楽天で
+    # 実際に発生）ため、警告に格下げする。
+    comprehension_sources = {
+        "coherence_review",
+        "final_review",
+        "recognition_batch",
+    }
     active_pending: list[dict[str, Any]] = []
+    vague_pending: list[dict[str, Any]] = []
     for item in unknown_points or []:
         if not isinstance(item, dict):
             continue
@@ -254,8 +265,14 @@ def evaluate_minutes_quality(
             for key in ("anomaly_word", "text", "span_text")
         ]
         surfaces = [s for s in surfaces if s]
-        if any(surface in text for surface in surfaces):
+        if not any(surface in text for surface in surfaces):
+            continue
+        src = str(item.get("source") or "").strip()
+        typ = str(item.get("type") or "").strip()
+        if src in comprehension_sources or typ in comprehension_sources:
             active_pending.append(item)
+        else:
+            vague_pending.append(item)
     if active_pending:
         blockers.append(
             {
@@ -263,6 +280,18 @@ def evaluate_minutes_quality(
                 "message": "未回答の確認事項に対応する本文が残っている",
                 "count": len(active_pending),
                 "examples": active_pending[:10],
+            }
+        )
+    if vague_pending:
+        warnings.append(
+            {
+                "code": "content_vagueness_unasked",
+                "message": (
+                    "発言自体の曖昧さ（主語・数値など）が残っているが、"
+                    "質問価値が低いため公開は妨げない"
+                ),
+                "count": len(vague_pending),
+                "examples": vague_pending[:10],
             }
         )
 

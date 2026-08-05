@@ -98,7 +98,13 @@ class MinutesQualityGateTests(unittest.TestCase):
         )
 
     def test_blocks_only_pending_unknowns_still_present_in_final_text(self) -> None:
-        pending = [{"status": "open", "text": "重複したと思いますと思います"}]
+        pending = [
+            {
+                "status": "open",
+                "source": "coherence_review",
+                "text": "重複したと思いますと思います",
+            }
+        ]
         blocked = evaluate_minutes_quality(
             text="重複したと思いますと思います",
             readable_stats=self._stats(),
@@ -114,6 +120,33 @@ class MinutesQualityGateTests(unittest.TestCase):
             unknown_points=pending,
         )
         self.assertEqual(stale["status"], "pass")
+
+    def test_content_vagueness_unknowns_warn_but_do_not_block(self) -> None:
+        # 「主語が曖昧」「数値が不明確」等は発言そのものの曖昧さ。
+        # 質問選択器が価値判断でスキップするため、ブロックすると
+        # 「質問しないのにゲートが塞ぐ」デッドロックになる（2026-08-05）。
+        pending = [
+            {
+                "status": None,
+                "type": "主語",
+                "text": "こう来た人に対して対応することが多い",
+                "reason": "実施主体が明示されていません。",
+            },
+            {
+                "status": None,
+                "type": "数値",
+                "text": "もう2ヶ月で行きたいなと思って",
+                "reason": "定量情報が不明確です。",
+            },
+        ]
+        report = evaluate_minutes_quality(
+            text="こう来た人に対して対応することが多い。もう2ヶ月で行きたいなと思って。",
+            readable_stats=self._stats(),
+            unknown_points=pending,
+        )
+        self.assertEqual(report["status"], "pass")
+        codes = {x["code"] for x in report["warnings"]}
+        self.assertIn("content_vagueness_unasked", codes)
 
     def test_enforce_raises_and_writes_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
