@@ -1287,6 +1287,26 @@ def main() -> None:
 
     if not os.path.isfile(unknowns_path):
         raise FileNotFoundError(f"unknowns file not found: {unknowns_path}")
+
+    # ナレッジによる自己解決（2026-08-05）: 事前情報・蓄積ナレッジに答えが
+    # 明記されている未解決点は、質問を送らず自動で解決する。
+    try:
+        from knowledge_self_answer import resolve_unknowns_with_knowledge
+
+        _self_answer_text_path = resolve_context_text_path(
+            args.job_id, args.input_root, args.text
+        )
+        if _self_answer_text_path:
+            resolved_n = resolve_unknowns_with_knowledge(
+                unknowns_path=unknowns_path,
+                text_path=_self_answer_text_path,
+                job_dir=job_dir,
+            )
+            if resolved_n:
+                print(f"knowledge_self_answered_count={resolved_n}")
+    except Exception as e:
+        print(f"knowledge_self_answer_failed={e!r}")
+
     unknown_points_all = load_unknown_points(unknowns_path)
     pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)
     regular_pending, coherence_pending = _split_pending_by_source(pending_all)

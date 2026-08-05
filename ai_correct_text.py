@@ -42,7 +42,7 @@ _STREAM_MAX_RETRIES = 2
 _STREAM_CHUNK_PREVIEW_CHARS = 80
 _STREAM_LOG_EVERY_CHARS = 500
 _STREAM_LOG_EVERY_SEC = 10.0
-_STREAM_RETRY_BACKOFF_SEC = (5.0, 10.0)
+_STREAM_RETRY_BACKOFF_SEC = (10.0, 30.0)  # overloaded は回復に時間がかかるため長め
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,11 @@ def _is_retryable_stream_error(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int) and (status_code in {408, 409, 429} or status_code >= 500):
             return True
+    # SSEエラーイベント経由の overloaded_error は status_code を持たないことが
+    # あり、上の分類を素通りして即フォールバックしていた（2026-08-05 楽天ジョブ
+    # で AI補正が丸ごとスキップされた実害）。メッセージ内容でも判定する。
+    if "overloaded" in str(exc).lower():
+        return True
     return False
 
 

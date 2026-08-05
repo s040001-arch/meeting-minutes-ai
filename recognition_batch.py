@@ -619,7 +619,35 @@ def build_batch_items(
         )
     ranked.sort(key=lambda x: x[0])
     items = [item for _, item in ranked[:limit]]
-    return items
+    return _merge_items_with_same_candidate(items)
+
+
+def _merge_items_with_same_candidate(items: list[dict]) -> list[dict]:
+    """同一の修正候補を持つ項目を1問に統合する（2026-08-05 ユーザー指摘）。
+
+    「山谷さん」「謝さん」はどちらも候補が「山屋さん」で、別々に聞いても
+    結論は同じ。1項目に統合し、回答は merged_words の全 word にも適用する。
+    候補なし・span_hypothesis は統合対象外。
+    """
+    by_candidate: dict[str, dict] = {}
+    out: list[dict] = []
+    for it in items:
+        cand = str(it.get("estimated_correction") or "").strip()
+        if not cand or str(it.get("question_kind") or "") == "span_hypothesis":
+            out.append(it)
+            continue
+        primary = by_candidate.get(cand)
+        if primary is None:
+            by_candidate[cand] = it
+            out.append(it)
+            continue
+        word = str(it.get("word") or "").strip()
+        if word and word != str(primary.get("word") or ""):
+            primary.setdefault("merged_words", []).append(word)
+        aid = str(it.get("anomaly_id") or "").strip()
+        if aid:
+            primary.setdefault("merged_anomaly_ids", []).append(aid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +932,16 @@ def build_batch_question_text(items: list[dict]) -> str:
                 detected=detected,
             )
         )
+        merged_words = [
+            str(w).strip() for w in (it.get("merged_words") or []) if str(w).strip()
+        ]
+        if merged_words and candidate:
+            lines.append(
+                f"　※次の表記も同じ「{candidate}」の誤変換と思われます"
+                "（回答は全箇所に適用されます）:"
+            )
+            for w in merged_words:
+                lines.append(f"　　・【{w}】")
     lines.append("")
     lines.append("例) 1 OK / 2 稟議決裁 / 3 削除 / 4 不明")
     return "\n".join(lines)
@@ -1358,6 +1396,8 @@ def _batch_rows_from_numbered_matches(
                 "word": word,
                 "action": action,
                 "correction": correction,
+                "merged_words": list(it.get("merged_words") or []),
+                "merged_anomaly_ids": list(it.get("merged_anomaly_ids") or []),
             }
         )
     return out
@@ -1518,6 +1558,8 @@ def _parse_batch_answer_with_llm(
                 "word": it["word"],
                 "action": action,
                 "correction": correction,
+                "merged_words": list(it.get("merged_words") or []),
+                "merged_anomaly_ids": list(it.get("merged_anomaly_ids") or []),
             }
         )
     return out
@@ -1569,7 +1611,14 @@ def parse_batch_answer(
     if regex_parsed is not None:
         return regex_parsed
     return [
-        {"anomaly_id": it.get("anomaly_id", ""), "word": it["word"], "action": "unknown", "correction": ""}
+        {
+            "anomaly_id": it.get("anomaly_id", ""),
+            "word": it["word"],
+            "action": "unknown",
+            "correction": "",
+            "merged_words": list(it.get("merged_words") or []),
+            "merged_anomaly_ids": list(it.get("merged_anomaly_ids") or []),
+        }
         for it in items
     ]
 
@@ -1644,29 +1693,52 @@ def apply_batch_corrections(
             if correction and len(word) >= 12:
                 correction = sanitize_hypothesis_fillers(correction)
             before = out
-            tagged = f"{word}{VERIFY_TAG}"
-            if tagged in out:
-                out = out.replace(tagged, correction)
-            elif word in out:
-                out = out.replace(word, correction)
-            elif len(word) >= 10:
-                out, replaced = _replace_span_best_effort(out, word, correction)
-                if not replaced:
+            # 統合された同一結論の語（merged_words）にも同じ修正を適用する。
+            target_words = [word] + [
+                str(w).strip()
+                for w in (p.get("merged_words") or [])
+                if str(w).strip() and str(w).strip() != word
+            ]
+            # タグ付き・タグなしの両方を全出現置換する。以前は elif で
+            # タグ付きが1つでもあるとタグなしの同語をスキップしており、
+            # 「山谷さん」が1/3箇所しか直らない実害が出た（2026-08-05）。
+            # correction が word を含む場合は二重置換になるため2回目は行わない。
+            replaced_any = False
+            for w in target_words:
+                tagged = f"{w}{VERIFY_TAG}"
+                if tagged in out:
+                    out = out.replace(tagged, correction)
+                    replaced_any = True
+                if w in out and w not in correction:
+                    out = out.replace(w, correction)
+                    replaced_any = True
+            if not replaced_any:
+                if len(word) >= 10:
+                    out, replaced = _replace_span_best_effort(
+                        out, word, correction
+                    )
+                    if not replaced:
+                        continue
+                else:
                     continue
-            else:
-                continue
             if out != before:
                 applied.append(
                     {"anomaly_id": p.get("anomaly_id", ""), "before": word,
                      "after": correction, "action": "correct"}
                 )
         elif action == "keep":
-            tagged = f"{word}{VERIFY_TAG}"
-            if tagged in out:
-                out = out.replace(tagged, word)
-                applied.append(
-                    {"anomaly_id": p.get("anomaly_id", ""), "before": tagged,
-                     "after": word, "action": "keep"}
-                )
+            keep_words = [word] + [
+                str(w).strip()
+                for w in (p.get("merged_words") or [])
+                if str(w).strip() and str(w).strip() != word
+            ]
+            for w in keep_words:
+                tagged = f"{w}{VERIFY_TAG}"
+                if tagged in out:
+                    out = out.replace(tagged, w)
+                    applied.append(
+                        {"anomaly_id": p.get("anomaly_id", ""), "before": tagged,
+                         "after": w, "action": "keep"}
+                    )
         # unknown: 変更しない
     return out, applied

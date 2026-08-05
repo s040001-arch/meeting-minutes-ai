@@ -520,12 +520,20 @@ def _mark_batch_items_answered_in_unknowns(
         for p in parsed
         if str(p.get("action") or "") in {"correct", "keep"}
     }
-    resolved_ids.discard("")
     resolved_words = {
         str(p.get("word") or "").strip()
         for p in parsed
         if str(p.get("action") or "") in {"correct", "keep"}
     }
+    # 同一結論で統合された兄弟項目（merged_*）も一緒に解決済みにする
+    for p in parsed:
+        if str(p.get("action") or "") not in {"correct", "keep"}:
+            continue
+        for aid in p.get("merged_anomaly_ids") or []:
+            resolved_ids.add(str(aid).strip())
+        for w in p.get("merged_words") or []:
+            resolved_words.add(str(w).strip())
+    resolved_ids.discard("")
     resolved_words.discard("")
     batch_ids = {
         str(b.get("anomaly_id") or "").strip()

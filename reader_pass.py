@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-READER_PASS_MODEL = "claude-opus-4-8"
+READER_PASS_MODEL = "claude-opus-5"
 READER_PASS_RESULT = "reader_pass_result.json"
 READER_PASS_QUESTIONS_MD = "reader_pass_questions.md"
 

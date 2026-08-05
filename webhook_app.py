@@ -321,6 +321,13 @@ def _extract_line_message_actions_with_claude(text: str, pending_context: dict |
         "削除指示（『〜を削除』『意味がないので消して』等）も、直前の確認質問への有効な回答として has_answer=true にしてください。"
         "answer_text には、本文反映に使う部分だけを自然な日本語で短く入れてください（削除指示は原文のまま可）。"
         "correction_pairs には、『XではなくY』『Xの間違い』のような置換ペアを入れてください。"
+        "さらに重要: 質問文（question_text / selected_unknown）に「…」で引用された"
+        "誤表記候補があり、回答によって正しい表記が確定した場合は、回答文に明示されて"
+        "いなくても、確定した誤表記候補それぞれについて correction_pairs に"
+        " {wrong:誤表記, correct:正表記} を必ず含めてください。"
+        "例: 質問が『教材名は「湯でみ」「このデミ」と揺れています。Udemyですか?』で"
+        "回答が『はい』なら、湯でみ→Udemy と このデミ→Udemy の両方を返します。"
+        "ただし回答が『いいえ』『不明』の場合や、引用語が正しい語の場合は含めないでください。"
         "雑談や挨拶だけで、議事録補正に使える情報がない場合のみ is_irrelevant=true にしてください。"
         "出力は必ずJSONオブジェクトのみ。"
         '形式は {"is_irrelevant":true|false,"has_answer":true|false,"answer_text":"string","correction_pairs":[{"wrong":"...","correct":"..."}],"reason":"string"} としてください。'
