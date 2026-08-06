@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +24,54 @@ class MinutesQualityGateError(RuntimeError):
     """Raised when an enforce-mode transcript is not publishable."""
 
 
+# 読者の理解を実際に阻害する検出だけを質問・ブロック対象にするための判定。
+# type ベース + issue 文言ベースの二段。
+_READER_BLOCKING_TYPES = {"fragment", "contradiction"}
+_READER_BLOCKING_ISSUE_RE = re.compile(
+    r"意味不明|意味が取れない|意味を取れない|理解できない|理解不能"
+    r"|成立していない|成立しない|破綻|矛盾|意味をなさない|判読できない"
+    # 人名の誤りは読者は気づけず事実性に直結するため、質問対象に含める
+    r"|人名|氏名"
+)
+
+
 def _needs_user_attention(finding: dict[str, Any]) -> bool:
     """True if an unresolved finding must block publication and be asked.
 
-    ユーザー方針（2026-08-05確定）: 検出した違和感は「読みやすく修正する」か
-    「質問する」の二択で、確信度が低いからといって記録だけで放置しない。
-    修正段（外科的修復・段落修復）を通っても直せなかった残存問題は、
-    確信度によらずすべて質問へ回す。質問できる surface（quote）が無い
-    findings だけは質問化できないため対象外。
+    ユーザー方針の変遷:
+    - 2026-08-05: 未解決は確信度によらずすべて質問へ（放置しない）。
+    - 2026-08-06 改訂: 上記の運用で「読めば理解できる文の文体的違和感」まで
+      質問が殺到した（楽天ジョブで45問超の質問洪水）。質問・ブロックの対象は
+      「読者の理解を実際に阻害する崩れ」（断片・意味不明・矛盾）に限定する。
+      理解可能だが不自然なだけの残存は warning として記録し、公開は妨げない。
     """
     quote = str(finding.get("quote") or "").strip()
-    return bool(quote)
+    if not quote:
+        return False
+    ftype = str(finding.get("type") or "").strip().lower()
+    if ftype in _READER_BLOCKING_TYPES:
+        return True
+    issue = str(finding.get("issue") or "")
+    return bool(_READER_BLOCKING_ISSUE_RE.search(issue))
+
+
+def _quotes_overlap(a: str, b: str) -> bool:
+    """2つの引用が同じ箇所を指しているか（境界ゆれを同一視する）。
+
+    2026-08-06: LLM の再監査は同じ箇所を毎回微妙に違う引用範囲で返すため、
+    完全一致の重複排除では同じ質問が別項目として増殖した（楽天ジョブで
+    75→183件）。包含または長い共通部分文字列があれば同一箇所とみなす。
+    """
+    a = (a or "").strip()
+    b = (b or "").strip()
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    from difflib import SequenceMatcher
+
+    match = SequenceMatcher(None, a, b).find_longest_match(0, len(a), 0, len(b))
+    return match.size >= 12
 
 
 def _queue_unresolved_final_findings(
@@ -84,6 +122,11 @@ def _queue_unresolved_final_findings(
         for x in existing
         if str(x.get("anomaly_id") or "")
     }
+    # 重なり判定用: final_review 由来の既存項目（回答済み含む）の引用一覧。
+    # 回答済みの箇所を再監査が別範囲で再検出しても、二度と聞き直さない。
+    final_existing = [
+        x for x in existing if str(x.get("source") or "") == "final_review"
+    ]
     queued = 0
     for finding in findings:
         quote = str(finding.get("quote") or "").strip()
@@ -93,6 +136,25 @@ def _queue_unresolved_final_findings(
         digest = hashlib.sha256(f"{quote}\0{issue}".encode("utf-8")).hexdigest()[:16]
         anomaly_id = f"final_{digest}"
         item = by_id.get(anomaly_id)
+        if item is None:
+            overlap = next(
+                (
+                    x
+                    for x in final_existing
+                    if _quotes_overlap(
+                        quote, str(x.get("text") or x.get("anomaly_word") or "")
+                    )
+                ),
+                None,
+            )
+            if overlap is not None:
+                status = str(overlap.get("status") or "").strip().lower()
+                if status in terminal_statuses:
+                    # 同じ箇所は回答済み。再質問しない。
+                    continue
+                # 未回答の同一箇所: 既存項目を活かす（新規追加しない）。
+                item = overlap
+                anomaly_id = str(overlap.get("anomaly_id") or anomaly_id)
         payload = {
             "type": "final_review",
             "source": "final_review",
@@ -109,6 +171,8 @@ def _queue_unresolved_final_findings(
         if item is None:
             existing.append(payload)
             by_id[anomaly_id] = payload
+            # 同一実行内の後続 findings とも重なり判定できるようにする
+            final_existing.append(payload)
         else:
             item.update(payload)
         queued += 1
@@ -226,6 +290,24 @@ def evaluate_minutes_quality(
                 "message": "最終レビューの理解阻害・要確認問題が未解決",
                 "count": len(unresolved_blocking),
                 "examples": unresolved_blocking[:10],
+            }
+        )
+    # 理解可能だが不自然なだけの残存は警告に留める（2026-08-06）。
+    unresolved_minor = [
+        f
+        for f in findings
+        if str(f.get("quote") or "").strip() and not _needs_user_attention(f)
+    ]
+    if unresolved_minor:
+        warnings.append(
+            {
+                "code": "minor_wording_unresolved",
+                "message": (
+                    "文体・表記レベルの違和感が残っているが、"
+                    "読者の理解は阻害しないため公開は妨げない"
+                ),
+                "count": len(unresolved_minor),
+                "examples": unresolved_minor[:10],
             }
         )
 

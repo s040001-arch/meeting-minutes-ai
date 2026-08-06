@@ -45,6 +45,7 @@ class MinutesQualityGateTests(unittest.TestCase):
                     {
                         "confidence": "high",
                         "quote": "崩れた本文",
+                        "issue": "意味不明な崩れ",
                         "fix": "",
                     }
                 ],
@@ -172,7 +173,7 @@ class MinutesQualityGateTests(unittest.TestCase):
         finding = {
             "confidence": "medium",
             "quote": "意味不明の断片です",
-            "issue": "文脈上確定できない",
+            "issue": "意味不明な崩れで文脈上確定できない",
             "fix": "",
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,9 +215,10 @@ class MinutesQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(count, 1)
 
-    def test_low_minor_wording_also_blocks_and_is_queued(self) -> None:
-        # ユーザー方針（2026-08-05）: 低確信でも「記録だけで放置」しない。
-        # 修正段で直せなかった残存問題は確信度によらず質問へ回す。
+    def test_minor_wording_warns_but_does_not_block_or_queue(self) -> None:
+        # ユーザー方針（2026-08-06改訂）: 読めば理解できる文体的違和感は
+        # 質問・ブロックしない（楽天ジョブの質問洪水の再発防止）。
+        # warning として記録は残す。
         finding = {
             "type": "unnatural",
             "confidence": "low",
@@ -228,9 +230,13 @@ class MinutesQualityGateTests(unittest.TestCase):
             text="前文。食べさせたらやってくれる。後文。",
             readable_stats=self._stats(findings=[finding]),
         )
-        self.assertIn(
+        self.assertNotIn(
             "final_review_unresolved",
             {x["code"] for x in report["blockers"]},
+        )
+        self.assertIn(
+            "minor_wording_unresolved",
+            {x["code"] for x in report["warnings"]},
         )
         with tempfile.TemporaryDirectory() as tmp:
             count = _queue_unresolved_final_findings(
@@ -238,13 +244,91 @@ class MinutesQualityGateTests(unittest.TestCase):
                 text="前文。食べさせたらやってくれる。後文。",
                 readable_stats=self._stats(findings=[finding]),
             )
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 0)
+
+    def test_overlapping_quote_does_not_create_duplicate(self) -> None:
+        # 2026-08-06: 再監査が同じ箇所を微妙に違う引用範囲で返しても、
+        # 既存項目を更新するだけで新規項目を増やさない。
+        text = "前文。なんか僕も森さんにこう見られて配属が決まった経験があるんで。後文。"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "unknown_points.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "status": "open",
+                            "source": "final_review",
+                            "anomaly_id": "final_aaa",
+                            "text": "なんか僕も森さんにこう見られて配属が決まった経験があるんで",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text=text,
+                readable_stats=self._stats(
+                    findings=[
+                        {
+                            "confidence": "medium",
+                            "quote": "僕も森さんにこう見られて配属が決まった経験があるんで",
+                            "issue": "意味不明（見られて→誤認識の疑い）",
+                            "fix": "",
+                        }
+                    ]
+                ),
+            )
+            points = json.loads(
+                (Path(tmp) / "unknown_points.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["anomaly_id"], "final_aaa")
+
+    def test_answered_overlapping_quote_is_not_requeued(self) -> None:
+        # 回答済みの箇所を再監査が別範囲で再検出しても、聞き直さない。
+        text = "前文。僕も森さんにこう見られて配属が決まった経験があるんで。後文。"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "unknown_points.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "status": "answered",
+                            "source": "final_review",
+                            "anomaly_id": "final_bbb",
+                            "text": "なんか僕も森さんにこう見られて配属が決まった経験があるんで",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text=text,
+                readable_stats=self._stats(
+                    findings=[
+                        {
+                            "confidence": "medium",
+                            "quote": "僕も森さんにこう見られて配属が決まった経験があるんで",
+                            "issue": "意味不明（誤認識の疑い）",
+                            "fix": "",
+                        }
+                    ]
+                ),
+            )
+            points = json.loads(
+                (Path(tmp) / "unknown_points.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(count, 0)
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["status"], "answered")
 
     def test_stale_pre_readable_unknown_is_closed_when_queueing(self) -> None:
         finding = {
             "confidence": "medium",
             "quote": "新しい不明箇所",
-            "issue": "確認が必要",
+            "issue": "意味不明で確認が必要",
             "fix": "",
         }
         with tempfile.TemporaryDirectory() as tmp:

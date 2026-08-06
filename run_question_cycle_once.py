@@ -38,6 +38,135 @@ ASKED_QUESTIONS_FILENAME = "asked_questions.json"
 QUESTION_SELECTION_AUDIT_FILENAME = "question_selection_audit.json"
 
 
+def _resolve_stale_unknowns(unknowns_path: str, text_path: str) -> int:
+    """引用が現在の本文から消えている未解決項目を resolved にする。
+
+    2026-08-06: 回答や自動修正で本文が変わった後も、古い引用のままの
+    項目が open で残り「既に直っている箇所への質問」が送られていた
+    （楽天ジョブで open 77件中22件が該当）。質問選定の前に毎回掃除する。
+    対象は引用ベースの検出（final_review / coherence_review）のみ。
+    """
+    try:
+        with open(text_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        with open(unknowns_path, "r", encoding="utf-8") as f:
+            points = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(points, list) or not text.strip():
+        return 0
+    terminal = {"answered", "done", "closed", "resolved"}
+    resolved = 0
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("status") or "").strip().lower() in terminal:
+            continue
+        if str(p.get("source") or "") not in {"final_review", "coherence_review"}:
+            continue
+        surfaces = [
+            str(p.get(key) or "").strip()
+            for key in ("anomaly_word", "text", "span_text")
+        ]
+        surfaces = [s for s in surfaces if s]
+        if surfaces and not any(s in text for s in surfaces):
+            p["status"] = "resolved"
+            p["resolved_via"] = "stale_quote_gone"
+            resolved += 1
+    if resolved:
+        with open(unknowns_path, "w", encoding="utf-8") as f:
+            json.dump(points, f, ensure_ascii=False, indent=2)
+    return resolved
+
+
+_HYPOTHESIS_MODEL = "claude-sonnet-5"
+
+
+def _generate_hypotheses_for_items(items: list[dict], full_text: str) -> int:
+    """estimated_correction が空の項目に、LLM で修正候補（仮説）を付ける。
+
+    2026-08-06: 仮説なしの丸投げ質問（「正しい表現を教えてください」）は
+    回答負荷が高い。質問時点で候補を生成し「OK」の一言で答えられる形に
+    する。候補が出せない項目はそのまま（仮説なしで質問される）。
+    生成失敗はフェイルオープン（質問自体は止めない）。
+    """
+    targets = [
+        (i, item)
+        for i, item in enumerate(items)
+        if not str(item.get("estimated_correction") or "").strip()
+        and str(item.get("text") or item.get("anomaly_word") or "").strip()
+    ]
+    if not targets or not full_text:
+        return 0
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return 0
+    targets = targets[:8]
+    blocks = []
+    for n, (_i, item) in enumerate(targets, start=1):
+        quote = str(item.get("text") or item.get("anomaly_word") or "").strip()
+        pos = full_text.find(quote)
+        before = full_text[max(0, pos - 120) : pos] if pos >= 0 else ""
+        after = (
+            full_text[pos + len(quote) : pos + len(quote) + 120]
+            if pos >= 0
+            else ""
+        )
+        issue = str(item.get("issue") or item.get("reason") or "").strip()[:120]
+        blocks.append(
+            f"[{n}] 問題箇所:「{quote}」\n"
+            f"    前文脈: …{before}\n"
+            f"    後文脈: {after}…\n"
+            f"    指摘: {issue}"
+        )
+    prompt = (
+        "以下は会議の文字起こしで検出された、音声誤認識の疑いがある箇所です。"
+        "各項目について、前後の文脈から最も可能性の高い「本来の表現」を1つ推定してください。\n"
+        "- 推定はその箇所の置き換え候補として自然に読める形にする\n"
+        "- 自信が持てない場合は candidate を空文字にする\n"
+        "- 新しい事実（人名・数値など）を発明しない\n\n"
+        + "\n\n".join(blocks)
+        + '\n\nJSON配列のみで回答: [{"index": 1, "candidate": "..."}, ...]'
+    )
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=_HYPOTHESIS_MODEL,
+            max_tokens=2000,
+            timeout=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = "".join(
+            getattr(block, "text", "") for block in (resp.content or [])
+        )
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        rows = json.loads(match.group(0)) if match else []
+    except Exception as exc:  # noqa: BLE001
+        print(f"hypothesis_generation_failed={exc!r}")
+        return 0
+    added = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            n = int(row.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        candidate = str(row.get("candidate") or "").strip()
+        if not candidate or not (1 <= n <= len(targets)):
+            continue
+        _i, item = targets[n - 1]
+        quote = str(item.get("text") or item.get("anomaly_word") or "").strip()
+        if candidate == quote:
+            continue
+        item["estimated_correction"] = candidate
+        item["hypothesis_generated"] = True
+        added += 1
+    return added
+
+
 def _asked_questions_path(job_dir: str) -> str:
     return os.path.join(job_dir, ASKED_QUESTIONS_FILENAME)
 
@@ -517,6 +646,14 @@ def _build_final_review_question_payload(
 
     clusters = cluster_pending_findings(candidates, full_text)
     top = clusters[0]
+    # 仮説生成（2026-08-06）: 候補なしの丸投げ質問を減らし、
+    # 「OK」の一言で答えられる質問にする。
+    try:
+        added = _generate_hypotheses_for_items(top["items"], full_text)
+        if added:
+            print(f"hypotheses_generated={added}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"hypothesis_generation_error={exc!r}")
     if len(top["items"]) >= 2:
         batch_payload = _build_final_review_impact_batch_payload(
             job_id=job_id,
@@ -1306,6 +1443,18 @@ def main() -> None:
                 print(f"knowledge_self_answered_count={resolved_n}")
     except Exception as e:
         print(f"knowledge_self_answer_failed={e!r}")
+
+    # 鮮度チェック（2026-08-06）: 本文から消えた引用への質問を送らない。
+    try:
+        _stale_text_path = resolve_context_text_path(
+            args.job_id, args.input_root, args.text
+        )
+        if _stale_text_path:
+            stale_n = _resolve_stale_unknowns(unknowns_path, _stale_text_path)
+            if stale_n:
+                print(f"stale_unknowns_resolved={stale_n}")
+    except Exception as e:  # noqa: BLE001
+        print(f"stale_unknowns_check_failed={e!r}")
 
     unknown_points_all = load_unknown_points(unknowns_path)
     pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)
