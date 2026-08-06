@@ -236,6 +236,191 @@ def _drop_keep_as_is_items(
     return kept
 
 
+_DIGIT_SEQ_RE = re.compile(r"\d+")
+_NAME_TOKEN_RE = re.compile(
+    r"[一-龥ぁ-んァ-ヶA-Za-z]{1,10}(?:さん|様|氏|君|部長|課長|社長|先生)"
+)
+
+
+def _hypothesis_needs_asking(quote: str, fix: str) -> str | None:
+    """仮説適用前の決定論ガード。質問すべき理由を返す（なければ None）。
+
+    数値・人名という「事実」が変わる修正は自動適用しない。
+    """
+    if not fix:
+        return "no_candidate"
+    if fix == "削除":
+        return "deletion"
+    if _DIGIT_SEQ_RE.findall(quote) != _DIGIT_SEQ_RE.findall(fix):
+        return "numeric_changed"
+    if set(_NAME_TOKEN_RE.findall(quote)) != set(_NAME_TOKEN_RE.findall(fix)):
+        return "person_name_changed"
+    return None
+
+
+def _auto_apply_obvious_hypotheses(
+    items: list[dict],
+    unknowns_path: str,
+    text_path: str,
+    full_text: str,
+) -> tuple[list[dict], int, str]:
+    """自明な仮説（意味を変えない修正）は質問せず本文へ適用する。
+
+    2026-08-06 ユーザー指摘: 「どうなんか10月→どうにか10月」のような
+    誰が見ても明らかな修正まで質問していた。決定論ガード（数値・人名・
+    削除は必ず質問）を通過した仮説を LLM で「意味保存か」判定し、
+    意味保存のものは適用して answered にする。LLM 失敗時は全件質問
+    （安全側）。返り値: (質問に残す項目, 適用件数, 適用後テキスト)。
+    """
+    ask_items: list[dict] = []
+    eligible: list[dict] = []
+    audit_rows: list[dict] = []
+    for item in items:
+        quote = str(item.get("text") or item.get("anomaly_word") or "").strip()
+        fix = str(item.get("estimated_correction") or "").strip()
+        reason = _hypothesis_needs_asking(quote, fix)
+        if reason or not quote or full_text.count(quote) != 1:
+            ask_items.append(item)
+            audit_rows.append(
+                {
+                    "word": quote[:60],
+                    "candidate": fix[:60],
+                    "verdict": "ask",
+                    "reason": reason or "quote_not_unique",
+                }
+            )
+        else:
+            eligible.append(item)
+    if not eligible:
+        return ask_items, 0, full_text
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    verdicts: dict[int, bool] = {}
+    if api_key:
+        lines = []
+        for i, item in enumerate(eligible, 1):
+            quote = str(item.get("text") or item.get("anomaly_word") or "")
+            fix = str(item.get("estimated_correction") or "")
+            issue = str(item.get("issue") or item.get("reason") or "")[:80]
+            lines.append(
+                f"[{i}] 原文:「{quote}」\n    修正案:「{fix}」\n    指摘: {issue}"
+            )
+        prompt = (
+            "会議の文字起こしの修正案を審査してください。各項目について、"
+            "修正が「音声誤認識の明らかな訂正・言い淀みの整理であり、"
+            "発言の意味・事実を変えない」なら auto、"
+            "「意味や事実が変わる可能性がある・推測の飛躍がある」なら ask "
+            "と判定してください。迷ったら ask。\n\n"
+            + "\n\n".join(lines)
+            + '\n\nJSON配列のみで回答: [{"index": 1, "verdict": "auto"}, ...]'
+        )
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model=_HYPOTHESIS_MODEL,
+                max_tokens=1500,
+                timeout=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = "".join(
+                getattr(block, "text", "") for block in (resp.content or [])
+            )
+            match = re.search(r"\[.*\]", raw, re.DOTALL)
+            for row in json.loads(match.group(0)) if match else []:
+                if isinstance(row, dict):
+                    try:
+                        verdicts[int(row.get("index") or 0)] = (
+                            str(row.get("verdict") or "").strip().lower()
+                            == "auto"
+                        )
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:  # noqa: BLE001
+            print(f"hypothesis_triage_failed={exc!r}")
+            verdicts = {}
+
+    text = full_text
+    applied_ids: dict[str, str] = {}
+    for i, item in enumerate(eligible, 1):
+        quote = str(item.get("text") or item.get("anomaly_word") or "").strip()
+        fix = str(item.get("estimated_correction") or "").strip()
+        if verdicts.get(i) and text.count(quote) == 1:
+            text = text.replace(quote, fix, 1)
+            aid = str(item.get("anomaly_id") or "")
+            if aid:
+                applied_ids[aid] = fix
+            audit_rows.append(
+                {
+                    "word": quote[:60],
+                    "candidate": fix[:60],
+                    "verdict": "auto",
+                    "reason": "meaning_preserving_hypothesis",
+                }
+            )
+        else:
+            ask_items.append(item)
+            audit_rows.append(
+                {
+                    "word": quote[:60],
+                    "candidate": fix[:60],
+                    "verdict": "ask",
+                    "reason": "llm_ask_or_failed",
+                }
+            )
+
+    if applied_ids:
+        with open(text_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        # unknown_points を answered（自動適用）に更新
+        try:
+            with open(unknowns_path, "r", encoding="utf-8") as f:
+                points = json.load(f)
+            if isinstance(points, list):
+                from datetime import datetime, timezone
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for p in points:
+                    if not isinstance(p, dict):
+                        continue
+                    aid = str(p.get("anomaly_id") or "")
+                    if aid in applied_ids:
+                        p["status"] = "answered"
+                        p["answer"] = f"自動適用（意味保存の修正）: {applied_ids[aid]}"
+                        p["answered_at"] = now_iso
+                        p["auto_applied"] = True
+                with open(unknowns_path, "w", encoding="utf-8") as f:
+                    json.dump(points, f, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"auto_apply_unknowns_update_failed={exc!r}")
+        # 監査ログ
+        try:
+            job_dir = os.path.dirname(unknowns_path)
+            from datetime import datetime, timezone
+
+            with open(
+                os.path.join(job_dir, "auto_triage_audit.jsonl"),
+                "a",
+                encoding="utf-8",
+            ) as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "at": datetime.now(timezone.utc).isoformat(),
+                            "mode": "final_review_hypothesis",
+                            "triage": audit_rows,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        except OSError as exc:
+            print(f"auto_triage_audit_write_failed={exc!r}")
+
+    return ask_items, len(applied_ids), text
+
+
 def _asked_questions_path(job_dir: str) -> str:
     return os.path.join(job_dir, ASKED_QUESTIONS_FILENAME)
 
@@ -697,6 +882,7 @@ def _build_final_review_question_payload(
     doc_url: str,
     full_text: str = "",
     unknowns_path: str = "",
+    text_path: str = "",
 ) -> dict | None:
     """品質ゲート残存問題を「影響度最大」から聞く（2026-08-05 方針）。
 
@@ -738,6 +924,18 @@ def _build_final_review_question_payload(
         items_for_question = _drop_keep_as_is_items(
             items_for_question, unknowns_path
         )
+        if not items_for_question:
+            return None
+    # 自明な仮説（意味を変えない修正）は質問せず本文へ自動適用する
+    # （2026-08-06 ユーザー指摘: 自分で判断できるレベルまで質問していた）。
+    if unknowns_path and text_path:
+        items_for_question, auto_applied_n, full_text = (
+            _auto_apply_obvious_hypotheses(
+                items_for_question, unknowns_path, text_path, full_text
+            )
+        )
+        if auto_applied_n:
+            print(f"obvious_hypotheses_auto_applied={auto_applied_n}")
         if not items_for_question:
             return None
     if len(items_for_question) >= 2:
@@ -1591,6 +1789,7 @@ def main() -> None:
             doc_url=doc_url,
             full_text=full_text,
             unknowns_path=unknowns_path,
+            text_path=context_text_path or "",
         )
 
     if result_payload is None and not coherence_pending and regular_pending:
