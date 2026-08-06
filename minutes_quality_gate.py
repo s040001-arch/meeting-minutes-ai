@@ -427,7 +427,22 @@ def evaluate_minutes_quality(
             active_pending.append(item)
         else:
             vague_pending.append(item)
-    if active_pending:
+    if active_pending and question_rounds_exhausted:
+        # 質問ラウンド上限到達後は、未回答残存もブロックせず警告に落とす
+        # （2026-08-06: これをブロッカーのままにすると「もう質問しないのに
+        # ゲートが塞ぐ」デッドロックになる）。
+        warnings.append(
+            {
+                "code": "pending_unknowns_deferred_max_rounds",
+                "message": (
+                    "質問ラウンド上限に達したため、未回答の確認事項は"
+                    "記録のみで公開を許可した"
+                ),
+                "count": len(active_pending),
+                "examples": active_pending[:10],
+            }
+        )
+    elif active_pending:
         blockers.append(
             {
                 "code": "pending_unknowns_remaining",

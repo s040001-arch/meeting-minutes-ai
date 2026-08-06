@@ -279,6 +279,26 @@ class MinutesQualityGateTests(unittest.TestCase):
             {x["code"] for x in allowed["warnings"]},
         )
 
+    def test_rounds_exhausted_defers_pending_unknowns_too(self) -> None:
+        pending = [
+            {
+                "status": "open",
+                "source": "final_review",
+                "text": "残っている崩れ断片",
+            }
+        ]
+        report = evaluate_minutes_quality(
+            text="本文。残っている崩れ断片。",
+            readable_stats=self._stats(),
+            unknown_points=pending,
+            question_rounds_exhausted=True,
+        )
+        self.assertEqual(report["status"], "pass")
+        self.assertIn(
+            "pending_unknowns_deferred_max_rounds",
+            {x["code"] for x in report["warnings"]},
+        )
+
     def test_overlapping_quote_does_not_create_duplicate(self) -> None:
         # 2026-08-06: 再監査が同じ箇所を微妙に違う引用範囲で返しても、
         # 既存項目を更新するだけで新規項目を増やさない。
