@@ -485,6 +485,10 @@ def _apply_correction_pairs_to_transcript(
         for item in pairs:
             wrong = str(item.get("wrong") or "").strip()
             correct = str(item.get("correct") or "").strip()
+            # 質問テンプレ断片（「2.」等）の混入を適用直前に浄化
+            from correction_sanitizer import sanitize_correction_text
+
+            correct = sanitize_correction_text(correct, wrong=wrong).strip()
             if len(wrong) < 2 or not correct or wrong == correct:
                 continue
             before_count = text.count(wrong)

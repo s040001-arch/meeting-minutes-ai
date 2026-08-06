@@ -1690,6 +1690,12 @@ def apply_batch_corrections(
                 )
             continue
         if action == "correct":
+            if correction:
+                # 番号付き質問テンプレの断片（「2.」等）が correction に
+                # 混入して本文へ書き込まれた実害への対策（2026-08-06）。
+                from correction_sanitizer import sanitize_correction_text
+
+                correction = sanitize_correction_text(correction, wrong=word)
             if correction and len(word) >= 12:
                 correction = sanitize_hypothesis_fillers(correction)
             before = out

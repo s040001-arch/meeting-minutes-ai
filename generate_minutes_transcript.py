@@ -134,6 +134,16 @@ def main() -> None:
             readable_stats=readable_stats,
         )
 
+    # 話者交代での改行（2026-08-07 ユーザー決定: ラベルなし・改行のみ）。
+    # 文字内容は不変（決定論ゲート付き）なのでゲート評価後に実施してよい。
+    try:
+        from speaker_turn_breaks import apply_speaker_turn_breaks
+
+        transcript_text, stb_stats = apply_speaker_turn_breaks(transcript_text)
+        print(f"speaker_turn_breaks={stb_stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"speaker_turn_breaks_failed={e!r}")
+
     # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。
     annotated = _add_section_headings_safe(transcript_text, meeting_profile)
     output_text = build_minutes_text(
