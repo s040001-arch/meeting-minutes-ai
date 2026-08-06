@@ -178,6 +178,40 @@ class KnowledgeSelfAnswerTests(unittest.TestCase):
                 os.path.isfile(os.path.join(job_dir, ksa.AUDIT_FILENAME))
             )
 
+    def test_answered_points_feed_knowledge_cascade(self):
+        # 2026-08-07 回答カスケード: 同ジョブ内の回答済みQ&Aと確定修正が
+        # 確定知識として供給されること（1回答で他の未解決を閉じる基盤）。
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, _, _ = self._setup_job(tmp)
+            points = [
+                {
+                    "status": "answered",
+                    "anomaly_word": "山谷さん",
+                    "answer": "山屋さんが正しい",
+                },
+                {"status": "open", "anomaly_word": "湯でみ"},
+            ]
+            with open(
+                os.path.join(job_dir, "line_correction_audit.jsonl"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(
+                    json.dumps(
+                        {"wrong": "習字", "correct": "週次"},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            lines = ksa._load_knowledge_lines(job_dir, points)
+        joined = "\n".join(lines)
+        self.assertIn("山谷さん", joined)
+        self.assertIn("山屋さんが正しい", joined)
+        self.assertIn("習字", joined)
+        self.assertIn("週次", joined)
+        # open 項目は知識にしない
+        self.assertNotIn("確認済み回答: 『湯でみ』", joined)
+
     def test_unresolvable_rows_do_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_dir, text_path, unknowns_path = self._setup_job(tmp)

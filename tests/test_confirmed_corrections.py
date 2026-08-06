@@ -100,6 +100,141 @@ class ConfirmedCorrectionsTests(unittest.TestCase):
         self.assertEqual(enforced[0]["count"], 2)
 
 
+class ConfirmedRegionTests(unittest.TestCase):
+    def _write_jsonl(self, path: str, rows: list[dict]) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def test_collects_sentence_level_after_texts(self) -> None:
+        from confirmed_corrections import collect_confirmed_region_texts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl(
+                os.path.join(tmp, "batch_corrections_audit.jsonl"),
+                [
+                    {
+                        "applied": [
+                            {
+                                "before": "崩れた元の文がここにあった",
+                                "after": "月多い店舗で200件、僻地でも60件の契約目標となっている",
+                                "action": "correct",
+                            },
+                            # 短い語レベルは確定領域にしない
+                            {"before": "山谷さん", "after": "山屋さん",
+                             "action": "correct"},
+                        ]
+                    }
+                ],
+            )
+            with open(
+                os.path.join(tmp, "unknown_points.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    [
+                        {
+                            "status": "answered",
+                            "estimated_correction": (
+                                "新卒3名に対してメンター3名を付けると新卒60名で総勢120名になる"
+                            ),
+                        }
+                    ],
+                    f,
+                    ensure_ascii=False,
+                )
+            regions = collect_confirmed_region_texts(tmp)
+        self.assertIn(
+            "月多い店舗で200件、僻地でも60件の契約目標となっている", regions
+        )
+        self.assertIn(
+            "新卒3名に対してメンター3名を付けると新卒60名で総勢120名になる",
+            regions,
+        )
+        self.assertNotIn("山屋さん", regions)
+
+    def test_gate_does_not_requeue_finding_overlapping_confirmed_region(
+        self,
+    ) -> None:
+        from minutes_quality_gate import _queue_unresolved_final_findings
+
+        region = "月多い店舗で200件、僻地でも60件の契約目標となっている"
+        text = f"前文。{region}。後文。"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl(
+                os.path.join(tmp, "batch_corrections_audit.jsonl"),
+                [
+                    {
+                        "applied": [
+                            {
+                                "before": "崩れた元の文",
+                                "after": region,
+                                "action": "correct",
+                            }
+                        ]
+                    }
+                ],
+            )
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text=text,
+                readable_stats={
+                    "final_review": {
+                        "findings": [
+                            {
+                                "type": "fragment",
+                                "confidence": "medium",
+                                # 確定領域の一部を再検出したケース
+                                "quote": "僻地でも60件の契約目標となっている",
+                                "issue": "意味不明の疑い",
+                                "fix": "",
+                            }
+                        ]
+                    }
+                },
+            )
+        self.assertEqual(count, 0)
+
+    def test_question_cycle_resolves_overlapping_open_items(self) -> None:
+        from run_question_cycle_once import _resolve_confirmed_region_overlaps
+
+        region = "新卒3名に対してメンター3名を付けると新卒60名で総勢120名になる"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl(
+                os.path.join(tmp, "knowledge_self_answer_audit.jsonl"),
+                [{"wrong": "元の崩れ", "right": region}],
+            )
+            unknowns_path = os.path.join(tmp, "unknown_points.json")
+            with open(unknowns_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        {
+                            "status": "open",
+                            "source": "final_review",
+                            "anomaly_id": "final_dup",
+                            "text": "メンター3名を付けると新卒60名で総勢120名",
+                        },
+                        {
+                            "status": "open",
+                            "source": "final_review",
+                            "anomaly_id": "final_other",
+                            "text": "全く別の崩れ断片がここにある",
+                        },
+                    ],
+                    f,
+                    ensure_ascii=False,
+                )
+            n = _resolve_confirmed_region_overlaps(unknowns_path, tmp)
+            with open(unknowns_path, encoding="utf-8") as f:
+                after = json.load(f)
+        self.assertEqual(n, 1)
+        by_id = {p["anomaly_id"]: p for p in after}
+        self.assertEqual(by_id["final_dup"]["status"], "resolved")
+        self.assertEqual(
+            by_id["final_dup"]["resolved_via"], "overlaps_confirmed_region"
+        )
+        self.assertEqual(by_id["final_other"]["status"], "open")
+
+
 class GateAiCorrectionFallbackTests(unittest.TestCase):
     def _stats(self) -> dict:
         return {

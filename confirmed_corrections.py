@@ -116,6 +116,95 @@ def collect_confirmed_pairs(job_dir: str) -> list[dict[str, str]]:
     return list(pairs.values())
 
 
+# 確定領域とみなす after テキストの最小長。短い語（山屋さん等）は
+# 語レベルの修正であり、その語を含む文全体をロックすると過剰なため除外。
+_REGION_MIN_LEN = 15
+
+
+def collect_confirmed_region_texts(job_dir: str) -> list[str]:
+    """人間の回答・自動適用で確定した「修正後の文」（確定領域）を集める。
+
+    2026-08-06 導入。回答が適用されると本文は修正後の文になるが、再監査は
+    その修正後の文を再び違和感として検出し、再質問していた（構造的欠陥:
+    人間の確定に対する終局性が無い）。ここで集めた確定領域に重なる検出は、
+    以後質問対象にしない。
+    """
+    texts: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        s = str(value or "").strip()
+        if len(s) >= _REGION_MIN_LEN and s not in seen:
+            seen.add(s)
+            texts.append(s)
+
+    for row in _iter_jsonl(os.path.join(job_dir, "line_correction_audit.jsonl")):
+        if isinstance(row, dict):
+            add(row.get("correct"))
+
+    for row in _iter_jsonl(
+        os.path.join(job_dir, "batch_corrections_audit.jsonl")
+    ):
+        if not isinstance(row, dict):
+            continue
+        for a in row.get("applied") or []:
+            if isinstance(a, dict):
+                add(a.get("after"))
+
+    for row in _iter_jsonl(os.path.join(job_dir, "auto_triage_audit.jsonl")):
+        if not isinstance(row, dict):
+            continue
+        for a in row.get("applied") or []:
+            if isinstance(a, dict):
+                add(a.get("after"))
+
+    for row in _iter_jsonl(
+        os.path.join(job_dir, "knowledge_self_answer_audit.jsonl")
+    ):
+        if isinstance(row, dict):
+            add(row.get("right"))
+
+    auto_path = os.path.join(job_dir, "auto_corrections.json")
+    if os.path.isfile(auto_path):
+        try:
+            with open(auto_path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+            if isinstance(rows, list):
+                for a in rows:
+                    if isinstance(a, dict):
+                        add(a.get("after"))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # 回答済み unknown_points の確定内容（仮説への「はい」等）
+    unknowns_path = os.path.join(job_dir, "unknown_points.json")
+    if os.path.isfile(unknowns_path):
+        try:
+            with open(unknowns_path, "r", encoding="utf-8") as f:
+                points = json.load(f)
+            if isinstance(points, list):
+                for p in points:
+                    if not isinstance(p, dict):
+                        continue
+                    if str(p.get("status") or "").lower() not in {
+                        "answered",
+                        "done",
+                        "closed",
+                        "resolved",
+                    }:
+                        continue
+                    add(p.get("estimated_correction"))
+                    # 回答テキスト内の確定表現（プレフィックスを剥がす）
+                    ans = str(p.get("answer") or "").strip()
+                    if ans.startswith("自動適用"):
+                        ans = ans.split(":", 1)[-1].strip()
+                    add(ans)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return texts
+
+
 def enforce_confirmed_pairs(
     text: str,
     pairs: list[dict[str, str]],

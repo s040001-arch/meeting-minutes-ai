@@ -18,42 +18,78 @@ from final_review_pass import FINAL_REVIEW_MAX_FINDINGS
 
 QUALITY_GATE_REPORT_FILENAME = "minutes_quality_gate.json"
 _VALID_MODES = {"off", "report", "enforce"}
-# 質問→修正→再監査のラウンド上限。再監査は改善後の本文から毎回新しい
-# 問題を見つけ得るため、上限が無いと質問が終わらない（2026-08-06 楽天ジョブ）。
-# 上限到達後は残存を warning として記録し公開を許す。
-QUESTION_ROUNDS_FILENAME = "final_review_question_rounds.json"
-DEFAULT_MAX_QUESTION_ROUNDS = 3
+
+# 2026-08-07 構造改修（ユーザー方針⓪〜⑤）:
+# 質問ループの終了条件は「ラウンド上限」ではなく固定点。
+# - 文意の通らない箇所が残っていて、まだ聞いていない内容 → 質問（上限なし）
+# - 残っていても、それがユーザーの回答済み領域の再検出（=同じ内容の質問に
+#   なる）→ 質問せず warning として記録し公開を許す
+# 「同じ内容か」の照合には covered surfaces（回答済み項目の引用と、回答を
+# 反映して書き直した文）を使う。
+_COVERED_MIN_SURFACE_LEN = 10
+_COVERED_TERMINAL_STATUSES = {"answered", "done"}
 
 
-def _load_question_rounds(job_dir: str) -> int:
-    path = Path(job_dir) / QUESTION_ROUNDS_FILENAME
-    if not path.is_file():
-        return 0
+def collect_covered_surfaces(
+    job_dir: str,
+    unknown_points: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """ユーザーが既に回答・確定した領域の表面文字列を集める。
+
+    ここに重なる新検出を質問すると「すでに答えた内容の確認質問」になる
+    （2026-08-06 楽天ジョブでユーザーが回答を打ち切った直接原因）。
+    内訳:
+    - confirmed_corrections.collect_confirmed_region_texts:
+      回答・自動適用で書き直された「修正後の文」（確定領域）
+    - 回答済み unknown_points の引用スパンそのもの
+      （再監査が別範囲・別表現で同じ箇所を再検出しても聞き直さない）
+
+    短い単語レベルの修正ペアは confirmed_corrections の決定論置換が
+    担当するので、ここでは文・スパンレベル（>=10文字）のみ扱う。
+    """
+    surfaces: list[str] = []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return int(data.get("rounds") or 0)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return 0
+        from confirmed_corrections import collect_confirmed_region_texts
+
+        surfaces.extend(collect_confirmed_region_texts(job_dir))
+    except Exception as exc:  # noqa: BLE001
+        print(f"covered_surfaces_regions_failed={exc!r}")
+
+    points = unknown_points
+    if points is None:
+        path = Path(job_dir) / "unknown_points.json"
+        points = []
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    points = [x for x in loaded if isinstance(x, dict)]
+            except (OSError, json.JSONDecodeError):
+                points = []
+    for p in points or []:
+        if not isinstance(p, dict):
+            continue
+        status = str(p.get("status") or "").strip().lower()
+        if status not in _COVERED_TERMINAL_STATUSES:
+            continue
+        for key in ("span_text", "text"):
+            s = str(p.get(key) or "").strip()
+            if len(s) >= _COVERED_MIN_SURFACE_LEN:
+                surfaces.append(s)
+
+    # 順序を保って重複除去
+    seen: set[str] = set()
+    unique: list[str] = []
+    for s in surfaces:
+        if s not in seen:
+            seen.add(s)
+            unique.append(s)
+    return unique
 
 
-def _increment_question_rounds(job_dir: str) -> int:
-    rounds = _load_question_rounds(job_dir) + 1
-    try:
-        (Path(job_dir) / QUESTION_ROUNDS_FILENAME).write_text(
-            json.dumps({"rounds": rounds}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
-    return rounds
-
-
-def resolve_max_question_rounds() -> int:
-    raw = os.environ.get("MINUTES_MAX_QUESTION_ROUNDS", "").strip()
-    try:
-        return max(1, int(raw)) if raw else DEFAULT_MAX_QUESTION_ROUNDS
-    except ValueError:
-        return DEFAULT_MAX_QUESTION_ROUNDS
+def is_covered_by_answers(quote: str, covered_surfaces: list[str]) -> bool:
+    """引用がユーザーの回答済み領域と重なるか。"""
+    return any(_quotes_overlap(quote, s) for s in covered_surfaces or [])
 
 
 class MinutesQualityGateError(RuntimeError):
@@ -115,6 +151,7 @@ def _queue_unresolved_final_findings(
     job_dir: str,
     text: str,
     readable_stats: dict[str, Any] | None,
+    covered_surfaces: list[str] | None = None,
 ) -> int:
     """Expose unresolved final-review findings to the normal Q&A cycle."""
     stats = readable_stats or {}
@@ -163,10 +200,17 @@ def _queue_unresolved_final_findings(
     final_existing = [
         x for x in existing if str(x.get("source") or "") == "final_review"
     ]
+    # 確定領域・回答済み領域（covered surfaces）: 人間の回答・自動適用で
+    # 確定した「修正後の文」と回答済みの引用スパン。再監査がこれらを
+    # 再検出しても質問しない（人間の確定に終局性を持たせる）。
+    if covered_surfaces is None:
+        covered_surfaces = collect_covered_surfaces(job_dir, existing)
     queued = 0
     for finding in findings:
         quote = str(finding.get("quote") or "").strip()
         if not quote or quote not in text:
+            continue
+        if is_covered_by_answers(quote, covered_surfaces):
             continue
         issue = str(finding.get("issue") or "").strip()
         digest = hashlib.sha256(f"{quote}\0{issue}".encode("utf-8")).hexdigest()[:16]
@@ -232,7 +276,7 @@ def evaluate_minutes_quality(
     correction_audit_rows: list[dict[str, Any]] | None = None,
     unknown_points: list[dict[str, Any]] | None = None,
     ai_correction_meta: dict[str, Any] | None = None,
-    question_rounds_exhausted: bool = False,
+    covered_surfaces: list[str] | None = None,
 ) -> dict[str, Any]:
     stats = readable_stats or {}
     final_report = stats.get("final_review")
@@ -320,27 +364,37 @@ def evaluate_minutes_quality(
         f for f in (final_report.get("findings") or []) if isinstance(f, dict)
     ]
     unresolved_blocking = [f for f in findings if _needs_user_attention(f)]
-    if unresolved_blocking and question_rounds_exhausted:
-        # 質問ラウンド上限に到達: これ以上ユーザーに聞かず、残存を
-        # warning として記録して公開を許す（2026-08-06）。
-        warnings.append(
-            {
-                "code": "final_review_unresolved_max_rounds",
-                "message": (
-                    "質問ラウンド上限に達したため、残存の要確認問題は"
-                    "記録のみで公開を許可した"
-                ),
-                "count": len(unresolved_blocking),
-                "examples": unresolved_blocking[:10],
-            }
-        )
-    elif unresolved_blocking:
+    # 固定点判定（2026-08-07）: 残存問題のうち、ユーザーの回答済み領域の
+    # 再検出（=聞くと同じ内容の質問になる）は質問せず warning に落とす。
+    # まだ聞いていない内容だけがブロック＆質問対象（ラウンド上限なし）。
+    askable_blocking: list[dict[str, Any]] = []
+    covered_blocking: list[dict[str, Any]] = []
+    for f in unresolved_blocking:
+        if is_covered_by_answers(
+            str(f.get("quote") or ""), covered_surfaces or []
+        ):
+            covered_blocking.append(f)
+        else:
+            askable_blocking.append(f)
+    if askable_blocking:
         blockers.append(
             {
                 "code": "final_review_unresolved",
                 "message": "最終レビューの理解阻害・要確認問題が未解決",
-                "count": len(unresolved_blocking),
-                "examples": unresolved_blocking[:10],
+                "count": len(askable_blocking),
+                "examples": askable_blocking[:10],
+            }
+        )
+    if covered_blocking:
+        warnings.append(
+            {
+                "code": "already_covered_by_answers",
+                "message": (
+                    "回答済み領域の再検出のため質問せず、"
+                    "記録のみで公開を許可した"
+                ),
+                "count": len(covered_blocking),
+                "examples": covered_blocking[:10],
             }
         )
     # 理解可能だが不自然なだけの残存は警告に留める（2026-08-06）。
@@ -427,28 +481,37 @@ def evaluate_minutes_quality(
             active_pending.append(item)
         else:
             vague_pending.append(item)
-    if active_pending and question_rounds_exhausted:
-        # 質問ラウンド上限到達後は、未回答残存もブロックせず警告に落とす
-        # （2026-08-06: これをブロッカーのままにすると「もう質問しないのに
-        # ゲートが塞ぐ」デッドロックになる）。
-        warnings.append(
-            {
-                "code": "pending_unknowns_deferred_max_rounds",
-                "message": (
-                    "質問ラウンド上限に達したため、未回答の確認事項は"
-                    "記録のみで公開を許可した"
-                ),
-                "count": len(active_pending),
-                "examples": active_pending[:10],
-            }
+    # 未回答項目も固定点判定を通す: 回答済み領域と重なるものは
+    # 「同じ内容の質問」なのでブロックしない（2026-08-07）。
+    askable_pending: list[dict[str, Any]] = []
+    covered_pending: list[dict[str, Any]] = []
+    for item in active_pending:
+        surface = str(
+            item.get("span_text") or item.get("text") or item.get("anomaly_word") or ""
         )
-    elif active_pending:
+        if is_covered_by_answers(surface, covered_surfaces or []):
+            covered_pending.append(item)
+        else:
+            askable_pending.append(item)
+    if askable_pending:
         blockers.append(
             {
                 "code": "pending_unknowns_remaining",
                 "message": "未回答の確認事項に対応する本文が残っている",
-                "count": len(active_pending),
-                "examples": active_pending[:10],
+                "count": len(askable_pending),
+                "examples": askable_pending[:10],
+            }
+        )
+    if covered_pending:
+        warnings.append(
+            {
+                "code": "pending_unknowns_covered_by_answers",
+                "message": (
+                    "回答済み領域と重なる未回答項目のため質問せず、"
+                    "記録のみで公開を許可した"
+                ),
+                "count": len(covered_pending),
+                "examples": covered_pending[:10],
             }
         )
     if vague_pending:
@@ -567,8 +630,7 @@ def run_minutes_quality_gate(
                 unknown_points = [x for x in loaded if isinstance(x, dict)]
         except (OSError, json.JSONDecodeError):
             unknown_points = []
-    rounds_done = _load_question_rounds(job_dir)
-    max_rounds = resolve_max_question_rounds()
+    covered_surfaces = collect_covered_surfaces(job_dir, unknown_points)
     report = {
         "mode": mode,
         **evaluate_minutes_quality(
@@ -577,20 +639,18 @@ def run_minutes_quality_gate(
             correction_audit_rows=audit_rows,
             unknown_points=unknown_points,
             ai_correction_meta=ai_correction_meta,
-            question_rounds_exhausted=rounds_done >= max_rounds,
+            covered_surfaces=covered_surfaces,
         ),
     }
-    report["metrics"]["question_rounds_done"] = rounds_done
-    report["metrics"]["max_question_rounds"] = max_rounds
+    report["metrics"]["covered_surfaces"] = len(covered_surfaces)
     if report["status"] == "blocked":
         queued = _queue_unresolved_final_findings(
             job_dir=job_dir,
             text=text,
             readable_stats=readable_stats,
+            covered_surfaces=covered_surfaces,
         )
         report["metrics"]["final_review_questions_queued"] = queued
-        if queued:
-            _increment_question_rounds(job_dir)
     path = Path(job_dir) / QUALITY_GATE_REPORT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

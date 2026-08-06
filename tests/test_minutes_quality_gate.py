@@ -246,58 +246,81 @@ class MinutesQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(count, 0)
 
-    def test_rounds_exhausted_converts_block_to_warning(self) -> None:
-        # 2026-08-06: 質問→修正→再監査のラウンド上限に達したら、
-        # 残存問題は warning として記録し公開を許す（質問が終わらない防止）。
+    def test_covered_finding_converts_block_to_warning(self) -> None:
+        # 2026-08-07: 回答済み領域と重なる再検出は「同じ内容の質問」に
+        # なるため質問せず、warning として記録し公開を許す（固定点終了）。
         finding = {
             "type": "fragment",
             "confidence": "medium",
-            "quote": "意味不明の断片です",
+            "quote": "意味不明の断片ですがユーザー回答済みの箇所",
             "issue": "意味不明な崩れ",
             "fix": "",
         }
+        text = "前文。意味不明の断片ですがユーザー回答済みの箇所。後文。"
         blocked = evaluate_minutes_quality(
-            text="前文。意味不明の断片です。後文。",
+            text=text,
             readable_stats=self._stats(findings=[finding]),
-            question_rounds_exhausted=False,
+            covered_surfaces=[],
         )
         self.assertIn(
             "final_review_unresolved",
             {x["code"] for x in blocked["blockers"]},
         )
         allowed = evaluate_minutes_quality(
-            text="前文。意味不明の断片です。後文。",
+            text=text,
             readable_stats=self._stats(findings=[finding]),
-            question_rounds_exhausted=True,
+            covered_surfaces=["意味不明の断片ですがユーザー回答済みの箇所"],
         )
         self.assertNotIn(
             "final_review_unresolved",
             {x["code"] for x in allowed["blockers"]},
         )
         self.assertIn(
-            "final_review_unresolved_max_rounds",
+            "already_covered_by_answers",
             {x["code"] for x in allowed["warnings"]},
         )
 
-    def test_rounds_exhausted_defers_pending_unknowns_too(self) -> None:
+    def test_covered_pending_unknowns_do_not_block(self) -> None:
         pending = [
             {
                 "status": "open",
                 "source": "final_review",
-                "text": "残っている崩れ断片",
+                "text": "残っている崩れ断片の該当箇所",
             }
         ]
         report = evaluate_minutes_quality(
-            text="本文。残っている崩れ断片。",
+            text="本文。残っている崩れ断片の該当箇所。",
             readable_stats=self._stats(),
             unknown_points=pending,
-            question_rounds_exhausted=True,
+            covered_surfaces=["残っている崩れ断片の該当箇所"],
         )
         self.assertEqual(report["status"], "pass")
         self.assertIn(
-            "pending_unknowns_deferred_max_rounds",
+            "pending_unknowns_covered_by_answers",
             {x["code"] for x in report["warnings"]},
         )
+
+    def test_collect_covered_surfaces_from_answered_points(self) -> None:
+        # 回答済み unknown_points の引用スパンが照合リストに入ること。
+        from minutes_quality_gate import collect_covered_surfaces
+
+        with tempfile.TemporaryDirectory() as tmp:
+            surfaces = collect_covered_surfaces(
+                tmp,
+                [
+                    {
+                        "status": "answered",
+                        "text": "回答済みの引用スパンがこちらです",
+                        "answer": "はい",
+                    },
+                    {
+                        "status": "open",
+                        "text": "未回答の引用スパンは含めない",
+                    },
+                ],
+            )
+        self.assertIn("回答済みの引用スパンがこちらです", surfaces)
+        self.assertNotIn("未回答の引用スパンは含めない", surfaces)
 
     def test_overlapping_quote_does_not_create_duplicate(self) -> None:
         # 2026-08-06: 再監査が同じ箇所を微妙に違う引用範囲で返しても、

@@ -236,6 +236,53 @@ def _drop_keep_as_is_items(
     return kept
 
 
+def _resolve_confirmed_region_overlaps(unknowns_path: str, job_dir: str) -> int:
+    """確定領域に重なる未解決項目を質問せず解決する（2026-08-06）。
+
+    人間の回答で確定した文（確定領域）を再監査が再検出して積んだ項目は、
+    「すでに答えた内容の確認質問」になる。構造的な再質問ループの根本対策
+    として、確定領域と重なる open 項目を毎サイクル掃除する。
+
+    2026-08-07: 照合リストを品質ゲートと同じ covered surfaces に統一
+    （確定領域＋回答済み項目の引用スパン）。ゲートが「聞かない」と
+    判断する基準とサイクルが「掃除する」基準が一致し、固定点で終了する。
+    """
+    try:
+        from minutes_quality_gate import (
+            _quotes_overlap,
+            collect_covered_surfaces,
+        )
+
+        regions = collect_covered_surfaces(job_dir)
+        if not regions:
+            return 0
+        with open(unknowns_path, "r", encoding="utf-8") as f:
+            points = json.load(f)
+    except Exception as exc:  # noqa: BLE001
+        print(f"confirmed_region_check_failed={exc!r}")
+        return 0
+    if not isinstance(points, list):
+        return 0
+    terminal = {"answered", "done", "closed", "resolved"}
+    changed = 0
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("status") or "").lower() in terminal:
+            continue
+        if str(p.get("source") or "") not in {"final_review", "coherence_review"}:
+            continue
+        quote = str(p.get("text") or p.get("anomaly_word") or "").strip()
+        if quote and any(_quotes_overlap(quote, r) for r in regions):
+            p["status"] = "resolved"
+            p["resolved_via"] = "overlaps_confirmed_region"
+            changed += 1
+    if changed:
+        with open(unknowns_path, "w", encoding="utf-8") as f:
+            json.dump(points, f, ensure_ascii=False, indent=2)
+    return changed
+
+
 _DIGIT_SEQ_RE = re.compile(r"\d+")
 _NAME_TOKEN_RE = re.compile(
     r"[一-龥ぁ-んァ-ヶA-Za-z]{1,10}(?:さん|様|氏|君|部長|課長|社長|先生)"
@@ -1739,6 +1786,12 @@ def main() -> None:
                 print(f"stale_unknowns_resolved={stale_n}")
     except Exception as e:  # noqa: BLE001
         print(f"stale_unknowns_check_failed={e!r}")
+
+    # 確定領域チェック（2026-08-06）: 人間の回答で確定した文への
+    # 「確認のような再質問」を送らない。
+    region_n = _resolve_confirmed_region_overlaps(unknowns_path, job_dir)
+    if region_n:
+        print(f"confirmed_region_overlaps_resolved={region_n}")
 
     unknown_points_all = load_unknown_points(unknowns_path)
     pending_all, pending_meta = _filter_pending_unknown_points(unknown_points_all)

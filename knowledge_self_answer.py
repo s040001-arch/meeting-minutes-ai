@@ -27,7 +27,9 @@ _MAX_ITEMS = 30
 AUDIT_FILENAME = "knowledge_self_answer_audit.jsonl"
 
 
-def _load_knowledge_lines(job_dir: str) -> list[str]:
+def _load_knowledge_lines(
+    job_dir: str, points: list[dict[str, Any]] | None = None
+) -> list[str]:
     lines: list[str] = []
     try:
         from meeting_profile import load_meeting_profile
@@ -36,7 +38,42 @@ def _load_knowledge_lines(job_dir: str) -> list[str]:
         lines = [str(m) for m in (profile.get("relevant_knowledge") or []) if str(m).strip()]
     except Exception as e:  # noqa: BLE001
         print(f"knowledge_self_answer_profile_load_failed={e!r}")
-    return lines
+
+    # 回答カスケード（2026-08-07 ユーザー方針④）: このジョブで既に得た
+    # 回答・確定修正も確定知識として使う。1つの回答で閉じられる未解決を、
+    # 次の質問を送る前に全部閉じるための供給源。
+    for p in points or []:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("status") or "").strip().lower() not in {
+            "answered",
+            "done",
+        }:
+            continue
+        quote = str(p.get("anomaly_word") or p.get("text") or "").strip()
+        answer = str(p.get("answer") or "").strip()
+        if quote and answer:
+            lines.append(
+                f"確認済み回答: 『{quote[:80]}』について→『{answer[:120]}』"
+            )
+    try:
+        from confirmed_corrections import collect_confirmed_pairs
+
+        for pair in collect_confirmed_pairs(job_dir):
+            lines.append(
+                f"確定修正: 『{pair['wrong']}』は『{pair['right']}』の誤認識"
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"knowledge_self_answer_pairs_load_failed={e!r}")
+
+    # 重複除去（順序維持）
+    seen: set[str] = set()
+    unique: list[str] = []
+    for ln in lines:
+        if ln not in seen:
+            seen.add(ln)
+            unique.append(ln)
+    return unique
 
 
 def _ask_llm(
@@ -111,7 +148,7 @@ def resolve_unknowns_with_knowledge(
     if not pending:
         return 0
 
-    knowledge = _load_knowledge_lines(job_dir)
+    knowledge = _load_knowledge_lines(job_dir, points)
     if not knowledge:
         return 0
 
