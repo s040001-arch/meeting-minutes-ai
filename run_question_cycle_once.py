@@ -646,25 +646,34 @@ def _build_final_review_question_payload(
 
     clusters = cluster_pending_findings(candidates, full_text)
     top = clusters[0]
+    # 質問項目の決定:
+    # - 同じ答えで解決する一群（クラスタ）があればそれを1通に
+    # - 2026-08-06: 独立した単発項目しか無い場合も、1件ずつ連射せず
+    #   影響度上位の独立項目を最大6件、番号付き1通にまとめて送る
+    #   （ユーザー指摘「立て続けに質問がくる」への対策）
+    if len(top["items"]) >= 2:
+        items_for_question = list(top["items"])
+    else:
+        items_for_question = [c["items"][0] for c in clusters[:6]]
     # 仮説生成（2026-08-06）: 候補なしの丸投げ質問を減らし、
     # 「OK」の一言で答えられる質問にする。
     try:
-        added = _generate_hypotheses_for_items(top["items"], full_text)
+        added = _generate_hypotheses_for_items(items_for_question, full_text)
         if added:
             print(f"hypotheses_generated={added}")
     except Exception as exc:  # noqa: BLE001
         print(f"hypothesis_generation_error={exc!r}")
-    if len(top["items"]) >= 2:
+    if len(items_for_question) >= 2:
         batch_payload = _build_final_review_impact_batch_payload(
             job_id=job_id,
-            cluster_items=top["items"],
+            cluster_items=items_for_question,
             pending_meta=pending_meta,
             doc_url=doc_url,
             full_text=full_text,
         )
         if batch_payload is not None:
             return batch_payload
-    selected = top["items"][0]
+    selected = items_for_question[0]
     quote = str(selected.get("text") or selected.get("anomaly_word") or "").strip()
     fix = str(selected.get("estimated_correction") or "").strip()
     selected = dict(selected)

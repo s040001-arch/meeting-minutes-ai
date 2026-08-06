@@ -18,6 +18,42 @@ from final_review_pass import FINAL_REVIEW_MAX_FINDINGS
 
 QUALITY_GATE_REPORT_FILENAME = "minutes_quality_gate.json"
 _VALID_MODES = {"off", "report", "enforce"}
+# 質問→修正→再監査のラウンド上限。再監査は改善後の本文から毎回新しい
+# 問題を見つけ得るため、上限が無いと質問が終わらない（2026-08-06 楽天ジョブ）。
+# 上限到達後は残存を warning として記録し公開を許す。
+QUESTION_ROUNDS_FILENAME = "final_review_question_rounds.json"
+DEFAULT_MAX_QUESTION_ROUNDS = 3
+
+
+def _load_question_rounds(job_dir: str) -> int:
+    path = Path(job_dir) / QUESTION_ROUNDS_FILENAME
+    if not path.is_file():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return int(data.get("rounds") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+
+
+def _increment_question_rounds(job_dir: str) -> int:
+    rounds = _load_question_rounds(job_dir) + 1
+    try:
+        (Path(job_dir) / QUESTION_ROUNDS_FILENAME).write_text(
+            json.dumps({"rounds": rounds}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return rounds
+
+
+def resolve_max_question_rounds() -> int:
+    raw = os.environ.get("MINUTES_MAX_QUESTION_ROUNDS", "").strip()
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_MAX_QUESTION_ROUNDS
+    except ValueError:
+        return DEFAULT_MAX_QUESTION_ROUNDS
 
 
 class MinutesQualityGateError(RuntimeError):
@@ -196,6 +232,7 @@ def evaluate_minutes_quality(
     correction_audit_rows: list[dict[str, Any]] | None = None,
     unknown_points: list[dict[str, Any]] | None = None,
     ai_correction_meta: dict[str, Any] | None = None,
+    question_rounds_exhausted: bool = False,
 ) -> dict[str, Any]:
     stats = readable_stats or {}
     final_report = stats.get("final_review")
@@ -283,7 +320,21 @@ def evaluate_minutes_quality(
         f for f in (final_report.get("findings") or []) if isinstance(f, dict)
     ]
     unresolved_blocking = [f for f in findings if _needs_user_attention(f)]
-    if unresolved_blocking:
+    if unresolved_blocking and question_rounds_exhausted:
+        # 質問ラウンド上限に到達: これ以上ユーザーに聞かず、残存を
+        # warning として記録して公開を許す（2026-08-06）。
+        warnings.append(
+            {
+                "code": "final_review_unresolved_max_rounds",
+                "message": (
+                    "質問ラウンド上限に達したため、残存の要確認問題は"
+                    "記録のみで公開を許可した"
+                ),
+                "count": len(unresolved_blocking),
+                "examples": unresolved_blocking[:10],
+            }
+        )
+    elif unresolved_blocking:
         blockers.append(
             {
                 "code": "final_review_unresolved",
@@ -501,6 +552,8 @@ def run_minutes_quality_gate(
                 unknown_points = [x for x in loaded if isinstance(x, dict)]
         except (OSError, json.JSONDecodeError):
             unknown_points = []
+    rounds_done = _load_question_rounds(job_dir)
+    max_rounds = resolve_max_question_rounds()
     report = {
         "mode": mode,
         **evaluate_minutes_quality(
@@ -509,8 +562,11 @@ def run_minutes_quality_gate(
             correction_audit_rows=audit_rows,
             unknown_points=unknown_points,
             ai_correction_meta=ai_correction_meta,
+            question_rounds_exhausted=rounds_done >= max_rounds,
         ),
     }
+    report["metrics"]["question_rounds_done"] = rounds_done
+    report["metrics"]["max_question_rounds"] = max_rounds
     if report["status"] == "blocked":
         queued = _queue_unresolved_final_findings(
             job_dir=job_dir,
@@ -518,6 +574,8 @@ def run_minutes_quality_gate(
             readable_stats=readable_stats,
         )
         report["metrics"]["final_review_questions_queued"] = queued
+        if queued:
+            _increment_question_rounds(job_dir)
     path = Path(job_dir) / QUALITY_GATE_REPORT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

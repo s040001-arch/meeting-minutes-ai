@@ -246,6 +246,39 @@ class MinutesQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(count, 0)
 
+    def test_rounds_exhausted_converts_block_to_warning(self) -> None:
+        # 2026-08-06: 質問→修正→再監査のラウンド上限に達したら、
+        # 残存問題は warning として記録し公開を許す（質問が終わらない防止）。
+        finding = {
+            "type": "fragment",
+            "confidence": "medium",
+            "quote": "意味不明の断片です",
+            "issue": "意味不明な崩れ",
+            "fix": "",
+        }
+        blocked = evaluate_minutes_quality(
+            text="前文。意味不明の断片です。後文。",
+            readable_stats=self._stats(findings=[finding]),
+            question_rounds_exhausted=False,
+        )
+        self.assertIn(
+            "final_review_unresolved",
+            {x["code"] for x in blocked["blockers"]},
+        )
+        allowed = evaluate_minutes_quality(
+            text="前文。意味不明の断片です。後文。",
+            readable_stats=self._stats(findings=[finding]),
+            question_rounds_exhausted=True,
+        )
+        self.assertNotIn(
+            "final_review_unresolved",
+            {x["code"] for x in allowed["blockers"]},
+        )
+        self.assertIn(
+            "final_review_unresolved_max_rounds",
+            {x["code"] for x in allowed["warnings"]},
+        )
+
     def test_overlapping_quote_does_not_create_duplicate(self) -> None:
         # 2026-08-06: 再監査が同じ箇所を微妙に違う引用範囲で返しても、
         # 既存項目を更新するだけで新規項目を増やさない。
