@@ -53,6 +53,62 @@ class ResolveStaleUnknownsTests(unittest.TestCase):
         self.assertEqual(after[3]["status"], "answered")
 
 
+class KeepAsIsTests(unittest.TestCase):
+    def test_trivially_equal_ignores_punctuation(self) -> None:
+        from run_question_cycle_once import _trivially_equal
+
+        self.assertTrue(_trivially_equal("話しててもなるほどね。", "話してても、なるほどね。"))
+        self.assertTrue(_trivially_equal("同じ文", "同じ文"))
+        self.assertFalse(_trivially_equal("どうなんか10月", "どうにか10月"))
+
+    def test_keep_as_is_items_are_resolved_not_asked(self) -> None:
+        from run_question_cycle_once import _drop_keep_as_is_items
+
+        with tempfile.TemporaryDirectory() as tmp:
+            unknowns_path = os.path.join(tmp, "unknown_points.json")
+            points = [
+                {
+                    "status": "open",
+                    "source": "final_review",
+                    "anomaly_id": "final_same",
+                    "text": "話しててもなるほどね。",
+                },
+                {
+                    "status": "open",
+                    "source": "final_review",
+                    "anomaly_id": "final_diff",
+                    "text": "どうなんか10月に来る",
+                },
+            ]
+            with open(unknowns_path, "w", encoding="utf-8") as f:
+                json.dump(points, f, ensure_ascii=False)
+
+            items = [
+                {
+                    "anomaly_id": "final_same",
+                    "text": "話しててもなるほどね。",
+                    "estimated_correction": "話してても、なるほどね。",
+                },
+                {
+                    "anomaly_id": "final_diff",
+                    "text": "どうなんか10月に来る",
+                    "estimated_correction": "どうにか10月に来る",
+                },
+            ]
+            kept = _drop_keep_as_is_items(items, unknowns_path)
+            with open(unknowns_path, encoding="utf-8") as f:
+                after = json.load(f)
+
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["anomaly_id"], "final_diff")
+        by_id = {p["anomaly_id"]: p for p in after}
+        self.assertEqual(by_id["final_same"]["status"], "resolved")
+        self.assertEqual(
+            by_id["final_same"]["resolved_via"], "hypothesis_equals_original_keep"
+        )
+        self.assertEqual(by_id["final_diff"]["status"], "open")
+
+
 class GenerateHypothesesTests(unittest.TestCase):
     def _fake_response(self, payload: str):
         block = MagicMock()

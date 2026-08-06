@@ -167,6 +167,75 @@ def _generate_hypotheses_for_items(items: list[dict], full_text: str) -> int:
     return added
 
 
+# 句読点・記号・空白（表記だけの違いを同一視するための除去対象）
+_TRIVIAL_CHARS_RE = re.compile(r"[\s、。・，．,.!?！?？「」『』（）()——…―ー〜~:：;；]+")
+
+
+def _trivially_equal(a: str, b: str) -> bool:
+    """句読点・空白を除くと同一か（仮説が実質「原文のまま」かの判定）。"""
+    return _TRIVIAL_CHARS_RE.sub("", a or "") == _TRIVIAL_CHARS_RE.sub("", b or "")
+
+
+def _resolve_points_by_ids(
+    unknowns_path: str, anomaly_ids: list[str], via: str
+) -> int:
+    """指定 anomaly_id の未解決項目を resolved にして永続化する。"""
+    if not anomaly_ids or not os.path.isfile(unknowns_path):
+        return 0
+    try:
+        with open(unknowns_path, "r", encoding="utf-8") as f:
+            points = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(points, list):
+        return 0
+    terminal = {"answered", "done", "closed", "resolved"}
+    target = set(anomaly_ids)
+    changed = 0
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("anomaly_id") or "") not in target:
+            continue
+        if str(p.get("status") or "").lower() in terminal:
+            continue
+        p["status"] = "resolved"
+        p["resolved_via"] = via
+        changed += 1
+    if changed:
+        with open(unknowns_path, "w", encoding="utf-8") as f:
+            json.dump(points, f, ensure_ascii=False, indent=2)
+    return changed
+
+
+def _drop_keep_as_is_items(
+    items: list[dict], unknowns_path: str
+) -> list[dict]:
+    """仮説が実質「原文のまま」の項目を質問せず解決する（2026-08-06）。
+
+    仮説生成LLMが文脈を読んでも原文と同じ（句読点差のみ含む）表現しか
+    出せない場合、それは「そのままで意味が通る」判定に等しい。
+    『X』は『X』で合っていますか？という情報価値ゼロの質問を送らない。
+    """
+    kept: list[dict] = []
+    resolved_ids: list[str] = []
+    for item in items:
+        quote = str(item.get("text") or item.get("anomaly_word") or "").strip()
+        fix = str(item.get("estimated_correction") or "").strip()
+        if quote and fix and _trivially_equal(quote, fix):
+            aid = str(item.get("anomaly_id") or "")
+            if aid:
+                resolved_ids.append(aid)
+            continue
+        kept.append(item)
+    if resolved_ids:
+        n = _resolve_points_by_ids(
+            unknowns_path, resolved_ids, "hypothesis_equals_original_keep"
+        )
+        print(f"keep_as_is_resolved={n}")
+    return kept
+
+
 def _asked_questions_path(job_dir: str) -> str:
     return os.path.join(job_dir, ASKED_QUESTIONS_FILENAME)
 
@@ -627,6 +696,7 @@ def _build_final_review_question_payload(
     pending_meta: dict,
     doc_url: str,
     full_text: str = "",
+    unknowns_path: str = "",
 ) -> dict | None:
     """品質ゲート残存問題を「影響度最大」から聞く（2026-08-05 方針）。
 
@@ -663,6 +733,13 @@ def _build_final_review_question_payload(
             print(f"hypotheses_generated={added}")
     except Exception as exc:  # noqa: BLE001
         print(f"hypothesis_generation_error={exc!r}")
+    # 仮説が実質「原文のまま」の項目は質問せず、そのまま扱いで解決する。
+    if unknowns_path:
+        items_for_question = _drop_keep_as_is_items(
+            items_for_question, unknowns_path
+        )
+        if not items_for_question:
+            return None
     if len(items_for_question) >= 2:
         batch_payload = _build_final_review_impact_batch_payload(
             job_id=job_id,
@@ -1513,6 +1590,7 @@ def main() -> None:
             pending_meta=pending_meta,
             doc_url=doc_url,
             full_text=full_text,
+            unknowns_path=unknowns_path,
         )
 
     if result_payload is None and not coherence_pending and regular_pending:
