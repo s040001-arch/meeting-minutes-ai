@@ -17,6 +17,13 @@ DEFAULT_MODEL = os.environ.get(
     "SINGLE_PASS_VERIFIER_MODEL", "gpt-5.6-sol"
 ).strip()
 REPORT_FILENAME = "single_pass_verifier_report.json"
+_QUESTION_BLOCKING_TYPES = {
+    "fact_shift",
+    "unsupported_addition",
+    "important_omission",
+    "unreadable",
+    "back_half_degradation",
+}
 
 _SYSTEM = """\
 あなたは、会話調の整文記録を公開する前の独立監査人です。
@@ -147,6 +154,16 @@ def verify_single_pass_transcript(
         for item in (report.get("findings") or [])
         if isinstance(item, dict)
     ]
+    for item in findings:
+        if (
+            bool(item.get("question_needed"))
+            and str(item.get("type") or "").strip().lower()
+            in _QUESTION_BLOCKING_TYPES
+        ):
+            # A model may call an unreadable factual ambiguity a warning while
+            # simultaneously saying the user must answer it.  The latter is
+            # authoritative for publication safety.
+            item["severity"] = "blocker"
     report["findings"] = findings
     report["status"] = (
         "blocked"
@@ -207,6 +224,56 @@ def apply_deterministic_verifier_repairs(
             }
         )
     return output, applied
+
+
+def verify_and_repair_until_stable(
+    *,
+    raw_text: str,
+    edited_text: str,
+    job_dir: Path,
+    model: str = DEFAULT_MODEL,
+    timeout_sec: int = 600,
+    max_repair_rounds: int = 3,
+) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
+    """Repeat exact repairs and independent verification to a fixed point."""
+    current = edited_text
+    reports: list[dict[str, Any]] = []
+    all_repairs: list[dict[str, str]] = []
+    final_report: dict[str, Any] = {}
+
+    for _ in range(max_repair_rounds):
+        report = verify_single_pass_transcript(
+            raw_text=raw_text,
+            edited_text=current,
+            job_dir=job_dir,
+            model=model,
+            timeout_sec=timeout_sec,
+        )
+        reports.append(report)
+        repaired, repairs = apply_deterministic_verifier_repairs(
+            current, report
+        )
+        if not repairs:
+            final_report = report
+            break
+        current = repaired
+        all_repairs.extend(repairs)
+    else:
+        # The last loop iteration changed text, so audit that final text once
+        # more.  No unaudited repair may reach publication.
+        final_report = verify_single_pass_transcript(
+            raw_text=raw_text,
+            edited_text=current,
+            job_dir=job_dir,
+            model=model,
+            timeout_sec=timeout_sec,
+        )
+        reports.append(final_report)
+
+    final_report = dict(final_report)
+    final_report["verification_rounds"] = reports
+    final_report["deterministic_repairs"] = all_repairs
+    return current, final_report, all_repairs
 
 
 def verifier_findings_to_unknowns(

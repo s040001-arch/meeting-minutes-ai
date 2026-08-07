@@ -26,8 +26,7 @@ def _generate_single_pass_final(
     from detect_unknown_points import extract_single_pass_uncertainties
     from shadow_single_pass_editor import edit_transcript_once
     from single_pass_independent_verifier import (
-        apply_deterministic_verifier_repairs,
-        verify_single_pass_transcript,
+        verify_and_repair_until_stable,
         write_verifier_report,
     )
 
@@ -45,23 +44,13 @@ def _generate_single_pass_final(
             + json.dumps(editor_meta, ensure_ascii=False)
         )
 
-    first_report = verify_single_pass_transcript(
-        raw_text=raw_text,
-        edited_text=edited,
-        job_dir=job_path,
-    )
-    repaired, repairs = apply_deterministic_verifier_repairs(
-        edited, first_report
-    )
-    final_report = first_report
-    if repairs:
-        final_report = verify_single_pass_transcript(
+    repaired, final_report, repairs = (
+        verify_and_repair_until_stable(
             raw_text=raw_text,
-            edited_text=repaired,
+            edited_text=edited,
             job_dir=job_path,
         )
-    final_report["first_round"] = first_report
-    final_report["deterministic_repairs"] = repairs
+    )
     write_verifier_report(job_path, final_report)
 
     # Preserve the regenerated full-context result as the canonical,

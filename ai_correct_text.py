@@ -593,35 +593,21 @@ def correct_full_text(
                 }
                 return text
             # Independent cross-family audit.  Clear, exact fixes are applied
-            # once; remaining blockers are converted to the existing LINE
-            # question queue by detect_unknown_points.py.
+            # to a fixed point; remaining blockers are converted to the
+            # existing LINE question queue by detect_unknown_points.py.
             from single_pass_independent_verifier import (
-                apply_deterministic_verifier_repairs,
-                verify_single_pass_transcript,
+                verify_and_repair_until_stable,
                 write_verifier_report,
             )
 
-            first_report = verify_single_pass_transcript(
+            output, final_report, verifier_repairs = (
+                verify_and_repair_until_stable(
                 raw_text=text,
                 edited_text=output,
                 job_dir=Path(job_dir),
-            )
-            repaired_output, verifier_repairs = (
-                apply_deterministic_verifier_repairs(
-                    output, first_report
                 )
             )
-            final_report = first_report
-            if verifier_repairs:
-                final_report = verify_single_pass_transcript(
-                    raw_text=text,
-                    edited_text=repaired_output,
-                    job_dir=Path(job_dir),
-                )
-            final_report["first_round"] = first_report
-            final_report["deterministic_repairs"] = verifier_repairs
             write_verifier_report(Path(job_dir), final_report)
-            output = repaired_output
             verifier_findings = list(
                 final_report.get("findings") or []
             )

@@ -4,11 +4,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from detect_unknown_points import extract_single_pass_uncertainties
 from single_pass_independent_verifier import (
     apply_deterministic_verifier_repairs,
+    verify_and_repair_until_stable,
     verifier_findings_to_unknowns,
 )
 
@@ -26,6 +27,61 @@ class SinglePassUncertaintyTests(unittest.TestCase):
 
 
 class IndependentVerifierRepairTests(unittest.TestCase):
+    def test_question_required_unreadable_warning_is_promoted(self) -> None:
+        from single_pass_independent_verifier import (
+            verify_single_pass_transcript,
+        )
+
+        payload = {
+            "status": "pass",
+            "findings": [
+                {
+                    "severity": "warning",
+                    "type": "unreadable",
+                    "raw_quote": "raw",
+                    "edited_quote": "broken",
+                    "issue": "意味を取れない",
+                    "question_needed": True,
+                    "hypothesis": "",
+                    "replacement": "",
+                }
+            ],
+            "summary": "",
+        }
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "output": [
+                {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": json.dumps(
+                                payload, ensure_ascii=False
+                            ),
+                        }
+                    ]
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "single_pass_independent_verifier."
+            "resolve_openai_api_key",
+            return_value=("key", "test"),
+        ), patch(
+            "single_pass_independent_verifier.requests.post",
+            return_value=response,
+        ):
+            report = verify_single_pass_transcript(
+                raw_text="raw",
+                edited_text="broken",
+                job_dir=Path(tmp),
+            )
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(
+            report["findings"][0]["severity"], "blocker"
+        )
+
     def test_applies_exact_unique_non_question_repair(self) -> None:
         report = {
             "findings": [
@@ -87,6 +143,49 @@ class IndependentVerifierRepairTests(unittest.TestCase):
             "single_pass_independent_verifier",
         )
 
+    def test_repeats_repairs_until_verified_fixed_point(self) -> None:
+        reports = [
+            {
+                "status": "pass",
+                "findings": [
+                    {
+                        "severity": "warning",
+                        "question_needed": False,
+                        "edited_quote": "A",
+                        "replacement": "B",
+                        "issue": "first",
+                    }
+                ],
+            },
+            {
+                "status": "blocked",
+                "findings": [
+                    {
+                        "severity": "blocker",
+                        "question_needed": False,
+                        "edited_quote": "B",
+                        "replacement": "C",
+                        "issue": "second",
+                    }
+                ],
+            },
+            {"status": "pass", "findings": []},
+        ]
+        with patch(
+            "single_pass_independent_verifier."
+            "verify_single_pass_transcript",
+            side_effect=reports,
+        ) as verifier:
+            text, report, repairs = verify_and_repair_until_stable(
+                raw_text="raw",
+                edited_text="A",
+                job_dir=Path("."),
+            )
+        self.assertEqual(text, "C")
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(len(repairs), 2)
+        self.assertEqual(verifier.call_count, 3)
+
 
 class GenerateSinglePassFinalTests(unittest.TestCase):
     def test_regenerates_from_raw_and_writes_canonical_after_qa(self) -> None:
@@ -112,8 +211,12 @@ class GenerateSinglePassFinalTests(unittest.TestCase):
                 return_value=("Pは70以下です。", editor_meta),
             ), patch(
                 "single_pass_independent_verifier."
-                "verify_single_pass_transcript",
-                return_value=pass_report,
+                "verify_and_repair_until_stable",
+                return_value=(
+                    "Pは70以下です。",
+                    pass_report,
+                    [],
+                ),
             ), patch(
                 "single_pass_independent_verifier.write_verifier_report"
             ):
