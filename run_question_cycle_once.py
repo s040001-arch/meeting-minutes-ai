@@ -1534,6 +1534,17 @@ def write_line_pending_context(
     selection_audit: dict,
 ) -> None:
     """webhook が回答に job_id を付与できるよう、直近の質問コンテキストを共有ファイルへ書く。"""
+    try:
+        from question_mode import resolve_question_mode
+
+        if resolve_question_mode() == "cursor":
+            # Cursor answers are matched against the job-local
+            # question_result.json by cursor_question_bridge.py.  Leaving a
+            # LINE pending record here could misclassify an unrelated LINE
+            # message as this answer.
+            return
+    except Exception:
+        pass
     payload = {
         "written_at": datetime.now(timezone.utc).isoformat(),
         "job_id": job_id,

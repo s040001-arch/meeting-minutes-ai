@@ -154,6 +154,22 @@ def has_pending_unknowns(job_dir: str | Path) -> bool:
     return count_pending_unknowns(job_dir) > 0
 
 
+def has_generated_question(job_dir: str | Path) -> bool:
+    """Return whether the latest question cycle produced an answerable question."""
+    path = Path(job_dir) / "question_result.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and str(payload.get("question_status") or "").strip() == "generated"
+        and bool(str(payload.get("question_id") or "").strip())
+    )
+
+
 def build_questions_review_md(job_dir: str | Path, *, job_id: str = "") -> str:
     """Assemble Cursor-facing review MD (prefers integrated ②③+reader export)."""
     job = Path(job_dir)

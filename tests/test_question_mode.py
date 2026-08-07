@@ -13,6 +13,7 @@ from question_mode import (
     clear_pause_marker,
     clear_pause_on_terminal,
     count_pending_unknowns,
+    has_generated_question,
     has_pending_unknowns,
     is_paused,
     resolve_question_mode,
@@ -105,6 +106,26 @@ class PauseMarkerTests(unittest.TestCase):
             )
             self.assertEqual(count_pending_unknowns(job), 2)
             self.assertTrue(has_pending_unknowns(job))
+
+    def test_has_generated_question_requires_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            path = job / "question_result.json"
+            path.write_text(
+                json.dumps({"question_status": "none"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(has_generated_question(job))
+            path.write_text(
+                json.dumps(
+                    {
+                        "question_status": "generated",
+                        "question_id": "q-1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(has_generated_question(job))
 
 
 class QuestionsReviewMdTests(unittest.TestCase):

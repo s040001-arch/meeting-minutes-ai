@@ -107,6 +107,17 @@ def clear_prior_context_pending() -> None:
 
 def request_prior_context(job_id: str, display_title: str | None) -> bool:
     """ジョブ開始時に LINE で事前情報を依頼する。成功なら True。"""
+    try:
+        from question_mode import resolve_question_mode
+
+        if resolve_question_mode() == "cursor":
+            print(
+                "prior_context_request skipped: "
+                "QUESTION_MODE=cursor (no LINE side effects)"
+            )
+            return False
+    except Exception:
+        pass
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     user_id = os.getenv("LINE_USER_ID", "").strip()
     if not token or not user_id:

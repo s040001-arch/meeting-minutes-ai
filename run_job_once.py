@@ -33,6 +33,7 @@ from progress_tracker import (
     update_job_progress,
 )
 from question_mode import (
+    has_generated_question,
     resolve_question_mode,
     should_pause_for_answers,
     should_send_line as question_mode_should_send_line,
@@ -1428,6 +1429,7 @@ def main() -> None:
             ),
         )
         run_cmd(log_path, qcycle_cmd, "step_5_question_cycle_prepare")
+        question_generated = has_generated_question(job_dir)
         update_job_progress(
             input_root=args.input_root,
             job_id=args.job_id,
@@ -1444,14 +1446,14 @@ def main() -> None:
             job_id=args.job_id,
             message=(
                 "質問の選定が完了しました（回答待ちで一時停止します）"
-                if pause_for_answers
+                if pause_for_answers and question_generated
                 else "質問の選定が完了しました（LINEで送信済み or 質問なし）"
             ),
         )
 
         # QUESTION_MODE=on|cursor|line: 質問生成後に一時停止（exit 0）。
         # 相原が回答→本文確定後、reprocess_job.py --from-step resume で Step 6.x 再開。
-        if pause_for_answers:
+        if pause_for_answers and question_generated:
             current_phase = "question_pause"
             current_step_label = "質問回答待ち"
             review_path = write_questions_review_md(job_dir, job_id=args.job_id)
