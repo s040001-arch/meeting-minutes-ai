@@ -243,7 +243,7 @@ def verify_and_repair_until_stable(
     job_dir: Path,
     model: str = DEFAULT_MODEL,
     timeout_sec: int = 600,
-    max_repair_rounds: int = 3,
+    max_repair_rounds: int = 8,
 ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
     """Repeat exact repairs and independent verification to a fixed point."""
     current = edited_text

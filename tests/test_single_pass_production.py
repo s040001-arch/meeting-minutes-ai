@@ -195,6 +195,39 @@ class IndependentVerifierRepairTests(unittest.TestCase):
         self.assertEqual(len(repairs), 2)
         self.assertEqual(verifier.call_count, 3)
 
+    def test_default_allows_more_than_three_repair_rounds(self) -> None:
+        reports = []
+        for before, after in zip("ABCD", "BCDE"):
+            reports.append(
+                {
+                    "status": "blocked",
+                    "findings": [
+                        {
+                            "severity": "blocker",
+                            "question_needed": False,
+                            "edited_quote": before,
+                            "replacement": after,
+                            "issue": "next repair",
+                        }
+                    ],
+                }
+            )
+        reports.append({"status": "pass", "findings": []})
+        with patch(
+            "single_pass_independent_verifier."
+            "verify_single_pass_transcript",
+            side_effect=reports,
+        ) as verifier:
+            text, report, repairs = verify_and_repair_until_stable(
+                raw_text="raw",
+                edited_text="A",
+                job_dir=Path("."),
+            )
+        self.assertEqual(text, "E")
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(len(repairs), 4)
+        self.assertEqual(verifier.call_count, 5)
+
 
 class GenerateSinglePassFinalTests(unittest.TestCase):
     def test_regenerates_from_raw_and_writes_canonical_after_qa(self) -> None:
