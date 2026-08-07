@@ -1,6 +1,7 @@
 """Tests for QUESTION_MODE pause / resume control (no API calls)."""
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import tempfile
@@ -46,6 +47,26 @@ class ResolveModeTests(unittest.TestCase):
         self.assertEqual(resolve_question_mode("line"), "line")
         self.assertTrue(should_pause_for_answers("line"))
         self.assertTrue(should_send_line("line"))
+
+    def test_cursor_mode_can_expire_back_to_line(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "QUESTION_MODE": "cursor",
+                "QUESTION_MODE_CURSOR_UNTIL": "2026-09-01",
+            },
+            clear=True,
+        ):
+            with patch(
+                "question_mode._today_jst",
+                return_value=datetime.date(2026, 8, 31),
+            ):
+                self.assertEqual(resolve_question_mode(), "cursor")
+            with patch(
+                "question_mode._today_jst",
+                return_value=datetime.date(2026, 9, 1),
+            ):
+                self.assertEqual(resolve_question_mode(), "line")
 
     def test_unknown_fails_closed_to_off(self) -> None:
         self.assertEqual(resolve_question_mode("weird"), "off")

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 PAUSE_FILENAME = "question_pause.json"
 QUESTIONS_REVIEW_MD = "questions_review.md"
@@ -23,8 +24,25 @@ _CURSOR_VALUES = frozenset({"on", "cursor", "md", "true", "1", "yes"})
 _LINE_VALUES = frozenset({"line", "push"})
 
 
+def _today_jst() -> date:
+    return datetime.now(ZoneInfo("Asia/Tokyo")).date()
+
+
+def _cursor_window_has_ended() -> bool:
+    raw = os.environ.get("QUESTION_MODE_CURSOR_UNTIL", "").strip()
+    if not raw:
+        return False
+    try:
+        # Exclusive end date: 2026-09-01 means LINE resumes on September 1.
+        return _today_jst() >= date.fromisoformat(raw)
+    except ValueError:
+        # An invalid optional date must not unexpectedly enable LINE.
+        return False
+
+
 def resolve_question_mode(raw: str | None = None) -> str:
     """Return 'off' | 'cursor' | 'line'."""
+    from_environment = raw is None
     if raw is None:
         raw = os.environ.get("QUESTION_MODE", "")
     v = str(raw or "").strip().lower()
@@ -33,6 +51,8 @@ def resolve_question_mode(raw: str | None = None) -> str:
     if v in _LINE_VALUES:
         return "line"
     if v in _CURSOR_VALUES:
+        if from_environment and _cursor_window_has_ended():
+            return "line"
         return "cursor"
     # Unknown values fail closed to off (no surprise pause in production).
     return "off"
