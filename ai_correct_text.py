@@ -536,6 +536,7 @@ def correct_full_text(
     visible_log_path: str | None = None,
     on_stream_progress: Optional[Callable[[str], None]] = None,
     min_length_ratio: float = _CORRECTION_MIN_LENGTH_RATIO_DEFAULT,
+    job_dir: str | None = None,
 ) -> str:
     """機械補正済みテキストを Claude 4 Opus に一括で渡し補正済み全文を返す。
 
@@ -548,6 +549,115 @@ def correct_full_text(
     if not text:
         return text
 
+    # 2026-08-07 full rollout: one full-context editor replaces the old
+    # 7,000-character chunk rewrite when a job directory is available.
+    # Explicit SINGLE_PASS_TRANSCRIPT_ENABLED=0 restores the legacy path.
+    single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    single_pass_enabled = single_pass_raw not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if single_pass_enabled and job_dir:
+        global _LAST_CORRECT_FULL_TEXT_META
+        try:
+            from pathlib import Path
+
+            from shadow_single_pass_editor import edit_transcript_once
+
+            if on_phase:
+                on_phase("ai_correct")
+            _append_visible_log(
+                visible_log_path,
+                "  全文を一度に読み、会話調の整文記録を生成しています...",
+            )
+            output, meta = edit_transcript_once(
+                text,
+                job_dir=Path(job_dir),
+                model=resolve_correction_model(model),
+                include_job_answers=True,
+            )
+            if not meta.get("complete"):
+                _LAST_CORRECT_FULL_TEXT_META = {
+                    **meta,
+                    "used_fallback": True,
+                    "fallback_reason": (
+                        f"single_pass_incomplete:{meta.get('stop_reason')}"
+                    ),
+                    "chunk_count": 1,
+                    "chunk_results": [],
+                    "pipeline_mode": "single_full_context",
+                }
+                return text
+            # Independent cross-family audit.  Clear, exact fixes are applied
+            # once; remaining blockers are converted to the existing LINE
+            # question queue by detect_unknown_points.py.
+            from single_pass_independent_verifier import (
+                apply_deterministic_verifier_repairs,
+                verify_single_pass_transcript,
+                write_verifier_report,
+            )
+
+            first_report = verify_single_pass_transcript(
+                raw_text=text,
+                edited_text=output,
+                job_dir=Path(job_dir),
+            )
+            repaired_output, verifier_repairs = (
+                apply_deterministic_verifier_repairs(
+                    output, first_report
+                )
+            )
+            final_report = first_report
+            if verifier_repairs:
+                final_report = verify_single_pass_transcript(
+                    raw_text=text,
+                    edited_text=repaired_output,
+                    job_dir=Path(job_dir),
+                )
+            final_report["first_round"] = first_report
+            final_report["deterministic_repairs"] = verifier_repairs
+            write_verifier_report(Path(job_dir), final_report)
+            output = repaired_output
+            verifier_findings = list(
+                final_report.get("findings") or []
+            )
+            _LAST_CORRECT_FULL_TEXT_META = {
+                **meta,
+                "ratio": meta.get("length_ratio"),
+                "used_fallback": False,
+                "fallback_reason": None,
+                "chunk_count": 1,
+                "chunk_results": [],
+                "pipeline_mode": "single_full_context",
+                "independent_verifier_status": final_report.get(
+                    "status"
+                ),
+                "independent_verifier_findings": len(
+                    verifier_findings
+                ),
+                "independent_verifier_repairs": len(verifier_repairs),
+            }
+            return output
+        except Exception as exc:  # noqa: BLE001
+            _LAST_CORRECT_FULL_TEXT_META = {
+                "input_chars": len(text),
+                "output_chars": len(text),
+                "ratio": 1.0,
+                "stop_reason": None,
+                "used_fallback": True,
+                "fallback_reason": f"single_pass_error:{exc!r}",
+                "chunk_count": 1,
+                "chunk_results": [],
+                "pipeline_mode": "single_full_context",
+                "model": resolve_correction_model(model),
+            }
+            print(f"single_pass_editor_failed={exc!r}")
+            return text
+
     resolved_model = resolve_correction_model(model)
     build_info = get_pipeline_build_info()
     env_model_override = os.environ.get("ANTHROPIC_CORRECTION_MODEL", "").strip()
@@ -558,7 +668,6 @@ def correct_full_text(
         f"pipeline_correction_version={build_info['pipeline_correction_version']} "
         f"git_commit={build_info['git_commit']}"
     )
-    global _LAST_CORRECT_FULL_TEXT_META
     chunks = _split_text_for_correction(text)
     _LAST_CORRECT_FULL_TEXT_META = {
         "input_chars": input_chars,

@@ -1756,24 +1756,35 @@ def main() -> None:
     if not os.path.isfile(unknowns_path):
         raise FileNotFoundError(f"unknowns file not found: {unknowns_path}")
 
-    # ナレッジによる自己解決（2026-08-05）: 事前情報・蓄積ナレッジに答えが
-    # 明記されている未解決点は、質問を送らず自動で解決する。
-    try:
-        from knowledge_self_answer import resolve_unknowns_with_knowledge
+    # Cross-job knowledge no longer has authority to change or auto-answer
+    # the primary transcript.  Only human answers from this job are fed back
+    # to the full-context editor.  Explicit legacy mode restores the old path.
+    single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    single_pass_enabled = single_pass_raw not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not single_pass_enabled:
+        try:
+            from knowledge_self_answer import resolve_unknowns_with_knowledge
 
-        _self_answer_text_path = resolve_context_text_path(
-            args.job_id, args.input_root, args.text
-        )
-        if _self_answer_text_path:
-            resolved_n = resolve_unknowns_with_knowledge(
-                unknowns_path=unknowns_path,
-                text_path=_self_answer_text_path,
-                job_dir=job_dir,
+            _self_answer_text_path = resolve_context_text_path(
+                args.job_id, args.input_root, args.text
             )
-            if resolved_n:
-                print(f"knowledge_self_answered_count={resolved_n}")
-    except Exception as e:
-        print(f"knowledge_self_answer_failed={e!r}")
+            if _self_answer_text_path:
+                resolved_n = resolve_unknowns_with_knowledge(
+                    unknowns_path=unknowns_path,
+                    text_path=_self_answer_text_path,
+                    job_dir=job_dir,
+                )
+                if resolved_n:
+                    print(f"knowledge_self_answered_count={resolved_n}")
+        except Exception as e:
+            print(f"knowledge_self_answer_failed={e!r}")
 
     # 鮮度チェック（2026-08-06）: 本文から消えた引用への質問を送らない。
     try:

@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+from pathlib import Path
 
 from meeting_profile import load_meeting_profile, resolve_display_title
 from minutes_quality_gate import run_minutes_quality_gate
@@ -8,6 +10,115 @@ from transcript_paths import resolve_transcript_path_for_minutes
 from transcript_section_summarizer import add_section_headings
 
 READABLE_PARTIAL_NOTICE = "※一部区間は整文を適用できませんでした（逐語のまま掲載しています）"
+
+
+def _single_pass_primary_enabled() -> bool:
+    raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _generate_single_pass_final(
+    job_dir: str,
+) -> tuple[str, str, bool, dict]:
+    """Regenerate the final transcript from raw + this job's human answers."""
+    from detect_unknown_points import extract_single_pass_uncertainties
+    from shadow_single_pass_editor import edit_transcript_once
+    from single_pass_independent_verifier import (
+        apply_deterministic_verifier_repairs,
+        verify_single_pass_transcript,
+        write_verifier_report,
+    )
+
+    job_path = Path(job_dir)
+    raw_path = job_path / "merged_transcript.txt"
+    raw_text = raw_path.read_text(encoding="utf-8")
+    edited, editor_meta = edit_transcript_once(
+        raw_text,
+        job_dir=job_path,
+        include_job_answers=True,
+    )
+    if not editor_meta.get("complete"):
+        raise RuntimeError(
+            "single-pass final editor output incomplete: "
+            + json.dumps(editor_meta, ensure_ascii=False)
+        )
+
+    first_report = verify_single_pass_transcript(
+        raw_text=raw_text,
+        edited_text=edited,
+        job_dir=job_path,
+    )
+    repaired, repairs = apply_deterministic_verifier_repairs(
+        edited, first_report
+    )
+    final_report = first_report
+    if repairs:
+        final_report = verify_single_pass_transcript(
+            raw_text=raw_text,
+            edited_text=repaired,
+            job_dir=job_path,
+        )
+    final_report["first_round"] = first_report
+    final_report["deterministic_repairs"] = repairs
+    write_verifier_report(job_path, final_report)
+
+    # Preserve the regenerated full-context result as the canonical,
+    # answer-aware transcript consumed by the existing question/Docs flow.
+    after_qa_path = job_path / "merged_transcript_after_qa.txt"
+    after_qa_path.write_text(repaired + "\n", encoding="utf-8")
+
+    findings: list[dict] = []
+    for marker in extract_single_pass_uncertainties(repaired):
+        findings.append(
+            {
+                "type": "fragment",
+                "quote": str(marker.get("span_text") or ""),
+                "issue": str(marker.get("reason") or "意味不明"),
+                "fix": "",
+                "confidence": "high",
+                "source": "single_pass_editor",
+            }
+        )
+    for finding in final_report.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("severity") or "").lower() != "blocker":
+            continue
+        findings.append(
+            {
+                # Verifier blockers must reach the existing fail-closed gate.
+                "type": "contradiction",
+                "quote": str(
+                    finding.get("edited_quote")
+                    or finding.get("raw_quote")
+                    or ""
+                ),
+                "issue": str(finding.get("issue") or "事実の矛盾"),
+                "fix": str(finding.get("replacement") or ""),
+                "confidence": "high",
+                "source": "single_pass_independent_verifier",
+            }
+        )
+    stats = {
+        "enabled": True,
+        "single_pass_primary": True,
+        "model": editor_meta.get("model"),
+        "input_chars": len(raw_text),
+        "output_chars": len(repaired),
+        "failed_chunk_idx": [],
+        "total_chunks": 1,
+        "editor_meta": editor_meta,
+        "final_review": {
+            "mode": "apply",
+            "model": final_report.get("model"),
+            "findings": findings,
+            "applied": repairs,
+            "error": final_report.get("error"),
+        },
+    }
+    return repaired, str(raw_path), True, stats
 
 
 def build_minutes_text(
@@ -107,17 +218,25 @@ def main() -> None:
         job_id=args.job_id,
     )
 
-    (
-        transcript_text,
-        minutes_source_path,
-        readable_used,
-        readable_stats,
-    ) = resolve_minutes_transcript_text_with_stats(
-        job_dir=job_dir,
-        source_text=source_text,
-        source_path=in_path,
-        meeting_profile=meeting_profile,
-    )
+    if _single_pass_primary_enabled():
+        (
+            transcript_text,
+            minutes_source_path,
+            readable_used,
+            readable_stats,
+        ) = _generate_single_pass_final(job_dir)
+    else:
+        (
+            transcript_text,
+            minutes_source_path,
+            readable_used,
+            readable_stats,
+        ) = resolve_minutes_transcript_text_with_stats(
+            job_dir=job_dir,
+            source_text=source_text,
+            source_path=in_path,
+            meeting_profile=meeting_profile,
+        )
 
     failed_chunk_idx = list(readable_stats.get("failed_chunk_idx") or [])
     if readable_used and failed_chunk_idx:

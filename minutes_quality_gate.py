@@ -656,7 +656,30 @@ def run_minutes_quality_gate(
     try:
         from fact_token_audit import audit_fact_token_diff
 
-        base_path = Path(job_dir) / "merged_transcript_mechanical.txt"
+        single_pass_raw = os.environ.get(
+            "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+        ).strip().lower()
+        single_pass_enabled = single_pass_raw not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        # A verbatim-to-edited full-context rewrite legitimately normalizes
+        # number/unit spacing (e.g. "30 人" -> "30人"), which makes the old
+        # multiset audit produce dozens of false positives.  The new route is
+        # instead guarded by the cross-family semantic verifier represented
+        # in final_review.  Keep the deterministic audit for the legacy path.
+        base_name = (
+            "__single_pass_uses_independent_verifier__"
+            if single_pass_enabled
+            else "merged_transcript_mechanical.txt"
+        )
+        if single_pass_enabled:
+            report["metrics"]["fact_lineage_check"] = (
+                "replaced_by_independent_verifier"
+            )
+        base_path = Path(job_dir) / base_name
         if base_path.is_file():
             allow_pairs = [
                 {"wrong": r.get("wrong", ""), "correct": r.get("correct", "")}

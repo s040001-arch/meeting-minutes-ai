@@ -18,6 +18,39 @@ from unknown_point_filters import filter_answerable_unknown_points
 logger = logging.getLogger(__name__)
 
 OPUS_DETECTION_MODEL = OPUS_MODEL_ID
+_SINGLE_PASS_UNCERTAINTY_RE = re.compile(
+    r"\[要確認\s*[:：]\s*原文[『「](.*?)[』」]\]"
+)
+
+
+def extract_single_pass_uncertainties(text: str) -> list[dict]:
+    """Convert editor uncertainty markers into the existing LINE queue schema."""
+    items: list[dict] = []
+    seen: set[str] = set()
+    for match in _SINGLE_PASS_UNCERTAINTY_RE.finditer(text or ""):
+        quote = str(match.group(1) or "").strip()
+        if not quote or quote in seen:
+            continue
+        seen.add(quote)
+        start = max(0, match.start() - 80)
+        end = min(len(text), match.end() + 80)
+        items.append(
+            {
+                "type": "fact_unknown",
+                "text": f"原文「{quote}」の正しい内容が不明",
+                "proposal_impact": 9,
+                "reason": (
+                    "全文編集でも文脈から一意に復元できなかった"
+                ),
+                "evidence": text[start:end].replace("\n", " ").strip(),
+                "hypothesis": "",
+                "source": "single_pass_editor",
+                "anomaly_word": quote[:80],
+                "span_text": match.group(0),
+                "status": "open",
+            }
+        )
+    return items
 
 
 def _resolve_detection_api_key() -> str:
@@ -194,9 +227,45 @@ def detect_unknown_points(
     # 後方互換（未使用）
     filename_hints: list[str] | None = None,
     job_context: dict | None = None,
+    job_dir: str | None = None,
 ) -> list[dict]:
     if not text:
         return []
+
+    single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    if single_pass_raw not in {"0", "false", "no", "off"}:
+        items = extract_single_pass_uncertainties(text)
+        if job_dir:
+            try:
+                report_path = os.path.join(
+                    job_dir, "single_pass_verifier_report.json"
+                )
+                if os.path.isfile(report_path):
+                    with open(report_path, "r", encoding="utf-8") as handle:
+                        report = json.load(handle)
+                    from single_pass_independent_verifier import (
+                        verifier_findings_to_unknowns,
+                    )
+
+                    items.extend(
+                        verifier_findings_to_unknowns(report)
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "single-pass verifier findings load failed: %r", exc
+                )
+        items = _dedupe_unknown_items(items)
+        # Preserve this job's human answers as authoritative short-term
+        # memory; replacing unknown_points.json must not erase them.
+        if answered_items:
+            items.extend(answered_items)
+        _append_visible_log(
+            visible_log_path,
+            f"  全文編集者の要確認マーカーを抽出しました（{len(items)}件）",
+        )
+        return items
 
     resolved_model = (
         model

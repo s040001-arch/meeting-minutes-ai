@@ -773,6 +773,19 @@ def main() -> None:
     ai_path = os.path.join(job_dir, "merged_transcript_ai.txt")
     unknowns_path = os.path.join(job_dir, "unknown_points.json")
     regex_unknowns_path = os.path.join(job_dir, "unknown_points_regex.json")
+    _single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    single_pass_enabled = _single_pass_raw not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    log_line(
+        log_path,
+        f"single_pass_transcript_enabled={single_pass_enabled}",
+    )
 
     py = sys.executable
     repo = os.getcwd()
@@ -924,11 +937,14 @@ def main() -> None:
         )
 
         # Step 4.25: Contextual editor (Phase 10 shadow) — optional, non-fatal
-        _editor_enabled = os.environ.get("CONTEXTUAL_EDITOR_ENABLED", "").strip().lower() in (
+        _editor_enabled = (
+            not single_pass_enabled
+            and os.environ.get("CONTEXTUAL_EDITOR_ENABLED", "").strip().lower() in (
             "1",
             "true",
             "yes",
             "on",
+            )
         )
         editor_apply_ran = False
         _editor_apply_report_path = os.path.join(job_dir, "editor_apply_report.json")
@@ -1007,6 +1023,15 @@ def main() -> None:
         log_line(log_path, "step_4_3_ai_correct: starting full_text mode (Claude)")
         # 4.25 apply 実行済みなら編集者出力（ai.txt）を入力にして修正を積み上げる
         correction_input_path = mechanical_path
+        if single_pass_enabled:
+            # New primary route: mechanical/learned output remains as a shadow
+            # artifact only.  The editor starts from the immutable raw text.
+            correction_input_path = merged_path
+            log_line(
+                log_path,
+                "step_4_3_ai_correct: input=raw merged_transcript.txt "
+                "(mechanical/learning changes are shadow-only)",
+            )
         if editor_apply_ran and os.path.isfile(ai_path):
             correction_input_path = ai_path
             log_line(
@@ -1077,6 +1102,7 @@ def main() -> None:
                 visible_log_path=visible_log_path,
                 on_stream_progress=_on_ai_stream_progress,
                 min_length_ratio=args.min_ai_length_ratio,
+                job_dir=job_dir,
             )
             _meta_now = get_last_correct_full_text_meta()
             _fb_reason = str(_meta_now.get("fallback_reason") or "").lower()
@@ -1174,7 +1200,7 @@ def main() -> None:
 
         # Step 4.3r: Reader pass (READER_PASS_ENABLED=on のときのみ・補助機能)
         try:
-            if reader_pass_is_enabled():
+            if reader_pass_is_enabled() and not single_pass_enabled:
                 _rp_proposals = Path(os.path.join(job_dir, "edit_proposals.json"))
                 _rp_result = run_reader_pass(
                     Path(job_dir),
@@ -1222,6 +1248,7 @@ def main() -> None:
             meeting_profile=meeting_profile,
             answered_items=answered_items if answered_items else None,
             visible_log_path=visible_log_path,
+            job_dir=job_dir,
         )
         _save_unknown_points_file(unknowns_path, ai_unknown_points)
         log_line(

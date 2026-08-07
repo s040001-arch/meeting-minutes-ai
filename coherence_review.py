@@ -713,6 +713,20 @@ def main() -> int:
     if not os.path.isdir(job_dir):
         print(f"job_dir not found: {job_dir}", file=sys.stderr)
         return 1
+    single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    if single_pass_raw not in {"0", "false", "no", "off"}:
+        # The primary editor already sees the full raw transcript.  Running
+        # the legacy coherence pass would re-edit text, auto-learn its own
+        # guesses, and recreate the multi-pass failure mode.
+        result = {
+            "status": "skipped_single_pass_primary",
+            "applied": 0,
+            "learned": 0,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     result = run_coherence_review(job_dir)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

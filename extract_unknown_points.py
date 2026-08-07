@@ -93,7 +93,16 @@ def main() -> None:
     with open(args.input, "r", encoding="utf-8") as f:
         text = f.read()
 
-    unknown_points = extract_unknown_points(text)
+    single_pass_raw = os.environ.get(
+        "SINGLE_PASS_TRANSCRIPT_ENABLED", ""
+    ).strip().lower()
+    if single_pass_raw not in {"0", "false", "no", "off"}:
+        # The full-context editor emits explicit [要確認] markers, parsed by
+        # detect_unknown_points.py.  Legacy regex guesses (missing subject,
+        # "数件", etc.) created low-value questions and are disabled here.
+        unknown_points = []
+    else:
+        unknown_points = extract_unknown_points(text)
 
     output_path = args.output or os.path.join(
         os.path.dirname(args.input),
