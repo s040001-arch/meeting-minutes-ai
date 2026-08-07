@@ -614,6 +614,45 @@ def run_unified_finishing(
     except Exception as exc:  # noqa: BLE001
         print(f"unified_confirmed_enforce_failed={exc!r}")
 
+    # 出口の横断検問（2026-08-07）: 各経路のガードは実装がバラバラで
+    # 穴が出る（第2希望→第1希望すり抜け事故）。どの経路が壊しても、
+    # 入口と出口の保護トークン（数字・漢数字・人名）の差分をここで照合し、
+    # 確定修正ペアで説明できない差分は黙って公開せず findings に合流させる
+    # （gate が質問または警告に回す）。
+    try:
+        from fact_token_audit import audit_fact_token_diff
+
+        allow_pairs: list[dict[str, str]] = []
+        try:
+            from confirmed_corrections import collect_confirmed_pairs as _ccp
+
+            if job_dir:
+                allow_pairs = _ccp(job_dir)
+        except Exception as exc:  # noqa: BLE001
+            print(f"unified_sentinel_pairs_failed={exc!r}")
+        sentinel = audit_fact_token_diff(text, out_text, allow_pairs)
+        stats["fact_sentinel_violations"] = len(sentinel)
+        if sentinel:
+            report["fact_sentinel"] = sentinel
+            for violation in sentinel:
+                quote = str(violation.get("quote") or "")
+                if quote and quote not in remaining_quotes:
+                    remaining.append(
+                        {
+                            "type": "fact_sentinel",
+                            "quote": quote,
+                            "issue": str(violation.get("issue") or ""),
+                            "confidence": "high",
+                        }
+                    )
+                    remaining_quotes.add(quote)
+            print(
+                "unified_fact_sentinel="
+                + json.dumps(sentinel, ensure_ascii=False)[:600]
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"unified_fact_sentinel_failed={exc!r}")
+
     report["findings"] = remaining
     stats["auto_applied"] = len(report["applied"])
     stats["queued_candidates"] = len(remaining)

@@ -45,16 +45,13 @@ def is_reader_blocking_finding(finding: dict[str, Any]) -> bool:
     return bool(
         _READER_BLOCKING_ISSUE_RE.search(str(finding.get("issue") or ""))
     )
-# 2026-08-07: 従来は「単位付き数字」と「2桁以上」だけを保護しており、
-# 単位リストにない1桁数字（第2希望・1対1・12歳の「第2」「1」等）が
-# 無防備だった。楽天ジョブで段落修復が「第2希望→第1希望」と事実を
-# 書き換えた実害を受け、全ての数字列を保護対象にする。
-_NUMBER_RE = re.compile(
-    r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
-    r"時|分|万円|円|%|クラス|名)|\d+(?:[.,、〜～-]\d+)*)",
-    re.IGNORECASE,
+# 2026-08-07: 保護トークン定義を fact_token_audit に一元化。
+# 経路ごとの定義の食い違い（第2希望→第1希望すり抜け事故の温床）を防ぐ。
+from fact_token_audit import (  # noqa: E402
+    HONORIFIC_NAME_RE as _HONORIFIC_NAME_RE,
+    KANJI_NUMBER_RE as _KANJI_NUMBER_RE,
+    NUMBER_RE as _NUMBER_RE,
 )
-_HONORIFIC_NAME_RE = re.compile(r"[一-龥ァ-ヶA-Za-z]{1,12}(?:さん|様)")
 _DOMAIN_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:THR|PLS|ChatGPT|Gemini|Claude|Slack|Teams|"
     r"Outlook|SAP|DX|AI|SV|KPI|PFC|A3)(?![A-Za-z0-9])",
@@ -79,7 +76,10 @@ def editorial_transcript_path(job_dir: str) -> str:
 
 
 def _protected_multiset(text: str) -> tuple[Counter[str], Counter[str]]:
-    return Counter(_NUMBER_RE.findall(text)), Counter(_HONORIFIC_NAME_RE.findall(text))
+    numbers = Counter(_NUMBER_RE.findall(text))
+    # 漢数字+助数詞（七割・三ヶ月）と「第N」も事実トークンとして保護する。
+    numbers.update(_KANJI_NUMBER_RE.findall(text))
+    return numbers, Counter(_HONORIFIC_NAME_RE.findall(text))
 
 
 def _restore_ordered_tokens(

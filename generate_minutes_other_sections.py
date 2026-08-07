@@ -338,6 +338,24 @@ def main() -> None:
         timeout_sec=args.timeout_sec,
     )
 
+    # 2026-08-07: セクション整合性チェック。決定事項に明示的合意の根拠が
+    # ない項目（提案止まり）は残論点へ降格し、決定/残論点の矛盾を防ぐ
+    # （楽天ジョブ「3対3で進める」断定事故の再発防止）。失敗時は無修正。
+    try:
+        from section_consistency_check import check_and_fix_sections
+
+        sections, consistency_report = check_and_fix_sections(
+            sections, transcript_md, job_dir=job_dir
+        )
+        print(
+            "section_consistency "
+            f"demoted={len(consistency_report.get('demoted') or [])} "
+            f"conflicts={len(consistency_report.get('conflicts') or [])} "
+            f"error={consistency_report.get('error')}"
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"section_consistency_failed={e!r}")
+
     raw_json_path = os.path.join(job_dir, MINUTES_SECTIONS_RAW_FILENAME)
     with open(raw_json_path, "w", encoding="utf-8") as f:
         json.dump(sections, f, ensure_ascii=False, indent=2)
