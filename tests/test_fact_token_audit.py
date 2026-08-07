@@ -147,6 +147,49 @@ class ConfirmedPairGuardTests(unittest.TestCase):
         self.assertTrue(_pair_is_safe("山谷さん", "山屋さん"))
 
 
+class ScopeGatedReplacementTests(unittest.TestCase):
+    """API がある本番では scope 判定で実在語の誤爆を防ぐ。
+    ここでは decide_scope をモックし、その分岐を検証する。"""
+
+    def test_garble_replaces_all_occurrences(self) -> None:
+        from recognition_batch import apply_batch_corrections
+
+        body = "湯でみの話。次も湯でみを使う。"
+        parsed = [{"anomaly_id": "a1", "word": "湯でみ", "action": "correct", "correction": "Udemy"}]
+        with patch(
+            "learned_corrections_store.decide_scope", return_value="global"
+        ):
+            out, applied = apply_batch_corrections(
+                body, parsed, api_key="k"
+            )
+        self.assertNotIn("湯でみ", out)
+        self.assertEqual(out.count("Udemy"), 2)
+
+    def test_real_word_untagged_not_replaced(self) -> None:
+        # 実在語（scope=context）はタグ付き箇所のみ直し、別文脈の同語は残す
+        from recognition_batch import apply_batch_corrections, VERIFY_TAG
+
+        body = f"部署の移動{VERIFY_TAG}があった。机を移動した。"
+        parsed = [{"anomaly_id": "a1", "word": "移動", "action": "correct", "correction": "異動"}]
+        with patch(
+            "learned_corrections_store.decide_scope", return_value="context"
+        ):
+            out, applied = apply_batch_corrections(
+                body, parsed, api_key="k"
+            )
+        self.assertIn("部署の異動があった", out)
+        self.assertIn("机を移動した", out)  # 物理移動は保護
+
+    def test_no_api_key_replaces_globally(self) -> None:
+        # API 無し（テスト・オフライン）は従来どおり全置換
+        from recognition_batch import apply_batch_corrections
+
+        body = "湯でみの話。次も湯でみを使う。"
+        parsed = [{"anomaly_id": "a1", "word": "湯でみ", "action": "correct", "correction": "Udemy"}]
+        out, applied = apply_batch_corrections(body, parsed)
+        self.assertEqual(out.count("Udemy"), 2)
+
+
 class HeadingValidationTests(unittest.TestCase):
     def test_heading_with_unsupported_number_falls_back(self) -> None:
         # GPT監査#3: 本文にない数値を含む見出しは中立見出しへ

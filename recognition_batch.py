@@ -1705,17 +1705,36 @@ def apply_batch_corrections(
                 for w in (p.get("merged_words") or [])
                 if str(w).strip() and str(w).strip() != word
             ]
-            # タグ付き・タグなしの両方を全出現置換する。以前は elif で
-            # タグ付きが1つでもあるとタグなしの同語をスキップしており、
-            # 「山谷さん」が1/3箇所しか直らない実害が出た（2026-08-05）。
-            # correction が word を含む場合は二重置換になるため2回目は行わない。
+            # タグ付き（＝異常として検出済み）は常に全出現置換する。
+            # 以前は elif でタグ付きが1つでもあるとタグなしの同語をスキップ
+            # しており、「山谷さん」が1/3箇所しか直らない実害が出た
+            # （2026-08-05）。
+            # 一方、タグなし箇所の全文置換は、wrong が実在語だと別文脈の
+            # 正しい語を巻き込む（例: 「移動」→「異動」を物理移動の文にも
+            # 適用）。2026-08-07 ユーザー決定に基づき、タグなし置換は
+            # scope=global（wrong が崩れ表記で実在語でない）に限定する。
+            # scope=context の実在語は、検出済みのタグ付き箇所のみ直す。
+            # scope 判定: API があれば LLM が「実在語か崩れ語か」を判別する。
+            # 「移動」のような実在語は context（別文脈を壊さないよう検出済みの
+            # タグ付き箇所のみ直す）、「湯でみ」のような崩れ語は global。
+            # API が無い場合（テスト・オフライン）は従来どおり global。
+            if api_key:
+                from learned_corrections_store import decide_scope
+
+                scope = decide_scope(word, correction)
+            else:
+                scope = "global"
             replaced_any = False
             for w in target_words:
                 tagged = f"{w}{VERIFY_TAG}"
                 if tagged in out:
                     out = out.replace(tagged, correction)
                     replaced_any = True
-                if w in out and w not in correction:
+                if (
+                    scope == "global"
+                    and w in out
+                    and w not in correction
+                ):
                     out = out.replace(w, correction)
                     replaced_any = True
             if not replaced_any:

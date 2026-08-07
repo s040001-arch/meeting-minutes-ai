@@ -224,6 +224,11 @@ def enforce_confirmed_pairs(
 
     返り値: (適用後テキスト, 適用記録のリスト)
     """
+    # この層は「確定済み修正が最終文に必ず反映される」ことを保証する
+    # 決定論的セーフティネット。ネットワーク・LLM 依存を持ち込まない。
+    # 実在語の別文脈への誤爆は、上流のバッチ回答経路（recognition_batch）
+    # で scope 判定により抑止済み。ここに来るペアは _pair_is_safe と
+    # 列挙マーカーガードを通過した確定ペアのみ。
     out = text
     enforced: list[dict[str, Any]] = []
     for pair in pairs:

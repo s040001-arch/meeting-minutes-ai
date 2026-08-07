@@ -265,8 +265,11 @@ def _queue_unresolved_final_findings(
 
 
 def resolve_minutes_quality_gate_mode() -> str:
+    # 2026-08-07 ユーザー決定: 品質最優先。未設定＝安全設定として enforce。
+    # 問題を検出したら公開を止めて質問（収束型フロー）に回す。
+    # report/off は明示指定時のみ（検証・オフライン用途）。
     raw = os.environ.get("MINUTES_QUALITY_GATE_MODE", "").strip().lower()
-    return raw if raw in _VALID_MODES else "report"
+    return raw if raw in _VALID_MODES else "enforce"
 
 
 def evaluate_minutes_quality(
