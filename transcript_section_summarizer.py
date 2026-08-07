@@ -258,6 +258,45 @@ def _parse_integrated_sections(
     return deduped
 
 
+_KANJI_DIGIT_TRANS = str.maketrans("〇一二三四五六七八九", "0123456789")
+
+
+def _validate_heading_tokens(
+    summary: str, section_text: str, section_no: int
+) -> str:
+    """見出しの事実トークン検証（2026-08-07 GPT監査#3対応）。
+
+    見出しは品質ゲート通過後に LLM が生成するため、本文が正しくても
+    見出しだけが誤った数値・人名を含み得る（未検証のまま公開されていた）。
+    見出しの数字列・人名が対応セクション本文に存在しない場合は、
+    誤導を避けるため中立見出しへフォールバックする。
+    見出しは漢数字→数字の表記変換（七、八割→7-8割）を正当に行うため、
+    本文側を数字に正規化した上で数字列の存在を確認する。
+    """
+    try:
+        from fact_token_audit import HONORIFIC_NAME_RE
+
+        body_norm = section_text.translate(_KANJI_DIGIT_TRANS)
+        missing: list[str] = []
+        for run in re.findall(r"\d+", summary):
+            if run not in body_norm:
+                missing.append(run)
+        for token in HONORIFIC_NAME_RE.findall(summary):
+            base = re.sub(r"(?:さん|様)$", "", token)
+            if base and base not in section_text:
+                missing.append(token)
+        if missing:
+            print(
+                "section_heading_token_mismatch "
+                f"section={section_no} missing={missing} "
+                f"summary={summary[:40]!r}"
+            )
+            return f"（パート{section_no}）"
+    except Exception as exc:  # noqa: BLE001
+        print(f"section_heading_validation_failed={exc!r}")
+    return summary
+
+
 def _assemble_sections_with_offsets(
     full_text: str, offsets_summaries: list[tuple[int, str]]
 ) -> str:
@@ -290,6 +329,7 @@ def _assemble_sections_with_offsets(
         section_text = full_text[effective_start:end_idx].strip()
         if not section_text:
             continue
+        summary = _validate_heading_tokens(summary, section_text, i + 1)
         parts.append(f"{HEADING_PREFIX}{SUMMARY_PREFIX}{summary}\n\n{section_text}")
 
     return "\n\n".join(parts) + "\n"
@@ -437,6 +477,8 @@ def _fallback_mechanical(
         return text.strip() + "\n"
     parts: list[str] = []
     for idx, (sec, summary) in enumerate(zip(sections, summaries), start=1):
+        if summary:
+            summary = _validate_heading_tokens(summary, sec, idx)
         heading = (
             f"{HEADING_PREFIX}{SUMMARY_PREFIX}{summary}"
             if summary

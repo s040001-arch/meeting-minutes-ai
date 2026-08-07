@@ -643,6 +643,64 @@ def run_minutes_quality_gate(
         ),
     }
     report["metrics"]["covered_surfaces"] = len(covered_surfaces)
+
+    # 2026-08-07 GPT監査#1対応: 生成系全体の累積検問（lineage check）。
+    # 統合パス内の検問は入口/出口比較のみで、AI全文補正（step 4.3）が
+    # 壊した事実は基準線に含まれて検出不能だった。ここでは機械補正直後の
+    # テキストを基準線に、公開直前の最終文との保護トークン差分を照合する。
+    # 漢数字はAIが表記ゆれ（7、8割⇔七、八割）で正規化することがあるため
+    # 数字と人名のみを対象にする（誤検知で質問を増やさない）。
+    try:
+        from fact_token_audit import audit_fact_token_diff
+
+        base_path = Path(job_dir) / "merged_transcript_mechanical.txt"
+        if base_path.is_file():
+            allow_pairs = [
+                {"wrong": r.get("wrong", ""), "correct": r.get("correct", "")}
+                for r in audit_rows
+            ]
+            # 編集者パス（4.25）で適用済みの正当な修正も許可する。
+            proposals_path = Path(job_dir) / "edit_proposals.json"
+            if proposals_path.is_file():
+                try:
+                    doc = json.loads(proposals_path.read_text(encoding="utf-8"))
+                    for prop in doc.get("proposals") or []:
+                        if isinstance(prop, dict) and prop.get("applied"):
+                            allow_pairs.append(
+                                {
+                                    "wrong": str(prop.get("span_before") or ""),
+                                    "correct": str(prop.get("span_after") or ""),
+                                }
+                            )
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    pass
+            lineage_violations = [
+                v
+                for v in audit_fact_token_diff(
+                    base_path.read_text(encoding="utf-8"), text, allow_pairs
+                )
+                if v.get("kind") in ("number", "name")
+            ]
+            report["metrics"]["fact_lineage_violations"] = len(
+                lineage_violations
+            )
+            if lineage_violations:
+                report["blockers"].append(
+                    {
+                        "code": "fact_lineage_changed",
+                        "message": (
+                            "機械補正後から最終文までの間に、確定修正で説明"
+                            "できない数値・人名の変化がある（AI補正含む全"
+                            "工程の累積検問）"
+                        ),
+                        "count": len(lineage_violations),
+                        "examples": lineage_violations[:10],
+                    }
+                )
+                report["status"] = "blocked"
+    except Exception as exc:  # noqa: BLE001
+        print(f"quality_gate_fact_lineage_failed={exc!r}")
+
     if report["status"] == "blocked":
         queued = _queue_unresolved_final_findings(
             job_dir=job_dir,

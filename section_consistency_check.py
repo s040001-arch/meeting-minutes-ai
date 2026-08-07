@@ -112,6 +112,15 @@ def check_and_fix_sections(
             continue
         verdict_by_index[index] = row
 
+    # 2026-08-07 GPT監査指摘: LLM応答に欠けた index を無言で explicit 扱い
+    # すると未検証の決定が素通りする。全 index の判定が揃わない場合は
+    # 技術的失敗として無修正で返す（判定なし＝根拠あり、とはしない）。
+    missing = [i for i in range(len(decisions)) if i not in verdict_by_index]
+    if missing:
+        report["error"] = f"consistency_incomplete_rows:missing={missing}"
+        _write_report(job_dir, report)
+        return sections, report
+
     kept: list[str] = []
     new_open: list[str] = list(open_issues)
     for index, decision in enumerate(decisions):

@@ -102,6 +102,25 @@ class SectionConsistencyTests(unittest.TestCase):
         self.assertIn("有力案の段階", fixed["open_issues"][1])
         self.assertEqual(len(report["demoted"]), 1)
 
+    def test_incomplete_rows_fail_open_not_explicit(self) -> None:
+        # GPT監査#4: LLM応答に欠けたindexを無言でexplicit扱いしない
+        from section_consistency_check import check_and_fix_sections
+
+        sections = {
+            "decisions": ["決定A", "決定B", "決定C"],
+            "open_issues": [],
+        }
+        client = MagicMock()
+        client.messages.create.return_value = self._fake_response(
+            [{"index": 0, "evidence": "explicit", "quote": "", "conflict": None}]
+        )
+        with patch("anthropic.Anthropic", return_value=client), patch.dict(
+            "os.environ", {"ANTHROPIC_API_KEY": "test"}
+        ):
+            fixed, report = check_and_fix_sections(sections, "text")
+        self.assertEqual(fixed["decisions"], ["決定A", "決定B", "決定C"])
+        self.assertIn("consistency_incomplete_rows", report["error"])
+
     def test_fail_open_on_llm_error(self) -> None:
         from section_consistency_check import check_and_fix_sections
 
@@ -114,6 +133,51 @@ class SectionConsistencyTests(unittest.TestCase):
             fixed, report = check_and_fix_sections(sections, "text")
         self.assertEqual(fixed["decisions"], ["何かの決定"])
         self.assertIn("consistency_llm_failed", report["error"])
+
+
+class ConfirmedPairGuardTests(unittest.TestCase):
+    def test_enum_marker_wrong_rejected(self) -> None:
+        # GPT監査#5: 「2.」等の列挙マーカーは全文強制置換の対象にしない
+        from confirmed_corrections import _pair_is_safe
+
+        self.assertFalse(_pair_is_safe("2.", "2. こういう"))
+        self.assertFalse(_pair_is_safe("３）", "何か"))
+        self.assertFalse(_pair_is_safe("12", "13"))
+        self.assertTrue(_pair_is_safe("湯でみ", "Udemy"))
+        self.assertTrue(_pair_is_safe("山谷さん", "山屋さん"))
+
+
+class HeadingValidationTests(unittest.TestCase):
+    def test_heading_with_unsupported_number_falls_back(self) -> None:
+        # GPT監査#3: 本文にない数値を含む見出しは中立見出しへ
+        from transcript_section_summarizer import _validate_heading_tokens
+
+        result = _validate_heading_tokens(
+            "59歳対象層への施策", "対象は57歳の層です。施策を検討した。", 3
+        )
+        self.assertEqual(result, "（パート3）")
+
+    def test_heading_kanji_digit_normalization_passes(self) -> None:
+        from transcript_section_summarizer import _validate_heading_tokens
+
+        result = _validate_heading_tokens(
+            "7-8割が第1〜第2希望配属",
+            "大体七、八割が第1希望から第2希望のところに来ている",
+            1,
+        )
+        self.assertEqual(result, "7-8割が第1〜第2希望配属")
+
+    def test_heading_name_check(self) -> None:
+        from transcript_section_summarizer import _validate_heading_tokens
+
+        result = _validate_heading_tokens(
+            "田中様の提案説明", "山屋様が提案を説明した。", 2
+        )
+        self.assertEqual(result, "（パート2）")
+        result2 = _validate_heading_tokens(
+            "山屋様の提案説明", "山屋さんが提案を説明した。", 2
+        )
+        self.assertEqual(result2, "山屋様の提案説明")
 
 
 if __name__ == "__main__":

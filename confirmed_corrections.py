@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 # 盲目置換してよいペアの上限。これを超えるものは文・句レベルとみなして
@@ -23,6 +24,13 @@ from typing import Any
 _MAX_WRONG_LEN = 20
 _MAX_RIGHT_LEN = 30
 _MIN_WRONG_LEN = 2
+
+
+# 2026-08-07 GPT監査#5対応: 列挙マーカーや数字・記号だけの wrong は
+# 全文置換すると小数・箇条書き等の無関係箇所を巻き込む（「2.」混入事故の
+# 増幅経路）。日本語・英字を含まないペアは強制置換の対象にしない。
+_ENUM_LIKE_RE = re.compile(r"^[0-9０-９]{1,3}[.．、)）]?$")
+_HAS_WORD_CHAR_RE = re.compile(r"[ぁ-んァ-ヶ一-龥A-Za-z]")
 
 
 def _pair_is_safe(wrong: str, right: str) -> bool:
@@ -36,6 +44,9 @@ def _pair_is_safe(wrong: str, right: str) -> bool:
         return False
     # wrong が right の部分文字列だと置換が発散する（山屋→山屋さん等）。
     if wrong in right:
+        return False
+    # 列挙マーカー（2. / ３） 等）や語文字を含まない wrong は誤爆リスク。
+    if _ENUM_LIKE_RE.match(wrong) or not _HAS_WORD_CHAR_RE.search(wrong):
         return False
     return True
 
