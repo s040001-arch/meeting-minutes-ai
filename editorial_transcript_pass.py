@@ -45,9 +45,13 @@ def is_reader_blocking_finding(finding: dict[str, Any]) -> bool:
     return bool(
         _READER_BLOCKING_ISSUE_RE.search(str(finding.get("issue") or ""))
     )
+# 2026-08-07: 従来は「単位付き数字」と「2桁以上」だけを保護しており、
+# 単位リストにない1桁数字（第2希望・1対1・12歳の「第2」「1」等）が
+# 無防備だった。楽天ジョブで段落修復が「第2希望→第1希望」と事実を
+# 書き換えた実害を受け、全ての数字列を保護対象にする。
 _NUMBER_RE = re.compile(
     r"(?:\d+(?:[.,、〜～-]\d+)*(?:kg|人|店|店舗|日|ヶ月|月|年|行|割|回|社|"
-    r"時|分|万円|円|%|クラス|名)|\d{2,}(?:[.,、〜～-]\d+)*)",
+    r"時|分|万円|円|%|クラス|名)|\d+(?:[.,、〜～-]\d+)*)",
     re.IGNORECASE,
 )
 _HONORIFIC_NAME_RE = re.compile(r"[一-龥ァ-ヶA-Za-z]{1,12}(?:さん|様)")

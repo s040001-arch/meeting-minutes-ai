@@ -12,6 +12,46 @@ from editorial_transcript_pass import (
 )
 
 
+class NumberGuardTests(unittest.TestCase):
+    def test_single_digit_ordinals_are_protected(self) -> None:
+        # 2026-08-07 実害: 「第2希望→第1希望」を段落修復がすり抜けた。
+        # 単位リストにない1桁数字も保護されること。
+        from editorial_transcript_pass import _validate_editorial_paragraph
+
+        errors = _validate_editorial_paragraph(
+            "大体七、八割が第2希望のやつが来てるんで前向きだね",
+            "大体七、八割が第1希望のところに来ているんで前向きだね",
+            None,
+        )
+        self.assertTrue(
+            any("numeric_tokens_changed" in e for e in errors), errors
+        )
+
+    def test_pair_ratio_numbers_protected(self) -> None:
+        from editorial_transcript_pass import _validate_editorial_paragraph
+
+        errors = _validate_editorial_paragraph(
+            "今考えているのは1対1にするかということですけれども",
+            "今考えているのは3対3にするかということですけれども",
+            None,
+        )
+        self.assertTrue(
+            any("numeric_tokens_changed" in e for e in errors), errors
+        )
+
+    def test_unchanged_numbers_pass(self) -> None:
+        from editorial_transcript_pass import _validate_editorial_paragraph
+
+        errors = _validate_editorial_paragraph(
+            "うちは1日の研修で75万っていうのでやってるんですよ、はい、あの",
+            "うちは1日の研修で75万でやっています",
+            None,
+        )
+        self.assertFalse(
+            any("numeric_tokens_changed" in e for e in errors), errors
+        )
+
+
 class EditorialTranscriptPassTests(unittest.TestCase):
     def test_applies_reader_facing_rewrite_when_protected_facts_survive(self) -> None:
         source = (
