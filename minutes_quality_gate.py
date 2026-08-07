@@ -72,6 +72,11 @@ def collect_covered_surfaces(
         status = str(p.get("status") or "").strip().lower()
         if status not in _COVERED_TERMINAL_STATUSES:
             continue
+        if str(p.get("resolved_via") or "") == "final_readable_text":
+            # This only means a prior generated version no longer contained
+            # the quote.  It is not a human confirmation and must not suppress
+            # the same defect if a later full regeneration reintroduces it.
+            continue
         for key in ("span_text", "text"):
             s = str(p.get(key) or "").strip()
             if len(s) >= _COVERED_MIN_SURFACE_LEN:
@@ -198,7 +203,13 @@ def _queue_unresolved_final_findings(
     # 重なり判定用: final_review 由来の既存項目（回答済み含む）の引用一覧。
     # 回答済みの箇所を再監査が別範囲で再検出しても、二度と聞き直さない。
     final_existing = [
-        x for x in existing if str(x.get("source") or "") == "final_review"
+        x
+        for x in existing
+        if str(x.get("source") or "")
+        in {
+            "final_review",
+            "single_pass_independent_verifier",
+        }
     ]
     # 確定領域・回答済み領域（covered surfaces）: 人間の回答・自動適用で
     # 確定した「修正後の文」と回答済みの引用スパン。再監査がこれらを
@@ -229,15 +240,31 @@ def _queue_unresolved_final_findings(
             )
             if overlap is not None:
                 status = str(overlap.get("status") or "").strip().lower()
-                if status in terminal_statuses:
+                stale_generated_resolution = (
+                    str(overlap.get("resolved_via") or "")
+                    == "final_readable_text"
+                )
+                if (
+                    status in terminal_statuses
+                    and not stale_generated_resolution
+                ):
                     # 同じ箇所は回答済み。再質問しない。
                     continue
                 # 未回答の同一箇所: 既存項目を活かす（新規追加しない）。
                 item = overlap
                 anomaly_id = str(overlap.get("anomaly_id") or anomaly_id)
+        finding_source = str(
+            finding.get("source") or "final_review"
+        ).strip()
+        payload_source = (
+            "single_pass_independent_verifier"
+            if finding_source
+            == "single_pass_independent_verifier"
+            else "final_review"
+        )
         payload = {
             "type": "final_review",
-            "source": "final_review",
+            "source": payload_source,
             "anomaly_id": anomaly_id,
             "anomaly_word": quote,
             "text": quote,
@@ -255,6 +282,7 @@ def _queue_unresolved_final_findings(
             final_existing.append(payload)
         else:
             item.update(payload)
+            item.pop("resolved_via", None)
         queued += 1
     if queued:
         path.write_text(

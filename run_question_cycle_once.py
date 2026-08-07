@@ -757,7 +757,11 @@ def _filter_pending_unknown_points(unknown_points: list[dict]) -> tuple[list[dic
 def _is_coherence_review_point(item: dict) -> bool:
     return (
         str(item.get("type") or "") == "coherence_review"
-        or str(item.get("source") or "") == "coherence_review"
+        or str(item.get("source") or "")
+        in {
+            "coherence_review",
+            "single_pass_independent_verifier",
+        }
     )
 
 

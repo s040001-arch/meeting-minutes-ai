@@ -322,6 +322,60 @@ class MinutesQualityGateTests(unittest.TestCase):
         self.assertIn("回答済みの引用スパンがこちらです", surfaces)
         self.assertNotIn("未回答の引用スパンは含めない", surfaces)
 
+    def test_generated_stale_resolution_is_not_authoritative(self) -> None:
+        from minutes_quality_gate import collect_covered_surfaces
+
+        stale = {
+            "status": "resolved",
+            "resolved_via": "final_readable_text",
+            "text": "再生成で再発し得る崩れの引用スパン",
+        }
+        self.assertNotIn(
+            stale["text"],
+            collect_covered_surfaces("", [stale]),
+        )
+
+    def test_reopens_stale_generated_resolution_for_verifier(self) -> None:
+        quote = "ホームページを更新すると最新版が出て記憶する"
+        existing = [
+            {
+                "type": "final_review",
+                "source": "final_review",
+                "anomaly_id": "old",
+                "text": quote,
+                "span_text": quote,
+                "status": "resolved",
+                "resolved_via": "final_readable_text",
+            }
+        ]
+        finding = {
+            "type": "contradiction",
+            "confidence": "high",
+            "quote": quote,
+            "issue": "意味を取れない",
+            "fix": "",
+            "source": "single_pass_independent_verifier",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unknown_points.json"
+            path.write_text(
+                json.dumps(existing, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            count = _queue_unresolved_final_findings(
+                job_dir=tmp,
+                text=f"前文。{quote}。後文。",
+                readable_stats=self._stats(findings=[finding]),
+            )
+            points = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(count, 1)
+        self.assertEqual(points[0]["status"], "open")
+        self.assertNotIn("resolved_via", points[0])
+        self.assertEqual(
+            points[0]["source"],
+            "single_pass_independent_verifier",
+        )
+
     def test_overlapping_quote_does_not_create_duplicate(self) -> None:
         # 2026-08-06: 再監査が同じ箇所を微妙に違う引用範囲で返しても、
         # 既存項目を更新するだけで新規項目を増やさない。

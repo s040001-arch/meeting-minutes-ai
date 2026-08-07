@@ -25,6 +25,15 @@ class SinglePassUncertaintyTests(unittest.TestCase):
         self.assertEqual(items[0]["anomaly_word"], "地下16")
         self.assertEqual(items[0]["source"], "single_pass_editor")
 
+    def test_independent_verifier_uses_direct_question_path(self) -> None:
+        from run_question_cycle_once import _is_coherence_review_point
+
+        self.assertTrue(
+            _is_coherence_review_point(
+                {"source": "single_pass_independent_verifier"}
+            )
+        )
+
 
 class IndependentVerifierRepairTests(unittest.TestCase):
     def test_question_required_unreadable_warning_is_promoted(self) -> None:
