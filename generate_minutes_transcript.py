@@ -5,9 +5,10 @@ from pathlib import Path
 
 from meeting_profile import load_meeting_profile, resolve_display_title
 from minutes_quality_gate import run_minutes_quality_gate
+from minutes_transcript_sections import generate_sectioned_transcript
 from readable_transcript import resolve_minutes_transcript_text_with_stats
 from transcript_paths import resolve_transcript_path_for_minutes
-from transcript_section_summarizer import add_section_headings
+from transcript_section_summarizer import INTEGRATED_MIN_INPUT_CHARS
 
 READABLE_PARTIAL_NOTICE = "※一部区間は整文を適用できませんでした（逐語のまま掲載しています）"
 
@@ -153,15 +154,19 @@ def _record_readable_fallback_progress(
         print(f"readable_fallback_progress_record_failed={e!r}")
 
 
-def _add_section_headings_safe(
-    transcript_text: str, meeting_profile: dict | None
+def _annotate_transcript_with_section_headings(
+    transcript_text: str,
+    job_dir: str,
 ) -> str:
-    """発言録に分節サマリ見出しを付与する。失敗時は原文をそのまま返す(非致命)。"""
-    try:
-        return add_section_headings(transcript_text, meeting_profile)
-    except Exception as e:
-        print(f"transcript_section_headings_failed={e!r}")
+    """Insert per-section summaries. Long transcripts fail closed if none appear."""
+    if len(transcript_text.strip()) < INTEGRATED_MIN_INPUT_CHARS:
         return transcript_text
+    annotated = generate_sectioned_transcript(
+        job_dir=job_dir,
+        transcript_text=transcript_text,
+    )
+    print("transcript_section_headings=required")
+    return annotated
 
 
 def main() -> None:
@@ -252,8 +257,10 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"speaker_turn_breaks_failed={e!r}")
 
-    # 分節サマリ見出しを差し込み(Sonnet 数 call、~10秒)。失敗時は原文を使用。
-    annotated = _add_section_headings_safe(transcript_text, meeting_profile)
+    # 分節サマリ見出しを差し込む。長文で見出しが付かない場合は公開しない。
+    annotated = _annotate_transcript_with_section_headings(
+        transcript_text, job_dir
+    )
     output_text = build_minutes_text(
         title=title,
         transcript_text=annotated,

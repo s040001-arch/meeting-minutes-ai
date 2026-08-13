@@ -291,14 +291,60 @@ def _validate_heading_tokens(
                 f"section={section_no} missing={missing} "
                 f"summary={summary[:40]!r}"
             )
-            return f"（パート{section_no}）"
+            return ""
     except Exception as exc:  # noqa: BLE001
         print(f"section_heading_validation_failed={exc!r}")
     return summary
 
 
+_PLACEHOLDER_HEADING_RE = re.compile(r"^（パート\d+）$")
+
+
+def _is_placeholder_heading(summary: str) -> bool:
+    text = str(summary or "").strip()
+    return not text or bool(_PLACEHOLDER_HEADING_RE.match(text))
+
+
+def _heading_without_unverified_numbers(summary: str) -> str:
+    stripped = re.sub(r"\d+(?:\.\d+)?%?", "", summary)
+    return _clean_summary_line(stripped)
+
+
+def _finalize_heading(
+    summary: str,
+    section_text: str,
+    section_no: int,
+    meeting_profile: dict[str, Any] | None,
+) -> str:
+    """Return a concrete heading. Never publish '（パートN）'."""
+    checked = _validate_heading_tokens(summary, section_text, section_no)
+    if not _is_placeholder_heading(checked):
+        return checked
+    repaired = _regenerate_invalid_heading(section_text, meeting_profile)
+    if repaired:
+        checked = _validate_heading_tokens(
+            repaired, section_text, section_no
+        )
+        if not _is_placeholder_heading(checked):
+            return checked
+        stripped = _heading_without_unverified_numbers(repaired)
+        if stripped:
+            checked = _validate_heading_tokens(
+                stripped, section_text, section_no
+            )
+            if not _is_placeholder_heading(checked):
+                return checked
+            from fact_token_audit import HONORIFIC_NAME_RE
+
+            if not HONORIFIC_NAME_RE.search(stripped):
+                return stripped
+    return "この区間の議論"
+
+
 def _assemble_sections_with_offsets(
-    full_text: str, offsets_summaries: list[tuple[int, str]]
+    full_text: str,
+    offsets_summaries: list[tuple[int, str]],
+    meeting_profile: dict[str, Any] | None = None,
 ) -> str:
     """offsets_summaries: [(start_idx, summary), ...] (ソート済み)。
 
@@ -329,7 +375,9 @@ def _assemble_sections_with_offsets(
         section_text = full_text[effective_start:end_idx].strip()
         if not section_text:
             continue
-        summary = _validate_heading_tokens(summary, section_text, i + 1)
+        summary = _finalize_heading(
+            summary, section_text, i + 1, meeting_profile
+        )
         parts.append(f"{HEADING_PREFIX}{SUMMARY_PREFIX}{summary}\n\n{section_text}")
 
     return "\n\n".join(parts) + "\n"
@@ -366,7 +414,11 @@ def _try_integrated_split(
             f"total={len(text)} coverage={coverage:.2f}"
         )
         return None
-    return _assemble_sections_with_offsets(text, offsets_summaries)
+    return _assemble_sections_with_offsets(
+        text,
+        offsets_summaries,
+        meeting_profile,
+    )
 
 
 # ============================================================
@@ -442,6 +494,34 @@ def _summarize_one_fallback(
     return _clean_summary_line(raw)
 
 
+def _regenerate_invalid_heading(
+    section_text: str,
+    meeting_profile: dict[str, Any] | None,
+) -> str:
+    """Retry a fact-unsafe integrated heading using only its own section."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return ""
+    client = anthropic.Anthropic(api_key=api_key)
+    profile_block = format_meeting_profile_for_prompt(meeting_profile or {})
+    prompt = cached_system(
+        (
+            "あなたは議事録の分節見出しを修復します。"
+            "渡された1区間だけを根拠に、15〜30字の具体的な体言止め見出しを"
+            "1行だけ返してください。本文に存在しない数値・人名・固有名詞を"
+            "絶対に追加しないでください。数字が本文にない場合は数字を使わず、"
+            "この区間で実際に話された主要な論点・提案・出来事を表してください。"
+            "句点、引用符、前置き、説明、コードフェンスは禁止です。"
+        ),
+        profile_block,
+    )
+    try:
+        return _summarize_one_fallback(client, section_text, prompt)
+    except Exception as exc:  # noqa: BLE001
+        print(f"invalid_section_heading_regeneration_failed={exc!r}")
+        return ""
+
+
 def _summarize_sections_parallel(
     sections: list[str], meeting_profile: dict[str, Any] | None
 ) -> list[str]:
@@ -477,13 +557,8 @@ def _fallback_mechanical(
         return text.strip() + "\n"
     parts: list[str] = []
     for idx, (sec, summary) in enumerate(zip(sections, summaries), start=1):
-        if summary:
-            summary = _validate_heading_tokens(summary, sec, idx)
-        heading = (
-            f"{HEADING_PREFIX}{SUMMARY_PREFIX}{summary}"
-            if summary
-            else f"{HEADING_PREFIX}{SUMMARY_PREFIX}（パート{idx}）"
-        )
+        summary = _finalize_heading(summary, sec, idx, meeting_profile)
+        heading = f"{HEADING_PREFIX}{SUMMARY_PREFIX}{summary}"
         parts.append(f"{heading}\n\n{sec}")
     return "\n\n".join(parts) + "\n"
 

@@ -198,7 +198,7 @@ class HeadingValidationTests(unittest.TestCase):
         result = _validate_heading_tokens(
             "59歳対象層への施策", "対象は57歳の層です。施策を検討した。", 3
         )
-        self.assertEqual(result, "（パート3）")
+        self.assertEqual(result, "")
 
     def test_heading_kanji_digit_normalization_passes(self) -> None:
         from transcript_section_summarizer import _validate_heading_tokens
@@ -216,7 +216,7 @@ class HeadingValidationTests(unittest.TestCase):
         result = _validate_heading_tokens(
             "田中様の提案説明", "山屋様が提案を説明した。", 2
         )
-        self.assertEqual(result, "（パート2）")
+        self.assertEqual(result, "")
         result2 = _validate_heading_tokens(
             "山屋様の提案説明", "山屋さんが提案を説明した。", 2
         )
