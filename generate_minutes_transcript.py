@@ -158,7 +158,7 @@ def _annotate_transcript_with_section_headings(
     transcript_text: str,
     job_dir: str,
 ) -> str:
-    """Insert per-section summaries. Long transcripts fail closed if none appear."""
+    """Insert meaning-based section summaries. Skip only tiny fragments."""
     if len(transcript_text.strip()) < INTEGRATED_MIN_INPUT_CHARS:
         return transcript_text
     annotated = generate_sectioned_transcript(
