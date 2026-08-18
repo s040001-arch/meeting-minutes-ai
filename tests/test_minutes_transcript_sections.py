@@ -119,6 +119,20 @@ class AnnotateTranscriptHeadingsTests(unittest.TestCase):
             short,
         )
 
+    def test_short_meeting_still_requires_headings(self) -> None:
+        meeting = "日程を確認します。" * 50
+        self.assertGreaterEqual(len(meeting), INTEGRATED_MIN_INPUT_CHARS)
+        self.assertLess(len(meeting), 1500)
+        with patch(
+            "generate_minutes_transcript.generate_sectioned_transcript",
+            return_value="### ▼日程確認\n\n" + meeting,
+        ) as generate:
+            result = _annotate_transcript_with_section_headings(
+                meeting, "job_dir"
+            )
+        generate.assert_called_once()
+        self.assertIn("### ▼日程確認", result)
+
     def test_long_transcript_requires_headings(self) -> None:
         long_text = "会議を始めます。" * 200
         self.assertGreaterEqual(len(long_text), INTEGRATED_MIN_INPUT_CHARS)

@@ -42,7 +42,7 @@ INTEGRATED_MODEL = OPUS_MODEL_ID
 INTEGRATED_MAX_TOKENS = 8000
 # 3時間の入力で Opus は 3-5 分かかる可能性があるため余裕を持たせる
 INTEGRATED_TIMEOUT_SEC = 480
-INTEGRATED_MIN_INPUT_CHARS = 1500  # これ未満は見出し無し
+INTEGRATED_MIN_INPUT_CHARS = 400  # これ未満（断片）だけ見出し無し。短い会議も要約する
 INTEGRATED_MIN_SECTIONS = 2  # 最低限の分節数(下回ったらフォールバック)
 INTEGRATED_COVERAGE_MIN_RATIO = 0.75  # マッチした境界で本文の何割をカバーすべきか
 
